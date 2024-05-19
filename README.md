@@ -53,4 +53,4 @@ The database itself is written in Zig and based on RocksDB as a foundational sto
 
 Graphon is a very small project. It tries to be fast in many ways, but the query planner is not going to be very advanced. It won't perfectly optimize every query out there.
 
-The author has never made a database before, so there may be bugs. The on-disk format is unstable. You may lose your data at any time. We currently make no guarantees about consistency or durabillity. **Do not use Graphon as a main store for production data.**
+The author has never made a database before, so there will be bugs. Also, the on-disk format is unstable. We currently make no guarantees about consistency or durabillity. **Assume that you may lose your data at any time. Do not use Graphon as a load-bearing store for production data.**
