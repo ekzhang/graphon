@@ -3,7 +3,7 @@
 A very small graph database.
 
 ```gql
-MATCH (db:Database WHERE db.name='graphon'})<-[:wrote]-(p:Person)
+MATCH (db:Database WHERE db.name='graphon')<-[:wrote]-(p:Person)
 RETURN p.name
 ```
 
@@ -21,7 +21,7 @@ $ curl 'http://localhost:7687/?query=RETURN%2020'
 20
 ```
 
-The recommended way to explore a running Graphon database is by using the CLI.
+The recommended way to explore a running Graphon database is through the CLI.
 
 ```sh-session
 $ graphon-cli
@@ -32,7 +32,7 @@ Connected to https://127.0.0.1:7687
 
 ## Features
 
-In addition to the core GQL language that includes graph pattern-matching queries, transactions, insertions/removals/updates, and basic data types, Graphon supports:
+In addition to the core GQL language that includes graph pattern-matching queries, updates, transactions, and basic data types, Graphon supports:
 
 - `CREATE INDEX` on the properties of a node type
 - JSON data type
