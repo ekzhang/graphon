@@ -1,6 +1,6 @@
-# graphon
+# Graphon
 
-A very small graph database written in Zig.
+A very small graph database.
 
 ```gql
 MATCH (db:Database WHERE db.name='graphon'})<-[:wrote]-(p:Person)
@@ -9,14 +9,14 @@ RETURN p.name
 
 Can be queried with [GQL](https://www.iso.org/standard/76120.html), the ISO-standard graph query language.
 
-## Quickstart
+## Getting started
 
-Graphon is a single binary that implements almost the entire GQL standard, to specification. You can query it from either Neo4j client libraries, or using simple HTTP requests in any language.
+Graphon is a single binary that implements almost the entire GQL standard, to specification. You can query it either from Neo4j client libraries, or by making an HTTP request in any language.
 
 To start a database, just download the binary and run it.
 
 ```sh-session
-$ graphon &
+$ graphon
 $ curl 'http://localhost:7687/?query=RETURN%2020'
 20
 ```
@@ -41,11 +41,13 @@ You could consider using Graphon when you want something small and low-overhead,
 
 ## Architecture
 
-- Connection manager (HTTP and Bolt protocols)
-- Tokenizer and parser
-- Query planner
-- Execution engine
-- Storage and transaction layer using RocksDB
+The database itself is written in Zig and based on RocksDB as a foundational storage layer.
+
+1. **Connection manager:** Accept GQL requests over HTTP and Bolt protocols.
+2. **Tokenizer and parser:** Convert text queries into an abstract syntax tree.
+3. **Query planner:** Materialize and optimize a plan for executing the query.
+4. **Execution engine:** Safely execute query plans with specific graph algorithms in an interruptible, streaming API.
+5. **Storage and transactions:** Move and fetch data from durable storage, hold transaction locks, and page files via RocksDB.
 
 ## Limitations
 
