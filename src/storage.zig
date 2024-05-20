@@ -71,29 +71,86 @@ test "parse error from rocksdb_open" {
     defer rocks.rocksdb_options_destroy(options);
 
     var err: ?[*:0]u8 = null;
-    const db = rocks.rocksdb_open(options, "~~not@a/real&file", &err);
-    try std.testing.expectEqual(db, null);
+    const db = rocks.rocksdb_open(options, "<~~not@a/valid&file>", &err);
+    try std.testing.expectEqual(null, db);
 
     const status = parse_rocks_error(err.?);
-    try std.testing.expectEqual(status, RocksError.IOError);
+    try std.testing.expectEqual(RocksError.IOError, status);
 }
 
 /// A handle to a RocksDB database.
 pub const RocksDB = struct {
     db: *rocks.rocksdb_t,
+    write_opts: *rocks.rocksdb_writeoptions_t,
+    read_opts: *rocks.rocksdb_readoptions_t,
 
     pub fn open(name: [:0]const u8) !RocksDB {
         const options = rocks.rocksdb_options_create() orelse return error.OutOfMemory;
         defer rocks.rocksdb_options_destroy(options);
         rocks.rocksdb_options_set_create_if_missing(options, 1);
 
+        // pre-create options to avoid repeated allocations
+        const write_opts = rocks.rocksdb_writeoptions_create() orelse return error.OutOfMemory;
+        rocks.rocksdb_writeoptions_disable_WAL(write_opts, 1);
+        errdefer rocks.rocksdb_writeoptions_destroy(write_opts);
+
+        const read_opts = rocks.rocksdb_readoptions_create() orelse return error.OutOfMemory;
+        rocks.rocksdb_readoptions_set_async_io(read_opts, 1);
+        errdefer rocks.rocksdb_readoptions_destroy(read_opts);
+
         var err: ?[*:0]u8 = null;
         const db: ?*rocks.rocksdb_t = rocks.rocksdb_open(options, name.ptr, &err);
         if (err) |e| return parse_rocks_error(e);
-        return RocksDB{ .db = db.? };
+        return RocksDB{ .db = db.?, .write_opts = write_opts, .read_opts = read_opts };
     }
 
     pub fn close(self: RocksDB) void {
         rocks.rocksdb_close(self.db);
+        rocks.rocksdb_writeoptions_destroy(self.write_opts);
+        rocks.rocksdb_readoptions_destroy(self.read_opts);
+    }
+
+    pub fn put(self: RocksDB, key: []const u8, value: []const u8) !void {
+        var err: ?[*:0]u8 = null;
+        rocks.rocksdb_put(self.db, self.write_opts, key.ptr, key.len, value.ptr, value.len, &err);
+        if (err) |e| return parse_rocks_error(e);
+    }
+
+    pub fn get(self: RocksDB, key: []const u8) !?[]const u8 {
+        var err: ?[*:0]u8 = null;
+        var vallen: usize = 0;
+        const value = rocks.rocksdb_get(self.db, self.read_opts, key.ptr, key.len, &vallen, &err);
+        if (err) |e| return parse_rocks_error(e);
+        if (vallen == 0) return null;
+        return value[0..vallen];
+    }
+
+    pub fn delete(self: RocksDB, key: []const u8) !void {
+        var err: ?[*:0]u8 = null;
+        rocks.rocksdb_delete(self.db, self.write_opts, key.ptr, key.len, &err);
+        if (err) |e| return parse_rocks_error(e);
+    }
+
+    pub fn free_value(_: RocksDB, value: ?[]const u8) void {
+        rocks.rocksdb_free(@ptrCast(@constCast(value)));
     }
 };
+
+test "get and put value" {
+    var tmp = std.testing.tmpDir(.{});
+    try tmp.dir.setAsCwd();
+    defer tmp.cleanup();
+
+    const db = try RocksDB.open("test.db"); // opened in tmpDir
+    defer db.close();
+
+    try std.testing.expectEqual(null, try db.get("hello"));
+
+    try db.put("hello", "world");
+    const value = try db.get("hello");
+    try std.testing.expectEqualSlices(u8, "world", value.?);
+    db.free_value(value);
+
+    try db.delete("hello");
+    try std.testing.expectEqual(null, try db.get("hello"));
+}
