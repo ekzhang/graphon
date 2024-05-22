@@ -3,7 +3,7 @@
 A very small graph database.
 
 ```gql
-MATCH (db:Database WHERE db.name='graphon')<-[:wrote]-(p:Person)
+MATCH (db:Database {name: 'graphon'})<-[:wrote]-(p:Person)
 RETURN p.name
 ```
 
@@ -17,8 +17,8 @@ To start a database, just download the binary and run it.
 
 ```sh-session
 $ graphon
-$ curl 'http://localhost:7687/?query=RETURN%2020'
-20
+$ curl 'http://localhost:7687/?query=RETURN%2055'
+55
 ```
 
 The recommended way to explore a running Graphon database is through the CLI.
@@ -66,21 +66,25 @@ Query plans are binary trees constructed out of the following operations. The de
 - `RelById`: Fetch the relationship with an ID.
 - `Step`: Traverse the graph for relationships from a node.
 - `StepBetween`: Traverse the graph for relationships between two nodes.
+- `Begin`: Marker node for the start of the right subtree of a repeat or join operator.
 - `Repeat`: Repeat the sub-pattern, used for trail and path queries.
 - `ShortestPath`: Finds the shortest path(s) between two nodes.
 - `Join`: Take rows from the left side, execute the tree on the right side, and return both.
 - `SemiJoin`: Return rows from the left side where the right side is present.
+- `Argument`: Get a variable for the node being repeated, or the right side of a join.
 - `Anti`: Test for the absence of a pattern, yielding a single row.
 - `Projection`: Execute expressions or remap variable names.
+- `ProjectEndpoints`: Find the endpoints of an edge.
 - `Filter`: Filter results by label presence or conditional expression.
 - `Limit`: Limit the count of result rows.
 - `Distinct`: Remove duplicate rows from the result.
 - `Skip`: Skip rows from the result.
 - `Sort`: Sort results by a provided key.
 - `Top`: Return some number of top rows by a provided key in sorted order (sort then limit).
-- `Union`: Concatenates results from the left and right child operators.
+- `UnionAll`: Concatenates results from the left and right child operators.
+- `InsertNode`: Insert a graph node with labels and properties.
+- `InsertEdge`: Insert an edge with direction, labels, and properties between two nodes.
 - `Update`: Set, add, or remove labels and properties from nodes and relationships.
-- `Insert`: Insert a graph pattern with nodes and relationships.
 - `Delete`: Delete a node or relationship.
 - `Aggregate`: Compute aggregations, grouping by one or more columns.
 - `GroupAggregate`: Compute aggregations, where result table is already ordered into groups.
