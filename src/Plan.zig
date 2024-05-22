@@ -7,24 +7,26 @@ const Plan = @This();
 const EdgeDirection = @import("./types.zig").EdgeDirection;
 
 nodes: std.ArrayListUnmanaged(Node) = .{},
-return_idents: std.ArrayListUnmanaged(u16) = .{},
 return_names: std.ArrayListUnmanaged([]u8) = .{},
 
 pub fn deinit(self: *Plan, allocator: Allocator) void {
     for (self.nodes.items) |*n| n.deinit(allocator);
     self.nodes.deinit(allocator);
-    self.return_idents.deinit(allocator);
     for (self.return_names.items) |n| allocator.free(n);
     self.return_names.deinit(allocator);
 }
 
 test "can create and free plan" {
     const allocator = std.testing.allocator;
+    // MATCH (n) RETURN n AS my_node;
     var plan = Plan{};
-
-    try plan.return_idents.append(allocator, 3);
-    try plan.return_names.append(allocator, try allocator.dupe(u8, "some_column"));
-
+    try plan.return_names.append(allocator, try allocator.dupe(u8, "my_node"));
+    try plan.nodes.append(allocator, Node{
+        .node_scan = Scan{
+            .ident = 0,
+            .label = null,
+        },
+    });
     plan.deinit(std.testing.allocator);
 }
 
@@ -44,6 +46,7 @@ pub const Node = union(enum) {
     argument: u16,
     anti: void,
     projection: std.ArrayListUnmanaged(ProjectionClause),
+    empty_result: void,
     // project_endpoints: ProjectEndpoints,
     filter: Exp, // should be a boolean expression
     limit: u64,
@@ -72,6 +75,7 @@ pub const Node = union(enum) {
                 for (n.items) |*c| c.deinit(allocator);
                 n.deinit(allocator);
             },
+            .empty_result => {},
             .filter => |*n| n.deinit(allocator),
             .limit => {},
             .distinct => |*n| n.deinit(allocator),
@@ -113,8 +117,8 @@ pub const Step = struct {
     }
 };
 
-/// An ordered single clause in the projection. Sets idents in the row equal to
-/// the associated expressions.
+/// An ordered single item in the projection output. If an ident is not in any
+/// clause, it is dropped. If exp is null, keep the existing value.
 pub const ProjectionClause = struct {
     ident: u16,
     exp: Exp,
