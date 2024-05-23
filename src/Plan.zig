@@ -6,21 +6,25 @@ const Plan = @This();
 
 const EdgeDirection = @import("./types.zig").EdgeDirection;
 
+/// Nodes that define the query plan.
 nodes: std.ArrayListUnmanaged(Node) = .{},
-return_names: std.ArrayListUnmanaged([]u8) = .{},
 
+/// Column names that will be returned by the query. Must match arity of results.
+columns: std.ArrayListUnmanaged([]u8) = .{},
+
+/// Release all allocated memory.
 pub fn deinit(self: *Plan, allocator: Allocator) void {
     for (self.nodes.items) |*n| n.deinit(allocator);
     self.nodes.deinit(allocator);
-    for (self.return_names.items) |n| allocator.free(n);
-    self.return_names.deinit(allocator);
+    for (self.columns.items) |n| allocator.free(n);
+    self.columns.deinit(allocator);
 }
 
 test "can create and free plan" {
     const allocator = std.testing.allocator;
     // MATCH (n) RETURN n AS my_node;
     var plan = Plan{};
-    try plan.return_names.append(allocator, try allocator.dupe(u8, "my_node"));
+    try plan.columns.append(allocator, try allocator.dupe(u8, "my_node"));
     try plan.nodes.append(allocator, Node{
         .node_scan = Scan{
             .ident = 0,
