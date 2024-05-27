@@ -88,6 +88,8 @@ pub const RocksDB = struct {
         const options = rocks.rocksdb_options_create() orelse return error.OutOfMemory;
         defer rocks.rocksdb_options_destroy(options);
         rocks.rocksdb_options_set_create_if_missing(options, 1);
+        rocks.rocksdb_options_set_compression(options, rocks.rocksdb_lz4_compression);
+        rocks.rocksdb_options_set_bottommost_compression(options, rocks.rocksdb_zstd_compression);
 
         // pre-create options to avoid repeated allocations
         const write_opts = rocks.rocksdb_writeoptions_create() orelse return error.OutOfMemory;
