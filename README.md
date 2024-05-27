@@ -73,7 +73,7 @@ Query plans are binary trees constructed out of the following operations. The de
 - `SemiJoin`: Return rows from the left side where the right side is present.
 - `Argument`: Get a variable for the node being repeated, or the right side of a join.
 - `Anti`: Test for the absence of a pattern, yielding a single row.
-- `Projection`: Execute expressions or remap variable names.
+- `Project`: Execute expressions or remap variable names.
 - `EmptyResult`: Retrieve all results and drop them, used as the last operator in mutations.
 - `ProjectEndpoints`: Find the endpoints of an edge.
 - `Filter`: Filter results by label presence or conditional expression.

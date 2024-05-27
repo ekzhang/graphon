@@ -1,4 +1,4 @@
-// From Tigerbeetle (hash 588123), licensed under Apache 2.0.
+// From Tigerbeetle (commit 588123f), licensed under Apache 2.0.
 // https://github.com/tigerbeetle/tigerbeetle/blob/588123f219f1f3e324f9293ae3975845e087d5f5/src/testing/snaptest.zig
 
 //! A tiny pattern/library for testing with expectations ([1], [2]).

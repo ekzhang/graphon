@@ -34,7 +34,7 @@ pub fn deinit(self: *Plan, allocator: Allocator) void {
 ///     Step (%2)-[:FavoriteFood]->(%3)
 ///     Filter %3.name = 'Pizza'
 ///   SemiJoin
-///   Projection %4: %0.name, %5: %2.name, %6: %1.duration
+///   Project %4: %0.name, %5: %2.name, %6: %1.duration
 /// ```
 pub fn print(self: Plan, writer: anytype) !void {
     try writer.writeAll("Plan{");
@@ -80,7 +80,7 @@ pub const Node = union(enum) {
     semi_join, // unimplemented
     argument: u16,
     anti: void,
-    projection: std.ArrayListUnmanaged(ProjectionClause),
+    project: std.ArrayListUnmanaged(ProjectClause),
     empty_result: void,
     // project_endpoints: ProjectEndpoints,
     filter: std.ArrayListUnmanaged(FilterClause),
@@ -109,7 +109,7 @@ pub const Node = union(enum) {
             .semi_join => {},
             .argument => {},
             .anti => {},
-            .projection => |*n| {
+            .project => |*n| {
                 for (n.items) |*c| c.deinit(allocator);
                 n.deinit(allocator);
             },
@@ -142,7 +142,7 @@ pub const Node = union(enum) {
             .semi_join => "SemiJoin",
             .argument => "Argument",
             .anti => "Anti",
-            .projection => "Projection",
+            .project => "Project",
             .empty_result => "EmptyResult",
             .filter => "Filter",
             .limit => "Limit",
@@ -178,7 +178,7 @@ pub const Node = union(enum) {
                 try writer.print(" %{}", .{n});
             },
             .anti => {},
-            .projection => |n| {
+            .project => |n| {
                 var first = true;
                 for (n.items) |c| {
                     if (first) {
@@ -340,14 +340,14 @@ pub const Step = struct {
     }
 };
 
-/// An ordered single item in the projection output. If an ident is not in any
+/// An ordered single item in the project output. If an ident is not in any
 /// clause, it is dropped. If exp is null, keep the existing value.
-pub const ProjectionClause = struct {
+pub const ProjectClause = struct {
     ident: u16,
     exp: Exp,
 
     /// Release all allocated memory.
-    pub fn deinit(self: *ProjectionClause, allocator: Allocator) void {
+    pub fn deinit(self: *ProjectClause, allocator: Allocator) void {
         self.exp.deinit(allocator);
     }
 };
