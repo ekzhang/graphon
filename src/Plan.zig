@@ -4,9 +4,6 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Plan = @This();
 
-const Snap = @import("vendor/snaptest.zig").Snap;
-const snap = Snap.snap;
-
 const EdgeDirection = @import("./types.zig").EdgeDirection;
 
 /// Nodes that define the query plan.
@@ -66,50 +63,6 @@ pub fn print(self: Plan, writer: anytype) !void {
             level += 1;
         }
     }
-}
-
-/// Check the value of a query plan, for snapshot testing.
-fn check_plan_snapshot(plan: Plan, want: Snap) !void {
-    var buf = std.ArrayList(u8).init(std.testing.allocator);
-    defer buf.deinit();
-    try plan.print(buf.writer());
-    try want.diff(buf.items);
-}
-
-test "can create, free and print plan" {
-    const allocator = std.testing.allocator;
-    // MATCH (n) RETURN n AS my_node;
-    var plan = Plan{};
-    defer plan.deinit(std.testing.allocator);
-
-    try plan.columns.append(allocator, try allocator.dupe(u8, "my_node"));
-    try plan.nodes.append(allocator, Node{
-        .node_scan = Scan{
-            .ident = 0,
-            .label = null,
-        },
-    });
-
-    try check_plan_snapshot(plan, snap(@src(),
-        \\Plan{my_node}
-        \\  NodeScan (%0)
-    ));
-
-    try plan.nodes.append(allocator, Node{
-        .step = Step{
-            .ident_src = 0,
-            .ident_edge = 1,
-            .ident_dst = 2,
-            .direction = .right_or_undirected,
-            .edge_label = try allocator.dupe(u8, "Likes"),
-        },
-    });
-
-    try check_plan_snapshot(plan, snap(@src(),
-        \\Plan{my_node}
-        \\  NodeScan (%0)
-        \\  Step (%0)~[%1:Likes]~>(%2)
-    ));
 }
 
 /// A node in the query plan, stored as a list.
@@ -523,3 +476,50 @@ pub const Binop = enum {
     mul,
     div,
 };
+
+const Snap = @import("vendor/snaptest.zig").Snap;
+const snap = Snap.snap;
+
+/// Check the value of a query plan, for snapshot testing.
+fn check_plan_snapshot(plan: Plan, want: Snap) !void {
+    var buf = std.ArrayList(u8).init(std.testing.allocator);
+    defer buf.deinit();
+    try plan.print(buf.writer());
+    try want.diff(buf.items);
+}
+
+test "can create, free and print plan" {
+    const allocator = std.testing.allocator;
+    // MATCH (n) RETURN n AS my_node;
+    var plan = Plan{};
+    defer plan.deinit(std.testing.allocator);
+
+    try plan.columns.append(allocator, try allocator.dupe(u8, "my_node"));
+    try plan.nodes.append(allocator, Node{
+        .node_scan = Scan{
+            .ident = 0,
+            .label = null,
+        },
+    });
+
+    try check_plan_snapshot(plan, snap(@src(),
+        \\Plan{my_node}
+        \\  NodeScan (%0)
+    ));
+
+    try plan.nodes.append(allocator, Node{
+        .step = Step{
+            .ident_src = 0,
+            .ident_edge = 1,
+            .ident_dst = 2,
+            .direction = .right_or_undirected,
+            .edge_label = try allocator.dupe(u8, "Likes"),
+        },
+    });
+
+    try check_plan_snapshot(plan, snap(@src(),
+        \\Plan{my_node}
+        \\  NodeScan (%0)
+        \\  Step (%0)~[%1:Likes]~>(%2)
+    ));
+}
