@@ -1,7 +1,6 @@
 const std = @import("std");
 
-const graphon = @import("graphon.zig");
-const RocksDB = graphon.storage.RocksDB;
+const RocksDB = @import("storage.zig").RocksDB;
 
 pub fn main() !void {
     const db = try RocksDB.open("/tmp/graphon");
