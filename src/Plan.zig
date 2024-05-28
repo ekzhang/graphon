@@ -22,10 +22,20 @@ pub fn deinit(self: *Plan, allocator: Allocator) void {
 
 /// Pretty-print the provided query plan.
 ///
-/// Example output:
+/// As an example, given the query
 ///
 /// ```
-/// Plan{name, friend_name, duration}
+/// MATCH (a:Person)-[b:Friend]-(c:Person)
+/// WHERE
+///   c.age > a.age + 3
+///   AND EXISTS ((c)-[:FavoriteFood]->(:Food {name: 'Pizza'})
+/// RETURN a.name, c.name, b.duration AS duration
+/// ```
+///
+/// One possible query plan is:
+///
+/// ```
+/// Plan{a.name, c.name, duration}
 ///   NodeScan (%0:Person)
 ///   Step (%0)-[%1:Friend]-(%2)
 ///   Filter %2:Person, %2.age > %0.age + 3

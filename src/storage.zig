@@ -30,13 +30,14 @@ pub const RocksError = error{
 
 const log = std.log.scoped(.rocksdb);
 
-fn slice_starts_with(slice: []const u8, prefix: []const u8) bool {
+inline fn slice_starts_with(slice: []const u8, prefix: []const u8) bool {
     if (slice.len < prefix.len) return false;
     return std.mem.eql(u8, slice[0..prefix.len], prefix);
 }
 
 test "slice_starts_with" {
     const slice = "hello, world!";
+    try std.testing.expect(slice_starts_with(slice, ""));
     try std.testing.expect(slice_starts_with(slice, "hello"));
     try std.testing.expect(!slice_starts_with(slice, "world"));
 }
@@ -47,22 +48,39 @@ fn parse_rocks_error(err: [*:0]u8) RocksError {
     log.info("{s}", .{err});
 
     const slice = std.mem.span(err);
-    if (slice_starts_with(slice, "NotFound: ")) return RocksError.NotFound;
-    if (slice_starts_with(slice, "Corruption: ")) return RocksError.Corruption;
-    if (slice_starts_with(slice, "Not implemented: ")) return RocksError.NotSupported;
-    if (slice_starts_with(slice, "Invalid argument: ")) return RocksError.InvalidArgument;
-    if (slice_starts_with(slice, "IO error: ")) return RocksError.IOError;
-    if (slice_starts_with(slice, "Merge in progress: ")) return RocksError.MergeInProgress;
-    if (slice_starts_with(slice, "Result incomplete: ")) return RocksError.Incomplete;
-    if (slice_starts_with(slice, "Shutdown in progress: ")) return RocksError.ShutdownInProgress;
-    if (slice_starts_with(slice, "Operation timed out: ")) return RocksError.TimedOut;
-    if (slice_starts_with(slice, "Operation aborted: ")) return RocksError.Aborted;
-    if (slice_starts_with(slice, "Resource busy: ")) return RocksError.Busy;
-    if (slice_starts_with(slice, "Operation expired: ")) return RocksError.Expired;
-    if (slice_starts_with(slice, "Operation failed. Try again.: ")) return RocksError.TryAgain;
-    if (slice_starts_with(slice, "Compaction too large: ")) return RocksError.CompactionTooLarge;
-    if (slice_starts_with(slice, "Column family dropped: ")) return RocksError.ColumnFamilyDropped;
-
+    if (slice.len == 0) return RocksError.UnknownStatus;
+    switch (slice[0]) {
+        'C' => {
+            if (slice_starts_with(slice, "Corruption: ")) return RocksError.Corruption;
+            if (slice_starts_with(slice, "Compaction too large: ")) return RocksError.CompactionTooLarge;
+            if (slice_starts_with(slice, "Column family dropped: ")) return RocksError.ColumnFamilyDropped;
+        },
+        'I' => {
+            if (slice_starts_with(slice, "Invalid argument: ")) return RocksError.InvalidArgument;
+            if (slice_starts_with(slice, "IO error: ")) return RocksError.IOError;
+        },
+        'M' => {
+            if (slice_starts_with(slice, "Merge in progress: ")) return RocksError.MergeInProgress;
+        },
+        'N' => {
+            if (slice_starts_with(slice, "NotFound: ")) return RocksError.NotFound;
+            if (slice_starts_with(slice, "Not implemented: ")) return RocksError.NotSupported;
+        },
+        'O' => {
+            if (slice_starts_with(slice, "Operation timed out: ")) return RocksError.TimedOut;
+            if (slice_starts_with(slice, "Operation aborted: ")) return RocksError.Aborted;
+            if (slice_starts_with(slice, "Operation expired: ")) return RocksError.Expired;
+            if (slice_starts_with(slice, "Operation failed. Try again.: ")) return RocksError.TryAgain;
+        },
+        'R' => {
+            if (slice_starts_with(slice, "Result incomplete: ")) return RocksError.Incomplete;
+            if (slice_starts_with(slice, "Resource busy: ")) return RocksError.Busy;
+        },
+        'S' => {
+            if (slice_starts_with(slice, "Shutdown in progress: ")) return RocksError.ShutdownInProgress;
+        },
+        else => {},
+    }
     return RocksError.UnknownStatus;
 }
 
