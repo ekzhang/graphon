@@ -108,6 +108,9 @@ pub const RocksDB = struct {
         rocks.rocksdb_options_set_create_if_missing(options, 1);
         rocks.rocksdb_options_set_compression(options, rocks.rocksdb_lz4_compression);
         rocks.rocksdb_options_set_bottommost_compression(options, rocks.rocksdb_zstd_compression);
+        rocks.rocksdb_options_increase_parallelism(options, @as(c_int, @intCast(std.Thread.getCpuCount() catch 2)));
+        rocks.rocksdb_options_set_compaction_style(options, rocks.rocksdb_level_compaction);
+        rocks.rocksdb_options_optimize_level_style_compaction(options, 512 * 1024 * 1024);
 
         // pre-create options to avoid repeated allocations
         const write_opts = rocks.rocksdb_writeoptions_create() orelse return error.OutOfMemory;
