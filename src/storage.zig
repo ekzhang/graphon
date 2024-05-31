@@ -1,7 +1,7 @@
 //! Friendly Zig wrapper types for RocksDB's C API.
 
 const std = @import("std");
-const rocks = @cImport(@cInclude("rocksdb/c.h"));
+const c = @cImport(@cInclude("rocksdb/c.h"));
 
 /// Type for known errors from RocksDB.
 /// Based on the [`Code`](https://github.com/facebook/rocksdb/blob/v9.1.1/include/rocksdb/status.h#L75-L93) enum.
@@ -44,7 +44,7 @@ test "slice_starts_with" {
 
 /// Parse a RocksDB error string into a status, logging it. Consumes the string.
 fn parse_rocks_error(err: [*:0]u8) RocksError {
-    defer rocks.rocksdb_free(err); // free the memory when done
+    defer c.rocksdb_free(err); // free the memory when done
     log.info("{s}", .{err});
 
     const slice = std.mem.span(err);
@@ -85,11 +85,11 @@ fn parse_rocks_error(err: [*:0]u8) RocksError {
 }
 
 test "parse error from rocksdb_open" {
-    const options = rocks.rocksdb_options_create() orelse return error.OutOfMemory;
-    defer rocks.rocksdb_options_destroy(options);
+    const options = c.rocksdb_options_create() orelse return error.OutOfMemory;
+    defer c.rocksdb_options_destroy(options);
 
     var err: ?[*:0]u8 = null;
-    const db = rocks.rocksdb_open(options, "<~~not@a/valid&file>", &err);
+    const db = c.rocksdb_open(options, "<~~not@a/valid&file>", &err);
     try std.testing.expectEqual(null, db);
 
     const status = parse_rocks_error(err.?);
@@ -98,51 +98,51 @@ test "parse error from rocksdb_open" {
 
 /// A handle to a RocksDB database.
 pub const RocksDB = struct {
-    db: *rocks.rocksdb_t,
-    write_opts: *rocks.rocksdb_writeoptions_t,
-    read_opts: *rocks.rocksdb_readoptions_t,
+    db: *c.rocksdb_t,
+    write_opts: *c.rocksdb_writeoptions_t,
+    read_opts: *c.rocksdb_readoptions_t,
 
     pub fn open(name: [:0]const u8) !RocksDB {
-        const options = rocks.rocksdb_options_create() orelse return error.OutOfMemory;
-        defer rocks.rocksdb_options_destroy(options);
-        rocks.rocksdb_options_set_create_if_missing(options, 1);
-        rocks.rocksdb_options_set_compression(options, rocks.rocksdb_lz4_compression);
-        rocks.rocksdb_options_set_bottommost_compression(options, rocks.rocksdb_zstd_compression);
-        rocks.rocksdb_options_increase_parallelism(options, @as(c_int, @intCast(std.Thread.getCpuCount() catch 2)));
-        rocks.rocksdb_options_set_compaction_style(options, rocks.rocksdb_level_compaction);
-        rocks.rocksdb_options_optimize_level_style_compaction(options, 512 * 1024 * 1024);
+        const options = c.rocksdb_options_create() orelse return error.OutOfMemory;
+        defer c.rocksdb_options_destroy(options);
+        c.rocksdb_options_set_create_if_missing(options, 1);
+        c.rocksdb_options_set_compression(options, c.rocksdb_lz4_compression);
+        c.rocksdb_options_set_bottommost_compression(options, c.rocksdb_zstd_compression);
+        c.rocksdb_options_increase_parallelism(options, @as(c_int, @intCast(std.Thread.getCpuCount() catch 2)));
+        c.rocksdb_options_set_compaction_style(options, c.rocksdb_level_compaction);
+        c.rocksdb_options_optimize_level_style_compaction(options, 512 * 1024 * 1024);
 
         // pre-create options to avoid repeated allocations
-        const write_opts = rocks.rocksdb_writeoptions_create() orelse return error.OutOfMemory;
-        rocks.rocksdb_writeoptions_disable_WAL(write_opts, 1);
-        errdefer rocks.rocksdb_writeoptions_destroy(write_opts);
+        const write_opts = c.rocksdb_writeoptions_create() orelse return error.OutOfMemory;
+        c.rocksdb_writeoptions_disable_WAL(write_opts, 1);
+        errdefer c.rocksdb_writeoptions_destroy(write_opts);
 
-        const read_opts = rocks.rocksdb_readoptions_create() orelse return error.OutOfMemory;
-        rocks.rocksdb_readoptions_set_async_io(read_opts, 1);
-        errdefer rocks.rocksdb_readoptions_destroy(read_opts);
+        const read_opts = c.rocksdb_readoptions_create() orelse return error.OutOfMemory;
+        c.rocksdb_readoptions_set_async_io(read_opts, 1);
+        errdefer c.rocksdb_readoptions_destroy(read_opts);
 
         var err: ?[*:0]u8 = null;
-        const db: ?*rocks.rocksdb_t = rocks.rocksdb_open(options, name.ptr, &err);
+        const db: ?*c.rocksdb_t = c.rocksdb_open(options, name.ptr, &err);
         if (err) |e| return parse_rocks_error(e);
         return RocksDB{ .db = db.?, .write_opts = write_opts, .read_opts = read_opts };
     }
 
     pub fn close(self: RocksDB) void {
-        rocks.rocksdb_close(self.db);
-        rocks.rocksdb_writeoptions_destroy(self.write_opts);
-        rocks.rocksdb_readoptions_destroy(self.read_opts);
+        c.rocksdb_close(self.db);
+        c.rocksdb_writeoptions_destroy(self.write_opts);
+        c.rocksdb_readoptions_destroy(self.read_opts);
     }
 
     pub fn put(self: RocksDB, key: []const u8, value: []const u8) !void {
         var err: ?[*:0]u8 = null;
-        rocks.rocksdb_put(self.db, self.write_opts, key.ptr, key.len, value.ptr, value.len, &err);
+        c.rocksdb_put(self.db, self.write_opts, key.ptr, key.len, value.ptr, value.len, &err);
         if (err) |e| return parse_rocks_error(e);
     }
 
     pub fn get(self: RocksDB, key: []const u8) !?[]const u8 {
         var err: ?[*:0]u8 = null;
         var vallen: usize = 0;
-        const value = rocks.rocksdb_get(self.db, self.read_opts, key.ptr, key.len, &vallen, &err);
+        const value = c.rocksdb_get(self.db, self.read_opts, key.ptr, key.len, &vallen, &err);
         if (err) |e| return parse_rocks_error(e);
         if (vallen == 0) return null;
         return value[0..vallen];
@@ -150,12 +150,12 @@ pub const RocksDB = struct {
 
     pub fn delete(self: RocksDB, key: []const u8) !void {
         var err: ?[*:0]u8 = null;
-        rocks.rocksdb_delete(self.db, self.write_opts, key.ptr, key.len, &err);
+        c.rocksdb_delete(self.db, self.write_opts, key.ptr, key.len, &err);
         if (err) |e| return parse_rocks_error(e);
     }
 
     pub fn free_value(_: RocksDB, value: ?[]const u8) void {
-        rocks.rocksdb_free(@ptrCast(@constCast(value)));
+        c.rocksdb_free(@ptrCast(@constCast(value)));
     }
 };
 
