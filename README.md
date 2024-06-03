@@ -44,7 +44,7 @@ You could consider using Graphon when you want something small and low-overhead,
 
 Graphon is a very small project. It tries to be fast where possible, but the query planner is not going to be very advanced. It won't perfectly optimize every query out there.
 
-The author has never made a database before, so there will be bugs. Also, the on-disk format is unstable. We currently make no guarantees about consistency or durabillity. **Assume that you may lose your data at any time. Do not use Graphon as a load-bearing store for production data.**
+The author has never made a database before, so there will be bugs. Also, the on-disk format is unstable. We aim to be ACID, but we currently make no guarantees about consistency or durabillity because once again, there are likely bugs. **You may lose your data at any time. Do not use Graphon as a store for production data.**
 
 ## Architecture
 
