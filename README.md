@@ -32,11 +32,10 @@ Connected to https://127.0.0.1:7687
 
 ## Features
 
-In addition to the core GQL language that includes graph pattern-matching queries, transactional updates, catalog changes, and list data types, Graphon supports:
+In addition to the core GQL language that includes graph pattern-matching queries, transactional updates, catalog changes, and list data types, Graphon also supports:
 
 - `CREATE INDEX` on the properties of nodes and relationships
-- Execution cost tracking for terminating unbounded paths / undecidability
-- JSON data type
+- Snapshot isolation for concurrent transactions
 
 You could consider using Graphon when you want something small and low-overhead, yet still powerful.
 
