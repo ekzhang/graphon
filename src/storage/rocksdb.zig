@@ -118,6 +118,16 @@ pub const RocksDB = struct {
         c.rocksdb_options_set_compaction_style(options, c.rocksdb_level_compaction);
         c.rocksdb_options_optimize_level_style_compaction(options, 512 * 1024 * 1024);
 
+        // Set 512 MiB in-memory block cache for reads (default: 32 MiB).
+        {
+            const table_options = c.rocksdb_block_based_options_create() orelse return error.OutOfMemory;
+            defer c.rocksdb_block_based_options_destroy(table_options);
+            const cache = c.rocksdb_cache_create_lru(512 * 1024 * 1024) orelse return error.OutOfMemory;
+            defer c.rocksdb_cache_destroy(cache);
+            c.rocksdb_block_based_options_set_block_cache(table_options, cache);
+            c.rocksdb_options_set_block_based_table_factory(options, table_options);
+        }
+
         // pre-create options to avoid repeated allocations
         const write_opts = c.rocksdb_writeoptions_create() orelse return error.OutOfMemory;
         c.rocksdb_writeoptions_disable_WAL(write_opts, 1);
