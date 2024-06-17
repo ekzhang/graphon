@@ -163,7 +163,8 @@ pub const RocksDB = struct {
         c.rocksdb_column_family_handle_destroy(self.cf_node);
         c.rocksdb_column_family_handle_destroy(self.cf_edge);
         c.rocksdb_column_family_handle_destroy(self.cf_adj);
-        c.rocksdb_close(self.db);
+        c.rocksdb_optimistictransactiondb_close_base_db(self.db);
+        c.rocksdb_optimistictransactiondb_close(self.otxn_db);
         c.rocksdb_writeoptions_destroy(self.write_opts);
         c.rocksdb_readoptions_destroy(self.read_opts);
     }
