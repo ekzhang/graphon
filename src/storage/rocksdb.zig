@@ -175,12 +175,12 @@ pub const RocksDB = struct {
         if (err) |e| return parse_rocks_error(e);
     }
 
-    pub fn get(self: RocksDB, key: []const u8) !?PinnedSlice {
+    pub fn get(self: RocksDB, key: []const u8) !?PinnableSlice {
         var err: ?[*:0]u8 = null;
         const value = c.rocksdb_get_pinned(self.db, self.read_opts, key.ptr, key.len, &err);
         if (err) |e| return parse_rocks_error(e);
         const val = value orelse return null;
-        return PinnedSlice{ .rep = val };
+        return PinnableSlice{ .rep = val };
     }
 
     pub fn delete(self: RocksDB, key: []const u8) !void {
@@ -190,12 +190,12 @@ pub const RocksDB = struct {
     }
 };
 
-/// A pinned slice, where the memory is owned by RocksDB.
-pub const PinnedSlice = struct {
+/// A pinnable slice, which can reference memory that is directly owned by RocksDB.
+pub const PinnableSlice = struct {
     rep: *c.rocksdb_pinnableslice_t,
 
     /// Reference the value as a Zig slice.
-    pub fn items(self: PinnedSlice) []const u8 {
+    pub fn items(self: PinnableSlice) []const u8 {
         var vlen: usize = undefined;
         const vptr = c.rocksdb_pinnableslice_value(self.rep, &vlen);
         // Note: vptr cannot be null here, since self.rep is not null.
@@ -204,7 +204,7 @@ pub const PinnedSlice = struct {
     }
 
     /// Release the reference to memory associated with this slice.
-    pub fn deinit(self: PinnedSlice) void {
+    pub fn deinit(self: PinnableSlice) void {
         c.rocksdb_pinnableslice_destroy(self.rep);
     }
 };
