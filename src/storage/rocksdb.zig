@@ -99,6 +99,7 @@ test "parse error from rocksdb_open" {
 /// A handle to a RocksDB database.
 pub const RocksDB = struct {
     db: *c.rocksdb_t,
+    otxn_db: *c.rocksdb_optimistictransactiondb_t,
     write_opts: *c.rocksdb_writeoptions_t,
     read_opts: *c.rocksdb_readoptions_t,
 
@@ -110,6 +111,7 @@ pub const RocksDB = struct {
         const options = c.rocksdb_options_create() orelse return error.OutOfMemory;
         defer c.rocksdb_options_destroy(options);
         c.rocksdb_options_set_create_if_missing(options, 1);
+        c.rocksdb_options_set_create_missing_column_families(options, 1);
         c.rocksdb_options_set_compression(options, c.rocksdb_lz4_compression);
         c.rocksdb_options_set_bottommost_compression(options, c.rocksdb_zstd_compression);
         c.rocksdb_options_increase_parallelism(options, @as(c_int, @intCast(std.Thread.getCpuCount() catch 2)));
@@ -125,14 +127,14 @@ pub const RocksDB = struct {
         c.rocksdb_readoptions_set_async_io(read_opts, 1);
         errdefer c.rocksdb_readoptions_destroy(read_opts);
 
-        // define column families and their options
-        const num_cf = 3;
-        const cf_names = [num_cf][]const u8{ "node", "edge", "adj" };
-        const cf_options = [num_cf]*const c.rocksdb_options_t{ options, options, options };
-        var cf_handles: [num_cf]*c.rocksdb_column_family_handle_t = undefined;
+        // Define column families and their options.
+        const num_cf = 4;
+        var cf_names = [num_cf][*:0]const u8{ "default", "node", "edge", "adj" };
+        var cf_options = [num_cf]*const c.rocksdb_options_t{ options, options, options, options };
+        var cf_handles = [num_cf]?*c.rocksdb_column_family_handle_t{ null, null, null, null };
 
         var err: ?[*:0]u8 = null;
-        const db: ?*c.rocksdb_t = c.rocksdb_open_column_families(
+        const otxn_db = c.rocksdb_optimistictransactiondb_open_column_families(
             options,
             name.ptr,
             num_cf,
@@ -143,13 +145,17 @@ pub const RocksDB = struct {
         );
         if (err) |e| return parse_rocks_error(e);
 
+        // Should not be null in any case.
+        const db = c.rocksdb_optimistictransactiondb_get_base_db(otxn_db);
+
         return RocksDB{
             .db = db.?,
+            .otxn_db = otxn_db.?,
             .write_opts = write_opts,
             .read_opts = read_opts,
-            .cf_node = cf_handles[0],
-            .cf_edge = cf_handles[1],
-            .cf_adj = cf_handles[2],
+            .cf_node = cf_handles[1].?,
+            .cf_edge = cf_handles[2].?,
+            .cf_adj = cf_handles[3].?,
         };
     }
 
