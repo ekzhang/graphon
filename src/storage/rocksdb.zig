@@ -102,6 +102,10 @@ pub const RocksDB = struct {
     write_opts: *c.rocksdb_writeoptions_t,
     read_opts: *c.rocksdb_readoptions_t,
 
+    cf_node: *c.rocksdb_column_family_handle_t,
+    cf_edge: *c.rocksdb_column_family_handle_t,
+    cf_adj: *c.rocksdb_column_family_handle_t,
+
     pub fn open(name: [:0]const u8) !RocksDB {
         const options = c.rocksdb_options_create() orelse return error.OutOfMemory;
         defer c.rocksdb_options_destroy(options);
@@ -121,13 +125,38 @@ pub const RocksDB = struct {
         c.rocksdb_readoptions_set_async_io(read_opts, 1);
         errdefer c.rocksdb_readoptions_destroy(read_opts);
 
+        // define column families and their options
+        const num_cf = 3;
+        const cf_names = [num_cf][]const u8{ "node", "edge", "adj" };
+        const cf_options = [num_cf]*const c.rocksdb_options_t{ options, options, options };
+        var cf_handles: [num_cf]*c.rocksdb_column_family_handle_t = undefined;
+
         var err: ?[*:0]u8 = null;
-        const db: ?*c.rocksdb_t = c.rocksdb_open(options, name.ptr, &err);
+        const db: ?*c.rocksdb_t = c.rocksdb_open_column_families(
+            options,
+            name.ptr,
+            num_cf,
+            &cf_names,
+            &cf_options,
+            &cf_handles,
+            &err,
+        );
         if (err) |e| return parse_rocks_error(e);
-        return RocksDB{ .db = db.?, .write_opts = write_opts, .read_opts = read_opts };
+
+        return RocksDB{
+            .db = db.?,
+            .write_opts = write_opts,
+            .read_opts = read_opts,
+            .cf_node = cf_handles[0],
+            .cf_edge = cf_handles[1],
+            .cf_adj = cf_handles[2],
+        };
     }
 
     pub fn close(self: RocksDB) void {
+        c.rocksdb_column_family_handle_destroy(self.cf_node);
+        c.rocksdb_column_family_handle_destroy(self.cf_edge);
+        c.rocksdb_column_family_handle_destroy(self.cf_adj);
         c.rocksdb_close(self.db);
         c.rocksdb_writeoptions_destroy(self.write_opts);
         c.rocksdb_readoptions_destroy(self.read_opts);
