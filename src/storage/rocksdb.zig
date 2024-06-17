@@ -175,13 +175,12 @@ pub const RocksDB = struct {
         if (err) |e| return parse_rocks_error(e);
     }
 
-    pub fn get(self: RocksDB, key: []const u8) !?[]const u8 {
+    pub fn get(self: RocksDB, key: []const u8) !?PinnedSlice {
         var err: ?[*:0]u8 = null;
-        var vallen: usize = 0;
-        const value = c.rocksdb_get(self.db, self.read_opts, key.ptr, key.len, &vallen, &err);
+        const value = c.rocksdb_get_pinned(self.db, self.read_opts, key.ptr, key.len, &err);
         if (err) |e| return parse_rocks_error(e);
-        if (vallen == 0) return null;
-        return value[0..vallen];
+        const val = value orelse return null;
+        return PinnedSlice{ .rep = val };
     }
 
     pub fn delete(self: RocksDB, key: []const u8) !void {
@@ -189,9 +188,24 @@ pub const RocksDB = struct {
         c.rocksdb_delete(self.db, self.write_opts, key.ptr, key.len, &err);
         if (err) |e| return parse_rocks_error(e);
     }
+};
 
-    pub fn free_value(_: RocksDB, value: ?[]const u8) void {
-        c.rocksdb_free(@ptrCast(@constCast(value)));
+/// A pinned slice, where the memory is owned by RocksDB.
+pub const PinnedSlice = struct {
+    rep: *c.rocksdb_pinnableslice_t,
+
+    /// Reference the value as a Zig slice.
+    pub fn items(self: PinnedSlice) []const u8 {
+        var vlen: usize = undefined;
+        const vptr = c.rocksdb_pinnableslice_value(self.rep, &vlen);
+        // Note: vptr cannot be null here, since self.rep is not null.
+        std.debug.assert(vptr != null);
+        return vptr[0..vlen];
+    }
+
+    /// Release the reference to memory associated with this slice.
+    pub fn deinit(self: PinnedSlice) void {
+        c.rocksdb_pinnableslice_destroy(self.rep);
     }
 };
 
@@ -206,9 +220,11 @@ test "get and put value" {
     try std.testing.expectEqual(null, try db.get("hello"));
 
     try db.put("hello", "world");
-    const value = try db.get("hello");
-    try std.testing.expectEqualSlices(u8, "world", value.?);
-    db.free_value(value);
+    {
+        const value = try db.get("hello") orelse @panic("value for 'hello' not found");
+        defer value.deinit();
+        try std.testing.expectEqualSlices(u8, "world", value.items());
+    }
 
     try db.delete("hello");
     try std.testing.expectEqual(null, try db.get("hello"));

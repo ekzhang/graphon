@@ -15,5 +15,5 @@ pub fn insert_node(self: *Storage, node_id: u64, node_data: []const u8) !void {
 
 comptime {
     // Temporary until we write some tests
-    _ = Storage;
+    _ = @import("./storage/rocksdb.zig");
 }
