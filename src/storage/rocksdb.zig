@@ -528,8 +528,18 @@ test "transaction" {
     defer value.deinit();
     try std.testing.expectEqualSlices(u8, value.bytes(), "1");
 
+    const it = db.iterate(.default, "x", null);
+    defer it.deinit();
+    try std.testing.expect(it.valid());
+    try std.testing.expectEqualSlices(u8, "x", it.key());
+    try std.testing.expectEqualSlices(u8, "1", it.value());
+
     // But tx2 should still not be able to see the value.
     try std.testing.expectEqual(null, try tx2.get(.default, "x"));
+
+    const it_tx2 = tx2.iterate(.default, "x", null);
+    defer it_tx2.deinit();
+    try std.testing.expect(!it_tx2.valid());
 
     // If tx2 then modifies "x", it should cause a conflict.
     try tx2.put(.default, "x", "2");
