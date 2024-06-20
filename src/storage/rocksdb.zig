@@ -96,16 +96,26 @@ test "parse error from rocksdb_open" {
     try std.testing.expectEqual(RocksError.IOError, status);
 }
 
+/// Constant set of column families defined for the database.
+pub const ColumnFamily = enum(u8) {
+    /// The default column family, required by RocksDB when opening a database.
+    /// We keep graph metadata here.
+    default,
+    /// Nodes in the graph.
+    node,
+    /// Edges in the graph.
+    edge,
+    /// Forward and backward adjacency lists for nodes.
+    adj,
+};
+
 /// A handle to a RocksDB database.
 pub const RocksDB = struct {
     db: *c.rocksdb_t,
     otxn_db: *c.rocksdb_optimistictransactiondb_t,
     write_opts: *c.rocksdb_writeoptions_t,
     read_opts: *c.rocksdb_readoptions_t,
-
-    cf_node: *c.rocksdb_column_family_handle_t,
-    cf_edge: *c.rocksdb_column_family_handle_t,
-    cf_adj: *c.rocksdb_column_family_handle_t,
+    cf_handles: std.EnumArray(ColumnFamily, *c.rocksdb_column_family_handle_t),
 
     pub fn open(name: [:0]const u8) !RocksDB {
         const options = c.rocksdb_options_create() orelse return error.OutOfMemory;
@@ -138,24 +148,27 @@ pub const RocksDB = struct {
         errdefer c.rocksdb_readoptions_destroy(read_opts);
 
         // Define column families and their options.
-        const num_cf = 4;
-        var cf_names = [num_cf][*:0]const u8{ "default", "node", "edge", "adj" };
-        var cf_options = [num_cf]*const c.rocksdb_options_t{ options, options, options, options };
-        var cf_handles = [num_cf]?*c.rocksdb_column_family_handle_t{ null, null, null, null };
+        var cf_names = std.EnumArray(ColumnFamily, [*:0]const u8).initUndefined();
+        var cf_names_it = cf_names.iterator();
+        while (cf_names_it.next()) |entry| {
+            entry.value.* = @tagName(entry.key);
+        }
+        var cf_options = std.EnumArray(ColumnFamily, *const c.rocksdb_options_t).initFill(options);
+        var cf_handles = std.EnumArray(ColumnFamily, *c.rocksdb_column_family_handle_t).initUndefined();
 
         var err: ?[*:0]u8 = null;
         const otxn_db = c.rocksdb_optimistictransactiondb_open_column_families(
             options,
             name.ptr,
-            num_cf,
-            &cf_names,
-            &cf_options,
-            &cf_handles,
+            cf_names.values.len,
+            &cf_names.values,
+            &cf_options.values,
+            @ptrCast(&cf_handles.values), // Cast the array type into a ?* pointer.
             &err,
         );
         if (err) |e| return parse_rocks_error(e);
 
-        // Should not be null in any case.
+        // Should not be null because otxn_db is only null on error.
         const db = c.rocksdb_optimistictransactiondb_get_base_db(otxn_db);
 
         return RocksDB{
@@ -163,39 +176,60 @@ pub const RocksDB = struct {
             .otxn_db = otxn_db.?,
             .write_opts = write_opts,
             .read_opts = read_opts,
-            .cf_node = cf_handles[1].?,
-            .cf_edge = cf_handles[2].?,
-            .cf_adj = cf_handles[3].?,
+            .cf_handles = cf_handles,
         };
     }
 
     pub fn close(self: RocksDB) void {
-        c.rocksdb_column_family_handle_destroy(self.cf_node);
-        c.rocksdb_column_family_handle_destroy(self.cf_edge);
-        c.rocksdb_column_family_handle_destroy(self.cf_adj);
+        for (self.cf_handles.values) |cf| {
+            c.rocksdb_column_family_handle_destroy(cf);
+        }
         c.rocksdb_optimistictransactiondb_close_base_db(self.db);
         c.rocksdb_optimistictransactiondb_close(self.otxn_db);
         c.rocksdb_writeoptions_destroy(self.write_opts);
         c.rocksdb_readoptions_destroy(self.read_opts);
     }
 
-    pub fn put(self: RocksDB, key: []const u8, value: []const u8) !void {
+    pub fn put(self: RocksDB, cf: ColumnFamily, key: []const u8, value: []const u8) !void {
         var err: ?[*:0]u8 = null;
-        c.rocksdb_put(self.db, self.write_opts, key.ptr, key.len, value.ptr, value.len, &err);
+        c.rocksdb_put_cf(
+            self.db,
+            self.write_opts,
+            self.cf_handles.get(cf),
+            key.ptr,
+            key.len,
+            value.ptr,
+            value.len,
+            &err,
+        );
         if (err) |e| return parse_rocks_error(e);
     }
 
-    pub fn get(self: RocksDB, key: []const u8) !?PinnableSlice {
+    pub fn get(self: RocksDB, cf: ColumnFamily, key: []const u8) !?PinnableSlice {
         var err: ?[*:0]u8 = null;
-        const value = c.rocksdb_get_pinned(self.db, self.read_opts, key.ptr, key.len, &err);
+        const value = c.rocksdb_get_pinned_cf(
+            self.db,
+            self.read_opts,
+            self.cf_handles.get(cf),
+            key.ptr,
+            key.len,
+            &err,
+        );
         if (err) |e| return parse_rocks_error(e);
         const val = value orelse return null;
         return PinnableSlice{ .rep = val };
     }
 
-    pub fn delete(self: RocksDB, key: []const u8) !void {
+    pub fn delete(self: RocksDB, cf: ColumnFamily, key: []const u8) !void {
         var err: ?[*:0]u8 = null;
-        c.rocksdb_delete(self.db, self.write_opts, key.ptr, key.len, &err);
+        c.rocksdb_delete_cf(
+            self.db,
+            self.write_opts,
+            self.cf_handles.get(cf),
+            key.ptr,
+            key.len,
+            &err,
+        );
         if (err) |e| return parse_rocks_error(e);
     }
 };
@@ -227,15 +261,15 @@ test "get and put value" {
     const db = try RocksDB.open("test.db"); // opened in tmpDir
     defer db.close();
 
-    try std.testing.expectEqual(null, try db.get("hello"));
+    try std.testing.expectEqual(null, try db.get(.default, "hello"));
 
-    try db.put("hello", "world");
+    try db.put(.default, "hello", "world");
     {
-        const value = try db.get("hello") orelse @panic("value for 'hello' not found");
+        const value = try db.get(.default, "hello") orelse @panic("value for 'hello' not found");
         defer value.deinit();
         try std.testing.expectEqualSlices(u8, "world", value.items());
     }
 
-    try db.delete("hello");
-    try std.testing.expectEqual(null, try db.get("hello"));
+    try db.delete(.default, "hello");
+    try std.testing.expectEqual(null, try db.get(.default, "hello"));
 }

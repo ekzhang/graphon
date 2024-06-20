@@ -23,7 +23,7 @@ fn rocksdb_insert_perf() !void {
             total_time += elapsed;
         }
         rand.bytes(buf[0..]);
-        try db.put(buf[0..], buf[0..]);
+        try db.put(.default, buf[0..], buf[0..]);
     }
     total_time += timer.lap();
     std.debug.print("total time: {}\n", .{std.fmt.fmtDuration(total_time)});
