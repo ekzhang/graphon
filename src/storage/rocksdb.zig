@@ -513,6 +513,8 @@ test "transaction" {
 
     const tx1 = db.begin();
     const tx2 = db.begin();
+    defer tx1.deinit();
+    defer tx2.deinit();
     try tx1.put(.default, "x", "1");
 
     // Outside the transaction, we shouldn't see the value yet.
