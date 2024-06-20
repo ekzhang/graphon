@@ -2,12 +2,15 @@
 
 const std = @import("std");
 const c = @cImport(@cInclude("rocksdb/c.h"));
+const allocator = std.heap.c_allocator;
+
+const test_helpers = @import("../test_helpers.zig");
 
 /// Type for known errors from RocksDB.
-/// Based on the [`Code`](https://github.com/facebook/rocksdb/blob/v9.1.1/include/rocksdb/status.h#L75-L93) enum.
+/// Based on the `Code` enum defined in `include/rocksdb/status.h`.
 ///
-/// In addition to errors returned as a string from API methods, we also can can get error codes
-/// from other places like functions returning null pointers.
+/// In addition to errors returned as a string from API methods, we also can can
+/// get error codes from other places like functions returning null pointers.
 pub const RocksError = error{
     NotFound,
     Corruption,
@@ -117,7 +120,10 @@ pub const RocksDB = struct {
     read_opts: *c.rocksdb_readoptions_t,
     cf_handles: std.EnumArray(ColumnFamily, *c.rocksdb_column_family_handle_t),
 
-    pub fn open(name: [:0]const u8) !RocksDB {
+    pub fn open(name: []const u8) !RocksDB {
+        const nameZ = try allocator.dupeZ(u8, name);
+        defer allocator.free(nameZ);
+
         const options = c.rocksdb_options_create() orelse return error.OutOfMemory;
         defer c.rocksdb_options_destroy(options);
         c.rocksdb_options_set_create_if_missing(options, 1);
@@ -159,7 +165,7 @@ pub const RocksDB = struct {
         var err: ?[*:0]u8 = null;
         const otxn_db = c.rocksdb_optimistictransactiondb_open_column_families(
             options,
-            name.ptr,
+            nameZ.ptr,
             cf_names.values.len,
             &cf_names.values,
             &cf_options.values,
@@ -180,6 +186,7 @@ pub const RocksDB = struct {
         };
     }
 
+    /// Close the database, releasing all resources.
     pub fn close(self: RocksDB) void {
         for (self.cf_handles.values) |cf| {
             c.rocksdb_column_family_handle_destroy(cf);
@@ -190,6 +197,7 @@ pub const RocksDB = struct {
         c.rocksdb_readoptions_destroy(self.read_opts);
     }
 
+    /// Put a key-value pair into the database.
     pub fn put(self: RocksDB, cf: ColumnFamily, key: []const u8, value: []const u8) !void {
         var err: ?[*:0]u8 = null;
         c.rocksdb_put_cf(
@@ -205,6 +213,7 @@ pub const RocksDB = struct {
         if (err) |e| return parse_rocks_error(e);
     }
 
+    /// Get a value from the database by key.
     pub fn get(self: RocksDB, cf: ColumnFamily, key: []const u8) !?PinnableSlice {
         var err: ?[*:0]u8 = null;
         const value = c.rocksdb_get_pinned_cf(
@@ -220,6 +229,25 @@ pub const RocksDB = struct {
         return PinnableSlice{ .rep = val };
     }
 
+    /// Iterate over the database by inclusive-exclusive range.
+    ///
+    /// Make sure that the slices for the lower and upper bounds point to valid
+    /// memory while the iterator is active. If the bounds are freed before the
+    /// iterator is destroyed, it will lead to undefined behavior.
+    pub fn iterate(self: RocksDB, cf: ColumnFamily, lower_bound: ?[]const u8, upper_bound: ?[]const u8) !Iterator {
+        const opts = c.rocksdb_readoptions_create() orelse return error.OutOfMemory;
+        errdefer c.rocksdb_readoptions_destroy(opts);
+        c.rocksdb_readoptions_set_async_io(opts, 1);
+        if (lower_bound) |key|
+            c.rocksdb_readoptions_set_iterate_lower_bound(opts, key.ptr, key.len);
+        if (upper_bound) |key|
+            c.rocksdb_readoptions_set_iterate_upper_bound(opts, key.ptr, key.len);
+        const it = c.rocksdb_create_iterator_cf(self.db, opts, self.cf_handles.get(cf)) orelse return error.OutOfMemory;
+        c.rocksdb_iter_seek_to_first(it);
+        return Iterator{ .rep = it, .opts = opts };
+    }
+
+    /// Delete a key from the database.
     pub fn delete(self: RocksDB, cf: ColumnFamily, key: []const u8) !void {
         var err: ?[*:0]u8 = null;
         c.rocksdb_delete_cf(
@@ -231,6 +259,60 @@ pub const RocksDB = struct {
             &err,
         );
         if (err) |e| return parse_rocks_error(e);
+    }
+
+    /// Delete a range of keys from the database. The range is inclusive-exclusive.
+    pub fn delete_range(self: RocksDB, cf: ColumnFamily, lower_bound: []const u8, upper_bound: []const u8) !void {
+        var err: ?[*:0]u8 = null;
+        c.rocksdb_delete_range_cf(
+            self.db,
+            self.write_opts,
+            self.cf_handles.get(cf),
+            lower_bound.ptr,
+            lower_bound.len,
+            upper_bound.ptr,
+            upper_bound.len,
+            &err,
+        );
+        if (err) |e| return parse_rocks_error(e);
+    }
+};
+
+/// An iterator over a range of keys in a RocksDB database.
+pub const Iterator = struct {
+    rep: *c.rocksdb_iterator_t,
+    opts: *c.rocksdb_readoptions_t,
+
+    /// Check if the current position of the iterator is valid.
+    pub fn valid(self: Iterator) bool {
+        return c.rocksdb_iter_valid(self.rep) != 0;
+    }
+
+    /// Advance the iterator. This invalidates any previous key or value slice.
+    pub fn next(self: Iterator) void {
+        c.rocksdb_iter_next(self.rep);
+    }
+
+    /// Get the key at the current position of the iterator.
+    pub fn key(self: Iterator) []const u8 {
+        var klen: usize = undefined;
+        const kptr = c.rocksdb_iter_key(self.rep, &klen);
+        std.debug.assert(kptr != null);
+        return kptr[0..klen];
+    }
+
+    /// Get the value at the current position of the iterator.
+    pub fn value(self: Iterator) []const u8 {
+        var vlen: usize = undefined;
+        const vptr = c.rocksdb_iter_value(self.rep, &vlen);
+        std.debug.assert(vptr != null);
+        return vptr[0..vlen];
+    }
+
+    /// Release the iterator.
+    pub fn deinit(self: Iterator) void {
+        c.rocksdb_iter_destroy(self.rep);
+        c.rocksdb_readoptions_destroy(self.opts);
     }
 };
 
@@ -254,11 +336,10 @@ pub const PinnableSlice = struct {
 };
 
 test "get and put value" {
-    var tmp = std.testing.tmpDir(.{});
-    try tmp.dir.setAsCwd();
+    var tmp = test_helpers.simpleTmpDir();
     defer tmp.cleanup();
 
-    const db = try RocksDB.open("test.db"); // opened in tmpDir
+    const db = try RocksDB.open(tmp.path("test.db"));
     defer db.close();
 
     try std.testing.expectEqual(null, try db.get(.default, "hello"));
@@ -272,4 +353,46 @@ test "get and put value" {
 
     try db.delete(.default, "hello");
     try std.testing.expectEqual(null, try db.get(.default, "hello"));
+}
+
+test "iterate range" {
+    var tmp = test_helpers.simpleTmpDir();
+    defer tmp.cleanup();
+
+    const db = try RocksDB.open(tmp.path("test.db"));
+    defer db.close();
+
+    try db.put(.default, "a", "1");
+    try db.put(.default, "aa", "2");
+    try db.put(.default, "aaa", "3");
+    try db.put(.default, "aab", "4");
+    try db.put(.default, "ab", "5");
+    {
+        const it = try db.iterate(.default, "aa", "ab");
+        defer it.deinit();
+        try std.testing.expect(it.valid());
+        try std.testing.expectEqualSlices(u8, "aa", it.key());
+        try std.testing.expectEqualSlices(u8, "2", it.value());
+        it.next();
+        try std.testing.expect(it.valid());
+        try std.testing.expectEqualSlices(u8, "aaa", it.key());
+        try std.testing.expectEqualSlices(u8, "3", it.value());
+        it.next();
+        try std.testing.expect(it.valid());
+        try std.testing.expectEqualSlices(u8, "aab", it.key());
+        try std.testing.expectEqualSlices(u8, "4", it.value());
+        it.next();
+        try std.testing.expect(!it.valid());
+    }
+
+    try db.delete_range(.default, "aa", "aab");
+    {
+        const it = try db.iterate(.default, "aa", "ab");
+        defer it.deinit();
+        try std.testing.expect(it.valid());
+        try std.testing.expectEqualSlices(u8, "aab", it.key());
+        try std.testing.expectEqualSlices(u8, "4", it.value());
+        it.next();
+        try std.testing.expect(!it.valid());
+    }
 }
