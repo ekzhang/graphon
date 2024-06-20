@@ -88,7 +88,7 @@ fn parse_rocks_error(err: [*:0]u8) RocksError {
 }
 
 test "parse error from rocksdb_open" {
-    const options = c.rocksdb_options_create() orelse return error.OutOfMemory;
+    const options = c.rocksdb_options_create().?;
     defer c.rocksdb_options_destroy(options);
 
     var err: ?[*:0]u8 = null;
@@ -118,13 +118,15 @@ pub const RocksDB = struct {
     otxn_db: *c.rocksdb_optimistictransactiondb_t,
     write_opts: *c.rocksdb_writeoptions_t,
     read_opts: *c.rocksdb_readoptions_t,
+    otxn_opts: *c.rocksdb_optimistictransaction_options_t,
     cf_handles: std.EnumArray(ColumnFamily, *c.rocksdb_column_family_handle_t),
 
+    /// Open a RocksDB database with the given name, creating it if it does not exist.
     pub fn open(name: []const u8) !RocksDB {
         const nameZ = try allocator.dupeZ(u8, name);
         defer allocator.free(nameZ);
 
-        const options = c.rocksdb_options_create() orelse return error.OutOfMemory;
+        const options = c.rocksdb_options_create().?;
         defer c.rocksdb_options_destroy(options);
         c.rocksdb_options_set_create_if_missing(options, 1);
         c.rocksdb_options_set_create_missing_column_families(options, 1);
@@ -133,25 +135,30 @@ pub const RocksDB = struct {
         c.rocksdb_options_increase_parallelism(options, @as(c_int, @intCast(std.Thread.getCpuCount() catch 2)));
         c.rocksdb_options_set_compaction_style(options, c.rocksdb_level_compaction);
         c.rocksdb_options_optimize_level_style_compaction(options, 512 * 1024 * 1024);
+        c.rocksdb_options_set_write_buffer_size(options, 256 * 1024 * 1024);
 
         // Set 512 MiB in-memory block cache for reads (default: 32 MiB).
         {
-            const table_options = c.rocksdb_block_based_options_create() orelse return error.OutOfMemory;
+            const table_options = c.rocksdb_block_based_options_create().?;
             defer c.rocksdb_block_based_options_destroy(table_options);
-            const cache = c.rocksdb_cache_create_lru(512 * 1024 * 1024) orelse return error.OutOfMemory;
+            const cache = c.rocksdb_cache_create_lru(512 * 1024 * 1024).?;
             defer c.rocksdb_cache_destroy(cache);
             c.rocksdb_block_based_options_set_block_cache(table_options, cache);
             c.rocksdb_options_set_block_based_table_factory(options, table_options);
         }
 
         // pre-create options to avoid repeated allocations
-        const write_opts = c.rocksdb_writeoptions_create() orelse return error.OutOfMemory;
+        const write_opts = c.rocksdb_writeoptions_create().?;
         c.rocksdb_writeoptions_disable_WAL(write_opts, 1);
         errdefer c.rocksdb_writeoptions_destroy(write_opts);
 
-        const read_opts = c.rocksdb_readoptions_create() orelse return error.OutOfMemory;
+        const read_opts = c.rocksdb_readoptions_create().?;
         c.rocksdb_readoptions_set_async_io(read_opts, 1);
         errdefer c.rocksdb_readoptions_destroy(read_opts);
+
+        const otxn_opts = c.rocksdb_optimistictransaction_options_create().?;
+        c.rocksdb_optimistictransaction_options_set_set_snapshot(otxn_opts, 1);
+        errdefer c.rocksdb_optimistictransaction_options_destroy(otxn_opts);
 
         // Define column families and their options.
         var cf_names = std.EnumArray(ColumnFamily, [*:0]const u8).initUndefined();
@@ -182,6 +189,7 @@ pub const RocksDB = struct {
             .otxn_db = otxn_db.?,
             .write_opts = write_opts,
             .read_opts = read_opts,
+            .otxn_opts = otxn_opts,
             .cf_handles = cf_handles,
         };
     }
@@ -234,15 +242,14 @@ pub const RocksDB = struct {
     /// Make sure that the slices for the lower and upper bounds point to valid
     /// memory while the iterator is active. If the bounds are freed before the
     /// iterator is destroyed, it will lead to undefined behavior.
-    pub fn iterate(self: RocksDB, cf: ColumnFamily, lower_bound: ?[]const u8, upper_bound: ?[]const u8) !Iterator {
-        const opts = c.rocksdb_readoptions_create() orelse return error.OutOfMemory;
-        errdefer c.rocksdb_readoptions_destroy(opts);
+    pub fn iterate(self: RocksDB, cf: ColumnFamily, lower_bound: ?[]const u8, upper_bound: ?[]const u8) Iterator {
+        const opts = c.rocksdb_readoptions_create().?;
         c.rocksdb_readoptions_set_async_io(opts, 1);
         if (lower_bound) |key|
             c.rocksdb_readoptions_set_iterate_lower_bound(opts, key.ptr, key.len);
         if (upper_bound) |key|
             c.rocksdb_readoptions_set_iterate_upper_bound(opts, key.ptr, key.len);
-        const it = c.rocksdb_create_iterator_cf(self.db, opts, self.cf_handles.get(cf)) orelse return error.OutOfMemory;
+        const it = c.rocksdb_create_iterator_cf(self.db, opts, self.cf_handles.get(cf)).?;
         c.rocksdb_iter_seek_to_first(it);
         return Iterator{ .rep = it, .opts = opts };
     }
@@ -250,14 +257,7 @@ pub const RocksDB = struct {
     /// Delete a key from the database.
     pub fn delete(self: RocksDB, cf: ColumnFamily, key: []const u8) !void {
         var err: ?[*:0]u8 = null;
-        c.rocksdb_delete_cf(
-            self.db,
-            self.write_opts,
-            self.cf_handles.get(cf),
-            key.ptr,
-            key.len,
-            &err,
-        );
+        c.rocksdb_delete_cf(self.db, self.write_opts, self.cf_handles.get(cf), key.ptr, key.len, &err);
         if (err) |e| return parse_rocks_error(e);
     }
 
@@ -274,6 +274,113 @@ pub const RocksDB = struct {
             upper_bound.len,
             &err,
         );
+        if (err) |e| return parse_rocks_error(e);
+    }
+
+    /// Begin a new optimistic transaction on the database.
+    pub fn begin(self: RocksDB) Transaction {
+        const txn = c.rocksdb_optimistictransaction_begin(self.otxn_db, self.write_opts, self.otxn_opts, null).?;
+        // The snapshot exists because we enabled set_snapshot in otxn_opts.
+        const snapshot = c.rocksdb_transaction_get_snapshot(txn).?;
+        return Transaction{ .txn = txn, .snap = snapshot, .cf_handles = self.cf_handles };
+    }
+};
+
+/// A transaction on a RocksDB database.
+/// Transactions are not thread-safe and should not be shared between threads.
+pub const Transaction = struct {
+    txn: *c.rocksdb_transaction_t,
+    snap: *const c.rocksdb_snapshot_t,
+    cf_handles: std.EnumArray(ColumnFamily, *c.rocksdb_column_family_handle_t),
+
+    /// Release the transaction.
+    pub fn deinit(self: Transaction) void {
+        c.rocksdb_transaction_destroy(self.txn);
+    }
+
+    /// See `RocksDB.put()`.
+    pub fn put(self: Transaction, cf: ColumnFamily, key: []const u8, value: []const u8) !void {
+        var err: ?[*:0]u8 = null;
+        c.rocksdb_transaction_put_cf(
+            self.txn,
+            self.cf_handles.get(cf),
+            key.ptr,
+            key.len,
+            value.ptr,
+            value.len,
+            &err,
+        );
+        if (err) |e| return parse_rocks_error(e);
+    }
+
+    /// See `RocksDB.get()`.
+    pub fn get(self: Transaction, cf: ColumnFamily, key: []const u8) !?PinnableSlice {
+        const opts = c.rocksdb_readoptions_create().?;
+        defer c.rocksdb_readoptions_destroy(opts);
+        c.rocksdb_readoptions_set_snapshot(opts, self.snap); // Use snapshot in transaction.
+        c.rocksdb_readoptions_set_async_io(opts, 1);
+        var err: ?[*:0]u8 = null;
+        const value = c.rocksdb_transaction_get_pinned_cf(
+            self.txn,
+            opts,
+            self.cf_handles.get(cf),
+            key.ptr,
+            key.len,
+            &err,
+        );
+        if (err) |e| return parse_rocks_error(e);
+        const val = value orelse return null;
+        return PinnableSlice{ .rep = val };
+    }
+
+    /// See `RocksDB.iterate()`.
+    pub fn iterate(self: Transaction, cf: ColumnFamily, lower_bound: ?[]const u8, upper_bound: ?[]const u8) Iterator {
+        const opts = c.rocksdb_readoptions_create().?;
+        c.rocksdb_readoptions_set_snapshot(opts, self.snap); // Use snapshot in transaction.
+        c.rocksdb_readoptions_set_async_io(opts, 1);
+        if (lower_bound) |key|
+            c.rocksdb_readoptions_set_iterate_lower_bound(opts, key.ptr, key.len);
+        if (upper_bound) |key|
+            c.rocksdb_readoptions_set_iterate_upper_bound(opts, key.ptr, key.len);
+        const it = c.rocksdb_transaction_create_iterator_cf(self.txn, opts, self.cf_handles.get(cf)).?;
+        c.rocksdb_iter_seek_to_first(it);
+        return Iterator{ .rep = it, .opts = opts };
+    }
+
+    /// See `RocksDB.delete()`.
+    pub fn delete(self: Transaction, cf: ColumnFamily, key: []const u8) !void {
+        var err: ?[*:0]u8 = null;
+        c.rocksdb_transaction_delete_cf(self.txn, self.cf_handles.get(cf), key.ptr, key.len, &err);
+        if (err) |e| return parse_rocks_error(e);
+    }
+
+    /// Commit the transaction and write all batched keys atomically.
+    ///
+    /// This will fail if there are any optimistic transaction conflicts. The
+    /// error returned will be `Busy`. Otherwise, if the memtable history size
+    /// is not large enough, it will return `TryAgain`.
+    pub fn commit(self: Transaction) !void {
+        var err: ?[*:0]u8 = null;
+        c.rocksdb_transaction_commit(self.txn, &err);
+        if (err) |e| return parse_rocks_error(e);
+    }
+
+    /// Rollback the transaction and discard all batched writes.
+    pub fn rollback(self: Transaction) !void {
+        var err: ?[*:0]u8 = null;
+        c.rocksdb_transaction_rollback(self.txn, &err);
+        if (err) |e| return parse_rocks_error(e);
+    }
+
+    /// Set the savepoint, allowing it to be rolled back to this point.
+    pub fn set_savepoint(self: Transaction) void {
+        c.rocksdb_transaction_set_savepoint(self.txn);
+    }
+
+    /// Rollback to the last savepoint, discarding all writes since then.
+    pub fn rollback_to_savepoint(self: Transaction) !void {
+        var err: ?[*:0]u8 = null;
+        c.rocksdb_transaction_rollback_to_savepoint(self.txn, &err);
         if (err) |e| return parse_rocks_error(e);
     }
 };
@@ -321,7 +428,7 @@ pub const PinnableSlice = struct {
     rep: *c.rocksdb_pinnableslice_t,
 
     /// Reference the value as a Zig slice.
-    pub fn items(self: PinnableSlice) []const u8 {
+    pub fn bytes(self: PinnableSlice) []const u8 {
         var vlen: usize = undefined;
         const vptr = c.rocksdb_pinnableslice_value(self.rep, &vlen);
         // Note: vptr cannot be null here, since self.rep is not null.
@@ -348,7 +455,7 @@ test "get and put value" {
     {
         const value = try db.get(.default, "hello") orelse @panic("value for 'hello' not found");
         defer value.deinit();
-        try std.testing.expectEqualSlices(u8, "world", value.items());
+        try std.testing.expectEqualSlices(u8, "world", value.bytes());
     }
 
     try db.delete(.default, "hello");
@@ -368,7 +475,7 @@ test "iterate range" {
     try db.put(.default, "aab", "4");
     try db.put(.default, "ab", "5");
     {
-        const it = try db.iterate(.default, "aa", "ab");
+        const it = db.iterate(.default, "aa", "ab");
         defer it.deinit();
         try std.testing.expect(it.valid());
         try std.testing.expectEqualSlices(u8, "aa", it.key());
@@ -387,7 +494,7 @@ test "iterate range" {
 
     try db.delete_range(.default, "aa", "aab");
     {
-        const it = try db.iterate(.default, "aa", "ab");
+        const it = db.iterate(.default, "aa", "ab");
         defer it.deinit();
         try std.testing.expect(it.valid());
         try std.testing.expectEqualSlices(u8, "aab", it.key());
@@ -395,4 +502,35 @@ test "iterate range" {
         it.next();
         try std.testing.expect(!it.valid());
     }
+}
+
+test "transaction" {
+    var tmp = test_helpers.simpleTmpDir();
+    defer tmp.cleanup();
+
+    const db = try RocksDB.open(tmp.path("test.db"));
+    defer db.close();
+
+    const tx1 = db.begin();
+    const tx2 = db.begin();
+    try tx1.put(.default, "x", "1");
+
+    // Outside the transaction, we shouldn't see the value yet.
+    try std.testing.expectEqual(null, try db.get(.default, "x"));
+    try std.testing.expectEqual(null, try tx2.get(.default, "x"));
+
+    try tx1.commit();
+
+    // After commit, we should see the value.
+    const value = try db.get(.default, "x") orelse @panic("value not found");
+    defer value.deinit();
+    try std.testing.expectEqualSlices(u8, value.bytes(), "1");
+
+    // But tx2 should still not be able to see the value.
+    try std.testing.expectEqual(null, try tx2.get(.default, "x"));
+
+    // If tx2 then modifies "x", it should cause a conflict.
+    try tx2.put(.default, "x", "2");
+    try std.testing.expectError(RocksError.Busy, tx2.commit());
+    try tx2.rollback();
 }
