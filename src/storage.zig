@@ -14,6 +14,14 @@ const Edge = types.Edge;
 
 const test_helpers = @import("test_helpers.zig");
 
+/// This is the main storage engine type.
+///
+/// Based on a RocksDB backend, this object stores nodes and edges. It is also
+/// able to index into the graph data to provide fast lookups, and it is
+/// responsible for maintaining consistent indices.
+///
+/// TODO: Implement transactions in the storage engine! Every query should open
+/// a transaction to ensure snapshot isolation.
 pub const Storage = struct {
     db: RocksDB,
     allocator: Allocator = if (builtin.is_test) std.testing.allocator else std.heap.c_allocator,
