@@ -82,6 +82,16 @@ pub const Storage = struct {
 
         try self.db.put(.edge, &edge.id.toBytes(), list.items);
     }
+
+    // Remove a node from the storage engine.
+    pub fn deleteNode(self: *Storage, id: ElementId) !void {
+        try self.db.delete(.node, &id.toBytes());
+    }
+
+    // Remove an edge from the storage engine.
+    pub fn deleteEdge(self: *Storage, id: ElementId) !void {
+        try self.db.delete(.edge, &id.toBytes());
+    }
 };
 
 test "put node and edge" {
@@ -102,4 +112,9 @@ test "put node and edge" {
     try std.testing.expectEqual(n.id, n2.id);
     try std.testing.expectEqual(e.id, e2.id);
     try std.testing.expectEqual(e.endpoints, e2.endpoints);
+
+    try storage.deleteNode(n.id);
+    try storage.deleteEdge(e.id);
+    try std.testing.expectEqual(null, try storage.getNode(n.id));
+    try std.testing.expectEqual(null, try storage.getEdge(e.id));
 }
