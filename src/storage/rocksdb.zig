@@ -294,7 +294,7 @@ pub const Transaction = struct {
     cf_handles: std.EnumArray(ColumnFamily, *c.rocksdb_column_family_handle_t),
 
     /// Release the transaction.
-    pub fn deinit(self: Transaction) void {
+    pub fn close(self: Transaction) void {
         c.rocksdb_transaction_destroy(self.txn);
     }
 
@@ -417,7 +417,7 @@ pub const Iterator = struct {
     }
 
     /// Release the iterator.
-    pub fn deinit(self: Iterator) void {
+    pub fn close(self: Iterator) void {
         c.rocksdb_iter_destroy(self.rep);
         c.rocksdb_readoptions_destroy(self.opts);
     }
@@ -437,7 +437,7 @@ pub const PinnableSlice = struct {
     }
 
     /// Release the reference to memory associated with this slice.
-    pub fn deinit(self: PinnableSlice) void {
+    pub fn close(self: PinnableSlice) void {
         c.rocksdb_pinnableslice_destroy(self.rep);
     }
 };
@@ -454,7 +454,7 @@ test "get and put value" {
     try db.put(.default, "hello", "world");
     {
         const value = try db.get(.default, "hello") orelse @panic("value for 'hello' not found");
-        defer value.deinit();
+        defer value.close();
         try std.testing.expectEqualSlices(u8, "world", value.bytes());
     }
 
@@ -476,7 +476,7 @@ test "iterate range" {
     try db.put(.default, "ab", "5");
     {
         const it = db.iterate(.default, "aa", "ab");
-        defer it.deinit();
+        defer it.close();
         try std.testing.expect(it.valid());
         try std.testing.expectEqualSlices(u8, "aa", it.key());
         try std.testing.expectEqualSlices(u8, "2", it.value());
@@ -495,7 +495,7 @@ test "iterate range" {
     try db.delete_range(.default, "aa", "aab");
     {
         const it = db.iterate(.default, "aa", "ab");
-        defer it.deinit();
+        defer it.close();
         try std.testing.expect(it.valid());
         try std.testing.expectEqualSlices(u8, "aab", it.key());
         try std.testing.expectEqualSlices(u8, "4", it.value());
@@ -513,8 +513,8 @@ test "transaction" {
 
     const tx1 = db.begin();
     const tx2 = db.begin();
-    defer tx1.deinit();
-    defer tx2.deinit();
+    defer tx1.close();
+    defer tx2.close();
     try tx1.put(.default, "x", "1");
 
     // Outside the transaction, we shouldn't see the value yet.
@@ -524,22 +524,28 @@ test "transaction" {
     try tx1.commit();
 
     // After commit, we should see the value.
-    const value = try db.get(.default, "x") orelse @panic("value not found");
-    defer value.deinit();
-    try std.testing.expectEqualSlices(u8, value.bytes(), "1");
+    {
+        const value = try db.get(.default, "x") orelse @panic("value not found");
+        defer value.close();
+        try std.testing.expectEqualSlices(u8, value.bytes(), "1");
+    }
 
-    const it = db.iterate(.default, "x", null);
-    defer it.deinit();
-    try std.testing.expect(it.valid());
-    try std.testing.expectEqualSlices(u8, "x", it.key());
-    try std.testing.expectEqualSlices(u8, "1", it.value());
+    {
+        const it = db.iterate(.default, "x", null);
+        defer it.close();
+        try std.testing.expect(it.valid());
+        try std.testing.expectEqualSlices(u8, "x", it.key());
+        try std.testing.expectEqualSlices(u8, "1", it.value());
+    }
 
     // But tx2 should still not be able to see the value.
     try std.testing.expectEqual(null, try tx2.get(.default, "x"));
 
-    const it_tx2 = tx2.iterate(.default, "x", null);
-    defer it_tx2.deinit();
-    try std.testing.expect(!it_tx2.valid());
+    {
+        const it = tx2.iterate(.default, "x", null);
+        defer it.close();
+        try std.testing.expect(!it.valid());
+    }
 
     // If tx2 then modifies "x", it should cause a conflict.
     try tx2.put(.default, "x", "2");
