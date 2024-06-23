@@ -21,7 +21,6 @@ pub const Storage = struct {
         defer list.deinit();
 
         const writer = list.writer();
-        try node.id.encode(writer);
         try types.encodeLabels(node.labels, writer);
         try types.encodeProperties(node.properties, writer);
 
@@ -34,7 +33,6 @@ pub const Storage = struct {
         defer list.deinit();
 
         const writer = list.writer();
-        try edge.id.encode(writer);
         try edge.endpoints[0].encode(writer);
         try edge.endpoints[1].encode(writer);
         try writer.writeByte(@intCast(@intFromBool(edge.directed)));
