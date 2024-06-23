@@ -2,15 +2,15 @@
 
 const std = @import("std");
 
-const RocksDB = @import("./storage/rocksdb.zig").RocksDB;
-const RocksError = @import("./storage/rocksdb.zig").RocksError;
+const RocksDB = @import("storage/rocksdb.zig").RocksDB;
+const RocksError = @import("storage/rocksdb.zig").RocksError;
 
-const types = @import("./types.zig");
+const types = @import("types.zig");
 const ElementId = types.ElementId;
 const Node = types.Node;
 const Edge = types.Edge;
 
-const test_helpers = @import("./test_helpers.zig");
+const test_helpers = @import("test_helpers.zig");
 
 pub const Storage = struct {
     db: RocksDB,
@@ -55,9 +55,4 @@ test "put node and edge" {
     const e = Edge{ .id = ElementId.generate(), .endpoints = .{ n.id, n.id }, .directed = false };
     try storage.putNode(n);
     try storage.putEdge(e);
-}
-
-comptime {
-    // Temporary until we write some tests
-    _ = @import("./storage/rocksdb.zig");
 }

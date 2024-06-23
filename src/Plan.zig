@@ -4,8 +4,8 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Plan = @This();
 
-const EdgeDirection = @import("./types.zig").EdgeDirection;
-const Value = @import("./types.zig").Value;
+const EdgeDirection = @import("types.zig").EdgeDirection;
+const Value = @import("types.zig").Value;
 
 /// Nodes that define the query plan.
 nodes: std.ArrayListUnmanaged(Node) = .{},
