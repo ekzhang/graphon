@@ -51,8 +51,8 @@ pub const ElementId = struct {
     }
 
     pub fn decode(reader: anytype) !ElementId {
-        const buf: [12]u8 = undefined;
-        try reader.readAll(&buf);
+        var buf: [12]u8 = undefined;
+        try reader.readNoEof(&buf);
         return ElementId.fromBytes(buf);
     }
 };
@@ -125,7 +125,7 @@ pub fn decodeBytes(allocator: Allocator, reader: anytype) ![]const u8 {
     const len: usize = @intCast(try reader.readInt(u32, .big));
     const buf = try allocator.alloc(u8, len);
     errdefer allocator.free(buf);
-    try reader.readAll(buf);
+    try reader.readNoEof(buf);
     return buf;
 }
 
@@ -138,16 +138,16 @@ pub fn encodeLabels(labels: std.StringArrayHashMapUnmanaged(void), writer: anyty
 
 pub fn decodeLabels(allocator: Allocator, reader: anytype) !std.StringArrayHashMapUnmanaged(void) {
     const len: usize = @intCast(try reader.readInt(u32, .big));
-    var labels = std.StringArrayHashMapUnmanaged(void).init(.{}, .{});
-    errdefer freeLabels(&labels, allocator);
+    var labels: std.StringArrayHashMapUnmanaged(void) = .{};
+    errdefer freeLabels(allocator, &labels);
     for (0..len) |_| {
         const label = try decodeBytes(allocator, reader);
-        try labels.put(label, void{});
+        try labels.put(allocator, label, void{});
     }
     return labels;
 }
 
-pub fn freeLabels(labels: *std.StringArrayHashMapUnmanaged(void), allocator: Allocator) void {
+pub fn freeLabels(allocator: Allocator, labels: *std.StringArrayHashMapUnmanaged(void)) void {
     for (labels.keys()) |label| {
         allocator.free(label);
     }
@@ -165,20 +165,20 @@ pub fn encodeProperties(properties: std.StringArrayHashMapUnmanaged(Value), writ
 
 pub fn decodeProperties(allocator: Allocator, reader: anytype) !std.StringArrayHashMapUnmanaged(Value) {
     const len: usize = @intCast(try reader.readInt(u32, .big));
-    var properties = std.StringArrayHashMapUnmanaged(Value).init(.{}, .{});
-    errdefer freeProperties(&properties, allocator);
+    var properties: std.StringArrayHashMapUnmanaged(Value) = .{};
+    errdefer freeProperties(allocator, &properties);
     for (0..len) |_| {
         const key = try decodeBytes(allocator, reader);
         errdefer allocator.free(key);
-        const value = try Value.decode(allocator, reader);
+        var value = try Value.decode(allocator, reader);
         errdefer value.deinit(allocator);
-        try properties.put(key, value);
+        try properties.put(allocator, key, value);
     }
     return properties;
 }
 
-pub fn freeProperties(properties: *std.StringArrayHashMapUnmanaged(Value), allocator: Allocator) void {
-    for (properties.values()) |value| {
+pub fn freeProperties(allocator: Allocator, properties: *std.StringArrayHashMapUnmanaged(Value)) void {
+    for (properties.values()) |*value| {
         value.deinit(allocator);
     }
     for (properties.keys()) |key| {
@@ -280,8 +280,8 @@ pub const Node = struct {
     properties: std.StringArrayHashMapUnmanaged(Value) = .{},
 
     pub fn deinit(self: *Node, allocator: Allocator) void {
-        freeLabels(&self.labels, allocator);
-        freeProperties(&self.properties, allocator);
+        freeLabels(allocator, &self.labels);
+        freeProperties(allocator, &self.properties);
         self.* = undefined;
     }
 };
@@ -297,8 +297,8 @@ pub const Edge = struct {
     properties: std.StringArrayHashMapUnmanaged(Value) = .{},
 
     pub fn deinit(self: *Edge, allocator: Allocator) void {
-        freeLabels(&self.labels, allocator);
-        freeProperties(&self.properties, allocator);
+        freeLabels(allocator, &self.labels);
+        freeProperties(allocator, &self.properties);
         self.* = undefined;
     }
 };
