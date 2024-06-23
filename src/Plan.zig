@@ -5,6 +5,7 @@ const Allocator = std.mem.Allocator;
 const Plan = @This();
 
 const EdgeDirection = @import("./types.zig").EdgeDirection;
+const Value = @import("./types.zig").Value;
 
 /// Nodes that define the query plan.
 nodes: std.ArrayListUnmanaged(Node) = .{},
@@ -12,7 +13,6 @@ nodes: std.ArrayListUnmanaged(Node) = .{},
 /// Column names that will be returned by the query. Must match arity of results.
 columns: std.ArrayListUnmanaged([]u8) = .{},
 
-/// Release all allocated memory.
 pub fn deinit(self: *Plan, allocator: Allocator) void {
     for (self.nodes.items) |*n| n.deinit(allocator);
     self.nodes.deinit(allocator);
@@ -83,15 +83,15 @@ pub const Node = union(enum) {
     // rel_by_id,
     step: Step,
     // step_between,
-    begin: void,
+    begin,
     repeat, // unimplemented
     // shortest_path,
     join, // unimplemented
     semi_join, // unimplemented
     argument: u16,
-    anti: void,
+    anti,
     project: std.ArrayListUnmanaged(ProjectClause),
-    empty_result: void,
+    empty_result,
     // project_endpoints: ProjectEndpoints,
     filter: std.ArrayListUnmanaged(FilterClause),
     limit: u64,
@@ -99,7 +99,7 @@ pub const Node = union(enum) {
     skip: u64,
     sort: std.MultiArrayList(SortClause),
     top: u64,
-    union_all: void,
+    union_all,
     // update,
     insert_node: InsertNode,
     insert_edge: InsertEdge,
@@ -107,7 +107,6 @@ pub const Node = union(enum) {
     // aggregate,
     // group_aggregate,
 
-    /// Release all allocated memory.
     pub fn deinit(self: *Node, allocator: Allocator) void {
         switch (self.*) {
             .node_scan => |*n| n.deinit(allocator),
@@ -327,7 +326,6 @@ pub const Scan = struct {
     ident: u16, // Name of the bound variable.
     label: ?[]u8,
 
-    /// Release all allocated memory.
     pub fn deinit(self: *Scan, allocator: Allocator) void {
         if (self.label) |l| {
             allocator.free(l);
@@ -342,7 +340,6 @@ pub const Step = struct {
     direction: EdgeDirection,
     edge_label: ?[]u8, // Label to traverse on the edge.
 
-    /// Release all allocated memory.
     pub fn deinit(self: *Step, allocator: Allocator) void {
         if (self.edge_label) |l| {
             allocator.free(l);
@@ -356,7 +353,6 @@ pub const ProjectClause = struct {
     ident: u16,
     exp: Exp,
 
-    /// Release all allocated memory.
     pub fn deinit(self: *ProjectClause, allocator: Allocator) void {
         self.exp.deinit(allocator);
     }
@@ -370,7 +366,6 @@ pub const FilterClause = union(enum) {
         label: []u8,
     },
 
-    /// Release all allocated memory.
     pub fn deinit(self: *FilterClause, allocator: Allocator) void {
         switch (self.*) {
             .bool_exp => |*n| n.deinit(allocator),
@@ -398,7 +393,6 @@ pub const InsertNode = struct {
     labels: std.ArrayListUnmanaged([]u8),
     properties: Properties,
 
-    /// Release all allocated memory.
     pub fn deinit(self: *InsertNode, allocator: Allocator) void {
         for (self.labels.items) |s| allocator.free(s);
         self.labels.deinit(allocator);
@@ -417,7 +411,6 @@ pub const InsertEdge = struct {
     labels: std.ArrayListUnmanaged([]u8),
     properties: Properties,
 
-    /// Release all allocated memory.
     pub fn deinit(self: *InsertEdge, allocator: Allocator) void {
         for (self.labels.items) |s| allocator.free(s);
         self.labels.deinit(allocator);
@@ -431,17 +424,15 @@ pub const InsertEdge = struct {
 /// A list of properties for a node or edge.
 pub const Properties = std.MultiArrayList(struct { key: []u8, value: Exp });
 
-/// A low-level expression used by some query plan operators.
+/// A low-level expression used by query plan operators.
 pub const Exp = union(enum) {
-    literal_int: i64, // TODO: Replace literals with a value type later.
-    literal_string: []u8,
+    literal: Value,
     parameter: u32,
     binop: *BinopExp,
 
-    /// Release all allocated memory.
     pub fn deinit(self: *Exp, allocator: Allocator) void {
         switch (self.*) {
-            .literal_string => |s| allocator.free(s),
+            .literal => |*v| v.deinit(allocator),
             .binop => |b| {
                 b.deinit(allocator);
                 allocator.destroy(b); // Needed because binop is a pointer.
@@ -454,8 +445,7 @@ pub const Exp = union(enum) {
     /// Pretty-print an expression.
     pub fn print(self: Exp, writer: anytype) !void {
         switch (self) {
-            .literal_int => |n| try writer.print("{}", .{n}),
-            .literal_string => |s| try writer.print("'{s}'", .{s}),
+            .literal => |v| try v.print(writer),
             .parameter => |n| try writer.print("${}", .{n}),
             .binop => |b| {
                 // todo: infix formatting / precedence is broken
@@ -472,7 +462,6 @@ pub const BinopExp = struct {
     left: Exp,
     right: Exp,
 
-    /// Release all allocated memory.
     pub fn deinit(self: *BinopExp, allocator: Allocator) void {
         self.left.deinit(allocator);
         self.right.deinit(allocator);
