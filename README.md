@@ -32,10 +32,20 @@ Connected to https://127.0.0.1:7687
 
 ## Features
 
-In addition to the core GQL language that includes graph pattern-matching queries, transactional updates, catalog changes, and list data types, Graphon also supports:
+Graphon implements the [GQL](https://www.gqlstandards.org/home) language, which is defined in the [ISO/IEC 39075:2024](https://www.iso.org/standard/76120.html) international standard for operations on property graphs.
 
-- `CREATE INDEX` on the properties of nodes and relationships
+The core GQL language includes graph pattern-matching queries, transactional updates, catalog changes, and list data types. Graphon also implements:
+
+- Index creation via `CREATE INDEX` on the properties of nodes and relationships
 - Snapshot isolation for concurrent transactions
+
+The following ancillary features are not supported:
+
+- Having multiple directories and schemas in one database
+- Having multiple graphs in one database
+- Graph, node, and edge types
+- Named procedures
+- Timezone offset as per-session state (UTC is assumed)
 
 You could consider using Graphon when you want something small and low-overhead, yet still powerful.
 
