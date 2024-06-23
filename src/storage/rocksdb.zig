@@ -443,9 +443,8 @@ pub const PinnableSlice = struct {
 };
 
 test "get and put value" {
-    var tmp = test_helpers.simpleTmpDir();
+    var tmp = test_helpers.tmp();
     defer tmp.cleanup();
-
     const db = try RocksDB.open(tmp.path("test.db"));
     defer db.close();
 
@@ -463,9 +462,8 @@ test "get and put value" {
 }
 
 test "iterate range" {
-    var tmp = test_helpers.simpleTmpDir();
+    var tmp = test_helpers.tmp();
     defer tmp.cleanup();
-
     const db = try RocksDB.open(tmp.path("test.db"));
     defer db.close();
 
@@ -505,9 +503,8 @@ test "iterate range" {
 }
 
 test "transaction" {
-    var tmp = test_helpers.simpleTmpDir();
+    var tmp = test_helpers.tmp();
     defer tmp.cleanup();
-
     const db = try RocksDB.open(tmp.path("test.db"));
     defer db.close();
 

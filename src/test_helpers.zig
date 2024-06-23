@@ -24,7 +24,7 @@ pub const SimpleTmpDir = struct {
     }
 };
 
-pub fn simpleTmpDir() SimpleTmpDir {
+pub fn tmp() SimpleTmpDir {
     const tmp_dir = testing.tmpDir(.{});
     const paths = std.ArrayList([]const u8).init(testing.allocator);
     return SimpleTmpDir{ .tmp_dir = tmp_dir, .paths = paths };

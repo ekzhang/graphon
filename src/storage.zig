@@ -44,9 +44,8 @@ pub const Storage = struct {
 };
 
 test "put node and edge" {
-    var tmp = test_helpers.simpleTmpDir();
+    var tmp = test_helpers.tmp();
     defer tmp.cleanup();
-
     const db = try RocksDB.open(tmp.path("test.db"));
     defer db.close();
 
