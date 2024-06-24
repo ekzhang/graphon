@@ -1,10 +1,10 @@
 const std = @import("std");
 const allocator = std.heap.c_allocator;
 
-const RocksDB = @import("storage/rocksdb.zig").RocksDB;
+const rocksdb = @import("storage/rocksdb.zig");
 
 fn rocksdb_insert_perf() !void {
-    const db = try RocksDB.open("/tmp/graphon");
+    const db = try rocksdb.DB.open("/tmp/graphon");
     defer db.close();
     std.debug.print("opened database at /tmp/graphon\n", .{});
 

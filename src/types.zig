@@ -100,6 +100,16 @@ pub const EdgeDirection = enum {
     }
 };
 
+/// Whether an edge is going in or out of a node. Stored in adjacency lists.
+pub const EdgeInOut = enum(u8) {
+    /// A directed edge pointing out from a node.
+    outbound = 0,
+    /// An undirected edge.
+    undirected = 1,
+    /// A directed edge pointing into a node.
+    inbound = 1,
+};
+
 /// The dynamically-typed kind of a value.
 pub const ValueKind = enum(u8) {
     string = 1,

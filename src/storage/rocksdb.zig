@@ -11,7 +11,7 @@ const test_helpers = @import("../test_helpers.zig");
 ///
 /// In addition to errors returned as a string from API methods, we also can can
 /// get error codes from other places like functions returning null pointers.
-pub const RocksError = error{
+pub const Error = error{
     NotFound,
     Corruption,
     NotSupported,
@@ -46,45 +46,45 @@ test "slice_starts_with" {
 }
 
 /// Parse a RocksDB error string into a status, logging it. Consumes the string.
-fn parse_rocks_error(err: [*:0]u8) RocksError {
+fn parse_rocks_error(err: [*:0]u8) Error {
     defer c.rocksdb_free(err); // free the memory when done
     log.info("{s}", .{err});
 
     const slice = std.mem.span(err);
-    if (slice.len == 0) return RocksError.UnknownStatus;
+    if (slice.len == 0) return Error.UnknownStatus;
     switch (slice[0]) {
         'C' => {
-            if (slice_starts_with(slice, "Corruption: ")) return RocksError.Corruption;
-            if (slice_starts_with(slice, "Compaction too large: ")) return RocksError.CompactionTooLarge;
-            if (slice_starts_with(slice, "Column family dropped: ")) return RocksError.ColumnFamilyDropped;
+            if (slice_starts_with(slice, "Corruption: ")) return Error.Corruption;
+            if (slice_starts_with(slice, "Compaction too large: ")) return Error.CompactionTooLarge;
+            if (slice_starts_with(slice, "Column family dropped: ")) return Error.ColumnFamilyDropped;
         },
         'I' => {
-            if (slice_starts_with(slice, "Invalid argument: ")) return RocksError.InvalidArgument;
-            if (slice_starts_with(slice, "IO error: ")) return RocksError.IOError;
+            if (slice_starts_with(slice, "Invalid argument: ")) return Error.InvalidArgument;
+            if (slice_starts_with(slice, "IO error: ")) return Error.IOError;
         },
         'M' => {
-            if (slice_starts_with(slice, "Merge in progress: ")) return RocksError.MergeInProgress;
+            if (slice_starts_with(slice, "Merge in progress: ")) return Error.MergeInProgress;
         },
         'N' => {
-            if (slice_starts_with(slice, "NotFound: ")) return RocksError.NotFound;
-            if (slice_starts_with(slice, "Not implemented: ")) return RocksError.NotSupported;
+            if (slice_starts_with(slice, "NotFound: ")) return Error.NotFound;
+            if (slice_starts_with(slice, "Not implemented: ")) return Error.NotSupported;
         },
         'O' => {
-            if (slice_starts_with(slice, "Operation timed out: ")) return RocksError.TimedOut;
-            if (slice_starts_with(slice, "Operation aborted: ")) return RocksError.Aborted;
-            if (slice_starts_with(slice, "Operation expired: ")) return RocksError.Expired;
-            if (slice_starts_with(slice, "Operation failed. Try again.: ")) return RocksError.TryAgain;
+            if (slice_starts_with(slice, "Operation timed out: ")) return Error.TimedOut;
+            if (slice_starts_with(slice, "Operation aborted: ")) return Error.Aborted;
+            if (slice_starts_with(slice, "Operation expired: ")) return Error.Expired;
+            if (slice_starts_with(slice, "Operation failed. Try again.: ")) return Error.TryAgain;
         },
         'R' => {
-            if (slice_starts_with(slice, "Result incomplete: ")) return RocksError.Incomplete;
-            if (slice_starts_with(slice, "Resource busy: ")) return RocksError.Busy;
+            if (slice_starts_with(slice, "Result incomplete: ")) return Error.Incomplete;
+            if (slice_starts_with(slice, "Resource busy: ")) return Error.Busy;
         },
         'S' => {
-            if (slice_starts_with(slice, "Shutdown in progress: ")) return RocksError.ShutdownInProgress;
+            if (slice_starts_with(slice, "Shutdown in progress: ")) return Error.ShutdownInProgress;
         },
         else => {},
     }
-    return RocksError.UnknownStatus;
+    return Error.UnknownStatus;
 }
 
 test "parse error from rocksdb_open" {
@@ -96,7 +96,7 @@ test "parse error from rocksdb_open" {
     try std.testing.expectEqual(null, db);
 
     const status = parse_rocks_error(err.?);
-    try std.testing.expectEqual(RocksError.IOError, status);
+    try std.testing.expectEqual(Error.IOError, status);
 }
 
 /// Constant set of column families defined for the database.
@@ -113,7 +113,7 @@ pub const ColumnFamily = enum(u8) {
 };
 
 /// A handle to a RocksDB database.
-pub const RocksDB = struct {
+pub const DB = struct {
     db: *c.rocksdb_t,
     otxn_db: *c.rocksdb_optimistictransactiondb_t,
     write_opts: *c.rocksdb_writeoptions_t,
@@ -122,7 +122,7 @@ pub const RocksDB = struct {
     cf_handles: std.EnumArray(ColumnFamily, *c.rocksdb_column_family_handle_t),
 
     /// Open a RocksDB database with the given name, creating it if it does not exist.
-    pub fn open(name: []const u8) !RocksDB {
+    pub fn open(name: []const u8) !DB {
         const nameZ = try allocator.dupeZ(u8, name);
         defer allocator.free(nameZ);
 
@@ -184,7 +184,7 @@ pub const RocksDB = struct {
         // Should not be null because otxn_db is only null on error.
         const db = c.rocksdb_optimistictransactiondb_get_base_db(otxn_db);
 
-        return RocksDB{
+        return DB{
             .db = db.?,
             .otxn_db = otxn_db.?,
             .write_opts = write_opts,
@@ -195,7 +195,7 @@ pub const RocksDB = struct {
     }
 
     /// Close the database, releasing all resources.
-    pub fn close(self: RocksDB) void {
+    pub fn close(self: DB) void {
         for (self.cf_handles.values) |cf| {
             c.rocksdb_column_family_handle_destroy(cf);
         }
@@ -206,7 +206,7 @@ pub const RocksDB = struct {
     }
 
     /// Put a key-value pair into the database.
-    pub fn put(self: RocksDB, cf: ColumnFamily, key: []const u8, value: []const u8) !void {
+    pub fn put(self: DB, cf: ColumnFamily, key: []const u8, value: []const u8) !void {
         var err: ?[*:0]u8 = null;
         c.rocksdb_put_cf(
             self.db,
@@ -222,7 +222,7 @@ pub const RocksDB = struct {
     }
 
     /// Get a value from the database by key.
-    pub fn get(self: RocksDB, cf: ColumnFamily, key: []const u8) !?PinnableSlice {
+    pub fn get(self: DB, cf: ColumnFamily, key: []const u8) !?PinnableSlice {
         var err: ?[*:0]u8 = null;
         const value = c.rocksdb_get_pinned_cf(
             self.db,
@@ -242,7 +242,7 @@ pub const RocksDB = struct {
     /// Make sure that the slices for the lower and upper bounds point to valid
     /// memory while the iterator is active. If the bounds are freed before the
     /// iterator is destroyed, it will lead to undefined behavior.
-    pub fn iterate(self: RocksDB, cf: ColumnFamily, lower_bound: ?[]const u8, upper_bound: ?[]const u8) Iterator {
+    pub fn iterate(self: DB, cf: ColumnFamily, lower_bound: ?[]const u8, upper_bound: ?[]const u8) Iterator {
         const opts = c.rocksdb_readoptions_create().?;
         c.rocksdb_readoptions_set_async_io(opts, 1);
         if (lower_bound) |key|
@@ -255,14 +255,14 @@ pub const RocksDB = struct {
     }
 
     /// Delete a key from the database.
-    pub fn delete(self: RocksDB, cf: ColumnFamily, key: []const u8) !void {
+    pub fn delete(self: DB, cf: ColumnFamily, key: []const u8) !void {
         var err: ?[*:0]u8 = null;
         c.rocksdb_delete_cf(self.db, self.write_opts, self.cf_handles.get(cf), key.ptr, key.len, &err);
         if (err) |e| return parse_rocks_error(e);
     }
 
     /// Delete a range of keys from the database. The range is inclusive-exclusive.
-    pub fn delete_range(self: RocksDB, cf: ColumnFamily, lower_bound: []const u8, upper_bound: []const u8) !void {
+    pub fn deleteRange(self: DB, cf: ColumnFamily, lower_bound: []const u8, upper_bound: []const u8) !void {
         var err: ?[*:0]u8 = null;
         c.rocksdb_delete_range_cf(
             self.db,
@@ -278,7 +278,7 @@ pub const RocksDB = struct {
     }
 
     /// Begin a new optimistic transaction on the database.
-    pub fn begin(self: RocksDB) Transaction {
+    pub fn begin(self: DB) Transaction {
         const txn = c.rocksdb_optimistictransaction_begin(self.otxn_db, self.write_opts, self.otxn_opts, null).?;
         // The snapshot exists because we enabled set_snapshot in otxn_opts.
         const snapshot = c.rocksdb_transaction_get_snapshot(txn).?;
@@ -314,18 +314,26 @@ pub const Transaction = struct {
     }
 
     /// See `RocksDB.get()`.
-    pub fn get(self: Transaction, cf: ColumnFamily, key: []const u8) !?PinnableSlice {
+    ///
+    /// This function uses the GetForUpdate() operation to hint the underlying
+    /// RocksDB transaction engine to trigger read-write conflicts. This is the
+    /// only way to trigger conflicts, as `iterate()` does not do the check.
+    ///
+    /// If `exclusive` is true, the transaction is recorded as having written to
+    /// this key.
+    pub fn get(self: Transaction, cf: ColumnFamily, key: []const u8, exclusive: bool) !?PinnableSlice {
         const opts = c.rocksdb_readoptions_create().?;
         defer c.rocksdb_readoptions_destroy(opts);
         c.rocksdb_readoptions_set_snapshot(opts, self.snap); // Use snapshot in transaction.
         c.rocksdb_readoptions_set_async_io(opts, 1);
         var err: ?[*:0]u8 = null;
-        const value = c.rocksdb_transaction_get_pinned_cf(
+        const value = c.rocksdb_transaction_get_pinned_for_update_cf(
             self.txn,
             opts,
             self.cf_handles.get(cf),
             key.ptr,
             key.len,
+            @intFromBool(exclusive),
             &err,
         );
         if (err) |e| return parse_rocks_error(e);
@@ -445,7 +453,7 @@ pub const PinnableSlice = struct {
 test "get and put value" {
     var tmp = test_helpers.tmp();
     defer tmp.cleanup();
-    const db = try RocksDB.open(tmp.path("test.db"));
+    const db = try DB.open(tmp.path("test.db"));
     defer db.close();
 
     try std.testing.expectEqual(null, try db.get(.default, "hello"));
@@ -464,7 +472,7 @@ test "get and put value" {
 test "iterate range" {
     var tmp = test_helpers.tmp();
     defer tmp.cleanup();
-    const db = try RocksDB.open(tmp.path("test.db"));
+    const db = try DB.open(tmp.path("test.db"));
     defer db.close();
 
     try db.put(.default, "a", "1");
@@ -490,7 +498,7 @@ test "iterate range" {
         try std.testing.expect(!it.valid());
     }
 
-    try db.delete_range(.default, "aa", "aab");
+    try db.deleteRange(.default, "aa", "aab");
     {
         const it = db.iterate(.default, "aa", "ab");
         defer it.close();
@@ -505,7 +513,7 @@ test "iterate range" {
 test "transaction" {
     var tmp = test_helpers.tmp();
     defer tmp.cleanup();
-    const db = try RocksDB.open(tmp.path("test.db"));
+    const db = try DB.open(tmp.path("test.db"));
     defer db.close();
 
     const tx1 = db.begin();
@@ -516,7 +524,7 @@ test "transaction" {
 
     // Outside the transaction, we shouldn't see the value yet.
     try std.testing.expectEqual(null, try db.get(.default, "x"));
-    try std.testing.expectEqual(null, try tx2.get(.default, "x"));
+    try std.testing.expectEqual(null, try tx2.get(.default, "x", false));
 
     try tx1.commit();
 
@@ -536,7 +544,7 @@ test "transaction" {
     }
 
     // But tx2 should still not be able to see the value.
-    try std.testing.expectEqual(null, try tx2.get(.default, "x"));
+    try std.testing.expectEqual(null, try tx2.get(.default, "x", false));
 
     {
         const it = tx2.iterate(.default, "x", null);
@@ -546,6 +554,6 @@ test "transaction" {
 
     // If tx2 then modifies "x", it should cause a conflict.
     try tx2.put(.default, "x", "2");
-    try std.testing.expectError(RocksError.Busy, tx2.commit());
+    try std.testing.expectError(Error.Busy, tx2.commit());
     try tx2.rollback();
 }
