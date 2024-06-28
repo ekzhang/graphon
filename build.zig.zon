@@ -1,7 +1,7 @@
 .{
     .name = "graphon",
     .version = "0.0.0",
-    .minimum_zig_version = "0.12.0",
+    .minimum_zig_version = "0.13.0",
 
     // This field is optional.
     // Each dependency must either provide a `url` and `hash`, or a `path`.
