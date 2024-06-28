@@ -9,15 +9,15 @@ const Value = types.Value;
 
 const Plan = @This();
 
-/// Nodes that define the query plan.
-nodes: std.ArrayListUnmanaged(Node) = .{},
+/// Operators that define the query plan.
+ops: std.ArrayListUnmanaged(Operator) = .{},
 
 /// Column names that will be returned by the query. Must match arity of results.
 columns: std.ArrayListUnmanaged([]u8) = .{},
 
 pub fn deinit(self: *Plan, allocator: Allocator) void {
-    for (self.nodes.items) |*n| n.deinit(allocator);
-    self.nodes.deinit(allocator);
+    for (self.ops.items) |*op| op.deinit(allocator);
+    self.ops.deinit(allocator);
     for (self.columns.items) |n| allocator.free(n);
     self.columns.deinit(allocator);
 }
@@ -59,10 +59,10 @@ pub fn print(self: Plan, writer: anytype) !void {
     try writer.writeByte('}');
 
     var level: usize = 1;
-    var idx = self.nodes.items.len;
+    var idx = self.ops.items.len;
     while (idx > 0) : (idx -= 1) {
-        const n = self.nodes.items[idx - 1];
-        const level_change: i32 = switch (n) {
+        const op = self.ops.items[idx - 1];
+        const level_change: i32 = switch (op) {
             .repeat, .semi_join, .join, .union_all => 1,
             .begin => -1,
             else => 0,
@@ -72,15 +72,15 @@ pub fn print(self: Plan, writer: anytype) !void {
         }
         try writer.writeByte('\n');
         try writer.writeByteNTimes(' ', 2 * level);
-        try n.print(writer);
+        try op.print(writer);
         if (level_change == 1) {
             level += 1;
         }
     }
 }
 
-/// A node in the query plan, stored as a list.
-pub const Node = union(enum) {
+/// A single step in the query plan, which may depend on previous steps.
+pub const Operator = union(enum) {
     node_scan: Scan,
     // node_by_id,
     rel_scan: Scan,
@@ -111,7 +111,7 @@ pub const Node = union(enum) {
     // aggregate,
     // group_aggregate,
 
-    pub fn deinit(self: *Node, allocator: Allocator) void {
+    pub fn deinit(self: *Operator, allocator: Allocator) void {
         switch (self.*) {
             .node_scan => |*n| n.deinit(allocator),
             .rel_scan => |*n| n.deinit(allocator),
@@ -144,7 +144,7 @@ pub const Node = union(enum) {
     }
 
     /// Pretty-print a query plan node.
-    pub fn print(self: Node, writer: anytype) !void {
+    pub fn print(self: Operator, writer: anytype) !void {
         const node_name = switch (self) {
             .node_scan => "NodeScan",
             .rel_scan => "RelScan",
@@ -498,7 +498,7 @@ test "can create, free and print plan" {
     defer plan.deinit(std.testing.allocator);
 
     try plan.columns.append(allocator, try allocator.dupe(u8, "my_node"));
-    try plan.nodes.append(allocator, Node{
+    try plan.ops.append(allocator, Operator{
         .node_scan = Scan{
             .ident = 0,
             .label = null,
@@ -510,7 +510,7 @@ test "can create, free and print plan" {
         \\  NodeScan (%0)
     ));
 
-    try plan.nodes.append(allocator, Node{
+    try plan.ops.append(allocator, Operator{
         .step = Step{
             .ident_src = 0,
             .ident_edge = 1,
