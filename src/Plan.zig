@@ -38,15 +38,15 @@ pub fn deinit(self: *Plan, allocator: Allocator) void {
 ///
 /// ```
 /// Plan{a.name, c.name, duration}
-///   NodeScan (%0:Person)
-///   Step (%0)-[%1:Friend]-(%2)
-///   Filter %2:Person, %2.age > %0.age + 3
-///   Begin
-///     Argument %2
-///     Step (%2)-[:FavoriteFood]->(%3)
-///     Filter %3.name = 'Pizza'
-///   SemiJoin
 ///   Project %4: %0.name, %5: %2.name, %6: %1.duration
+///   SemiJoin
+///     Filter %3.name = 'Pizza'
+///     Step (%2)-[:FavoriteFood]->(%3)
+///     Argument %2
+///   Begin
+///   Filter %2:Person, %2.age > %0.age + 3
+///   Step (%0)-[%1:Friend]-(%2)
+///   NodeScan (%0:Person)
 /// ```
 pub fn print(self: Plan, writer: anytype) !void {
     try writer.writeAll("Plan{");
@@ -59,10 +59,12 @@ pub fn print(self: Plan, writer: anytype) !void {
     try writer.writeByte('}');
 
     var level: usize = 1;
-    for (self.nodes.items) |n| {
+    var idx = self.nodes.items.len;
+    while (idx > 0) : (idx -= 1) {
+        const n = self.nodes.items[idx - 1];
         const level_change: i32 = switch (n) {
-            .begin => 1,
-            .repeat, .semi_join, .join, .union_all => -1,
+            .repeat, .semi_join, .join, .union_all => 1,
+            .begin => -1,
             else => 0,
         };
         if (level_change == -1 and level > 1) {
@@ -520,7 +522,7 @@ test "can create, free and print plan" {
 
     try check_plan_snapshot(plan, snap(@src(),
         \\Plan{my_node}
-        \\  NodeScan (%0)
         \\  Step (%0)~[%1:Likes]~>(%2)
+        \\  NodeScan (%0)
     ));
 }
