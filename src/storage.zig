@@ -111,7 +111,9 @@ pub const Transaction = struct {
         }
 
         var already_exists = false;
-        if (try self.getEdge(edge.id)) |old_edge| {
+        var old_edge_opt = try self.getEdge(edge.id);
+        if (old_edge_opt) |*old_edge| {
+            defer old_edge.deinit(self.allocator);
             if (old_edge.endpoints[0].value != edge.endpoints[0].value or
                 old_edge.endpoints[1].value != edge.endpoints[1].value or
                 old_edge.directed != edge.directed)
@@ -280,8 +282,10 @@ test "put node and edge" {
     try txn.putNode(n);
     try txn.putEdge(e);
 
-    const n2 = try txn.getNode(n.id) orelse @panic("n not found");
-    const e2 = try txn.getEdge(e.id) orelse @panic("e not found");
+    var n2 = try txn.getNode(n.id) orelse @panic("n not found");
+    defer n2.deinit(txn.allocator);
+    var e2 = try txn.getEdge(e.id) orelse @panic("e not found");
+    defer e2.deinit(txn.allocator);
 
     try std.testing.expectEqual(n.id, n2.id);
     try std.testing.expectEqual(e.id, e2.id);
@@ -354,7 +358,8 @@ test "iterate adjacency" {
         try txn2.commit();
     }
 
-    try std.testing.expect(try txn.getNode(n2.id) != null); // triggers txn conflict
+    var n2_fetch = try txn.getNode(n2.id) orelse @panic("n2 not found");
+    n2_fetch.deinit(txn.allocator);
     {
         var it = try txn.iterateAdj(n1.id, .simple, .simple);
         defer it.close();
