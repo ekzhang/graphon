@@ -272,8 +272,8 @@ test "put node and edge" {
     const db = try rocksdb.DB.open(tmp.path("test.db"));
     defer db.close();
 
-    const storage = Storage{ .db = db };
-    const txn = storage.txn();
+    const store = Storage{ .db = db };
+    const txn = store.txn();
     defer txn.close();
 
     const n = Node{ .id = ElementId.generate() };
@@ -303,7 +303,7 @@ test "iterate adjacency" {
     const db = try rocksdb.DB.open(tmp.path("test.db"));
     defer db.close();
 
-    const storage = Storage{ .db = db };
+    const store = Storage{ .db = db };
 
     const n1 = Node{ .id = ElementId.generate() };
     const n2 = Node{ .id = ElementId.generate() };
@@ -312,7 +312,7 @@ test "iterate adjacency" {
     const e2 = Edge{ .id = ElementId.generate(), .endpoints = .{ n2.id, n3.id }, .directed = false };
 
     {
-        const txn = storage.txn();
+        const txn = store.txn();
         defer txn.close();
 
         try txn.putNode(n1);
@@ -323,7 +323,7 @@ test "iterate adjacency" {
         try txn.commit();
     }
 
-    const txn = storage.txn();
+    const txn = store.txn();
     defer txn.close();
 
     {
@@ -352,7 +352,7 @@ test "iterate adjacency" {
 
     // Open a second transaction to delete n2, ensure no interference.
     {
-        const txn2 = storage.txn();
+        const txn2 = store.txn();
         defer txn2.close();
         try txn2.deleteNode(n2.id);
         try txn2.commit();

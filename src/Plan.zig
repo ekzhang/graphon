@@ -495,7 +495,7 @@ test "can create, free and print plan" {
     const allocator = std.testing.allocator;
     // MATCH (n) RETURN n AS my_node;
     var plan = Plan{};
-    defer plan.deinit(std.testing.allocator);
+    defer plan.deinit(allocator);
 
     try plan.columns.append(allocator, try allocator.dupe(u8, "my_node"));
     try plan.ops.append(allocator, Operator{
