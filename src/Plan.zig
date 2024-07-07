@@ -125,6 +125,7 @@ pub const Operator = union(enum) {
     anti,
     project: std.ArrayListUnmanaged(ProjectClause),
     // project_endpoints: ProjectEndpoints,
+    empty_result,
     filter: std.ArrayListUnmanaged(FilterClause),
     limit: u64,
     distinct: std.ArrayListUnmanaged(u16),
@@ -154,6 +155,7 @@ pub const Operator = union(enum) {
                 for (n.items) |*c| c.deinit(allocator);
                 n.deinit(allocator);
             },
+            .empty_result => {},
             .filter => |*n| {
                 for (n.items) |*c| c.deinit(allocator);
                 n.deinit(allocator);
@@ -183,6 +185,7 @@ pub const Operator = union(enum) {
             .argument => "Argument",
             .anti => "Anti",
             .project => "Project",
+            .empty_result => "EmptyResult",
             .filter => "Filter",
             .limit => "Limit",
             .distinct => "Distinct",
@@ -230,6 +233,7 @@ pub const Operator = union(enum) {
                     first = false;
                 }
             },
+            .empty_result => {},
             .filter => |n| {
                 var first = true;
                 for (n.items) |c| {

@@ -86,6 +86,7 @@ pub const Executor = struct {
         const op_index = end_index - 1;
         return switch (exec.plan.ops.items[op_index]) {
             .node_scan => |_| @panic("todo!"),
+            .empty_result => try simple_ops.runEmptyResult(exec, op_index),
             .limit => |op| try simple_ops.runLimit(op, exec, op_index),
             .skip => |op| try simple_ops.runSkip(op, exec, op_index),
             else => std.debug.panic(

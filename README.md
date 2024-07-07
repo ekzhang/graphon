@@ -84,6 +84,7 @@ Query plans are binary trees constructed out of the following operations. The de
 - `Anti`: Test for the absence of a pattern, yielding a single row.
 - `Project`: Execute expressions or remap variable names.
 - `ProjectEndpoints`: Find the endpoints of an edge.
+- `EmptyResult`: Retrieve all results and drop them, used as the last operator in mutations.
 - `Filter`: Filter results by label presence or conditional expression.
 - `Limit`: Limit the count of result rows.
 - `Distinct`: Remove duplicate rows from the result.
