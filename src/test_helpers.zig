@@ -3,6 +3,9 @@
 const std = @import("std");
 const testing = std.testing;
 
+const rocksdb = @import("storage/rocksdb.zig");
+const storage = @import("storage.zig");
+
 pub const SimpleTmpDir = struct {
     tmp_dir: testing.TmpDir,
     paths: std.ArrayList([]const u8),
@@ -24,6 +27,11 @@ pub const SimpleTmpDir = struct {
         self.paths.append(full_path) catch
             std.debug.panic("failed to append full_path", .{});
         return full_path;
+    }
+
+    pub fn store(self: *SimpleTmpDir, subpath: []const u8) !storage.Storage {
+        const db = try rocksdb.DB.open(self.path(subpath));
+        return .{ .db = db };
     }
 };
 

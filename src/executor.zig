@@ -7,7 +7,6 @@ const Plan = @import("Plan.zig");
 const types = @import("types.zig");
 const Value = types.Value;
 const storage = @import("storage.zig");
-const rocksdb = @import("storage/rocksdb.zig");
 
 const simple_ops = @import("executor/simple_ops.zig");
 
@@ -168,10 +167,10 @@ fn stateForOperator(op: Plan.Operator, allocator: Allocator) !OperatorState {
 test "basic Executor" {
     var tmp = test_helpers.tmp();
     defer tmp.cleanup();
-    const db = try rocksdb.DB.open(tmp.path("test.db"));
-    defer db.close();
 
-    const store = storage.Storage{ .db = db };
+    const store = try tmp.store("test.db");
+    defer store.db.close();
+
     const txn = store.txn();
     defer txn.close();
 
