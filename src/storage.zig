@@ -282,9 +282,9 @@ test "put node and edge" {
     try txn.putNode(n);
     try txn.putEdge(e);
 
-    var n2 = try txn.getNode(n.id) orelse @panic("n not found");
+    var n2 = try txn.getNode(n.id) orelse std.debug.panic("n not found", .{});
     defer n2.deinit(txn.allocator);
-    var e2 = try txn.getEdge(e.id) orelse @panic("e not found");
+    var e2 = try txn.getEdge(e.id) orelse std.debug.panic("e not found", .{});
     defer e2.deinit(txn.allocator);
 
     try std.testing.expectEqual(n.id, n2.id);
@@ -358,7 +358,7 @@ test "iterate adjacency" {
         try txn2.commit();
     }
 
-    var n2_fetch = try txn.getNode(n2.id) orelse @panic("n2 not found");
+    var n2_fetch = try txn.getNode(n2.id) orelse std.debug.panic("n2 not found", .{});
     n2_fetch.deinit(txn.allocator);
     {
         var it = try txn.iterateAdj(n1.id, .simple, .simple);

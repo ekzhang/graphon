@@ -12,14 +12,13 @@ const Plan = @This();
 /// Operators that define the query plan.
 ops: std.ArrayListUnmanaged(Operator) = .{},
 
-/// Column names that will be returned by the query. Must match arity of results.
-columns: std.ArrayListUnmanaged([]u8) = .{},
+/// Results that will be returned by the query, one per value column.
+results: std.ArrayListUnmanaged(u16) = .{},
 
 pub fn deinit(self: *Plan, allocator: Allocator) void {
     for (self.ops.items) |*op| op.deinit(allocator);
     self.ops.deinit(allocator);
-    for (self.columns.items) |n| allocator.free(n);
-    self.columns.deinit(allocator);
+    self.results.deinit(allocator);
 }
 
 /// Pretty-print the provided query plan.
@@ -37,7 +36,7 @@ pub fn deinit(self: *Plan, allocator: Allocator) void {
 /// One possible query plan is:
 ///
 /// ```
-/// Plan{a.name, c.name, duration}
+/// Plan{%4, %5, %6}
 ///   Project %4: %0.name, %5: %2.name, %6: %1.duration
 ///   SemiJoin
 ///     Filter %3.name = 'Pizza'
@@ -51,9 +50,9 @@ pub fn deinit(self: *Plan, allocator: Allocator) void {
 pub fn print(self: Plan, writer: anytype) !void {
     try writer.writeAll("Plan{");
     var first = true;
-    for (self.columns.items) |c| {
+    for (self.results.items) |r| {
         if (!first) try writer.writeAll(", ");
-        try writer.writeAll(c);
+        try writer.print("%{}", .{r});
         first = false;
     }
     try writer.writeByte('}');
@@ -79,6 +78,36 @@ pub fn print(self: Plan, writer: anytype) !void {
     }
 }
 
+fn idents_chk(ret: *u16, values: anytype) void {
+    inline for (values) |v| {
+        if (@as(?u16, v)) |value| {
+            if (value + 1 > ret.*) {
+                ret.* = value + 1;
+            }
+        }
+    }
+}
+
+/// Return the number of identifiers in the plan.
+pub fn idents(self: Plan) u16 {
+    var ret: u16 = 0;
+    for (self.ops.items) |op| {
+        switch (op) {
+            .node_scan => |n| idents_chk(&ret, .{n.ident}),
+            .rel_scan => |n| idents_chk(&ret, .{n.ident}),
+            .step => |n| idents_chk(&ret, .{ n.ident_edge, n.ident_dst }),
+            .argument => |n| idents_chk(&ret, .{n}),
+            .project => |n| {
+                for (n.items) |c| idents_chk(&ret, .{c.ident});
+            },
+            .insert_node => |n| idents_chk(&ret, .{n.ident}),
+            .insert_edge => |n| idents_chk(&ret, .{n.ident}),
+            else => {},
+        }
+    }
+    return ret;
+}
+
 /// A single step in the query plan, which may depend on previous steps.
 pub const Operator = union(enum) {
     node_scan: Scan,
@@ -95,7 +124,6 @@ pub const Operator = union(enum) {
     argument: u16,
     anti,
     project: std.ArrayListUnmanaged(ProjectClause),
-    empty_result,
     // project_endpoints: ProjectEndpoints,
     filter: std.ArrayListUnmanaged(FilterClause),
     limit: u64,
@@ -126,7 +154,6 @@ pub const Operator = union(enum) {
                 for (n.items) |*c| c.deinit(allocator);
                 n.deinit(allocator);
             },
-            .empty_result => {},
             .filter => |*n| {
                 for (n.items) |*c| c.deinit(allocator);
                 n.deinit(allocator);
@@ -156,7 +183,6 @@ pub const Operator = union(enum) {
             .argument => "Argument",
             .anti => "Anti",
             .project => "Project",
-            .empty_result => "EmptyResult",
             .filter => "Filter",
             .limit => "Limit",
             .distinct => "Distinct",
@@ -184,9 +210,9 @@ pub const Operator = union(enum) {
                 try print_node_spec(writer, n.ident_dst, null);
             },
             .begin => {},
-            .repeat => @panic("repeat unimplemented"),
-            .join => @panic("join unimplemented"),
-            .semi_join => @panic("semi_join unimplemented"),
+            .repeat => std.debug.panic("repeat unimplemented", .{}),
+            .join => std.debug.panic("join unimplemented", .{}),
+            .semi_join => std.debug.panic("semi_join unimplemented", .{}),
             .argument => |n| {
                 try writer.print(" %{}", .{n});
             },
@@ -204,7 +230,6 @@ pub const Operator = union(enum) {
                     first = false;
                 }
             },
-            .empty_result => {},
             .filter => |n| {
                 var first = true;
                 for (n.items) |c| {
@@ -351,8 +376,7 @@ pub const Step = struct {
     }
 };
 
-/// An ordered single item in the project output. If an ident is not in any
-/// clause, it is dropped. If exp is null, keep the existing value.
+/// A new variable assignment made in a Project operator.
 pub const ProjectClause = struct {
     ident: u16,
     exp: Exp,
@@ -497,7 +521,7 @@ test "can create, free and print plan" {
     var plan = Plan{};
     defer plan.deinit(allocator);
 
-    try plan.columns.append(allocator, try allocator.dupe(u8, "my_node"));
+    try plan.results.append(allocator, 0);
     try plan.ops.append(allocator, Operator{
         .node_scan = Scan{
             .ident = 0,
@@ -506,7 +530,7 @@ test "can create, free and print plan" {
     });
 
     try check_plan_snapshot(plan, snap(@src(),
-        \\Plan{my_node}
+        \\Plan{%0}
         \\  NodeScan (%0)
     ));
 
@@ -519,10 +543,14 @@ test "can create, free and print plan" {
             .edge_label = try allocator.dupe(u8, "Likes"),
         },
     });
+    plan.results.items[0] = 1;
+    try plan.results.append(allocator, 2);
 
     try check_plan_snapshot(plan, snap(@src(),
-        \\Plan{my_node}
+        \\Plan{%1, %2}
         \\  Step (%0)~[%1:Likes]~>(%2)
         \\  NodeScan (%0)
     ));
+
+    try std.testing.expectEqual(3, plan.idents());
 }

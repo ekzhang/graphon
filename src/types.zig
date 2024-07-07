@@ -224,6 +224,14 @@ pub const Value = union(ValueKind) {
         self.* = undefined;
     }
 
+    /// Duplicate a value, using the provided allocator.
+    pub fn dupe(self: Value, allocator: Allocator) !Value {
+        return switch (self) {
+            .string => |s| .{ .string = try allocator.dupe(u8, s) },
+            else => self,
+        };
+    }
+
     /// Pretty-print a value to a writer.
     pub fn print(self: Value, writer: anytype) !void {
         switch (self) {

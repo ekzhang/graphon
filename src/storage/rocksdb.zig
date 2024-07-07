@@ -460,7 +460,8 @@ test "get and put value" {
 
     try db.put(.default, "hello", "world");
     {
-        const value = try db.get(.default, "hello") orelse @panic("value for 'hello' not found");
+        const value = try db.get(.default, "hello") orelse
+            std.debug.panic("value for 'hello' not found", .{});
         defer value.close();
         try std.testing.expectEqualSlices(u8, "world", value.bytes());
     }
@@ -530,7 +531,8 @@ test "transaction" {
 
     // After commit, we should see the value.
     {
-        const value = try db.get(.default, "x") orelse @panic("value not found");
+        const value = try db.get(.default, "x") orelse
+            std.debug.panic("value not found", .{});
         defer value.close();
         try std.testing.expectEqualSlices(u8, value.bytes(), "1");
     }
