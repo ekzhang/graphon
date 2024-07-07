@@ -167,6 +167,11 @@ pub const Transaction = struct {
         try self.inner.delete(.adj, &adj.reverse().packIntoKey());
     }
 
+    /// Iterate over all nodes.
+    pub fn iterateNodes(self: Transaction) !NodeIterator {
+        return .{ .inner = self.inner.iterate(.node, null, null) };
+    }
+
     /// Iterate over a subset of the adjacency list.
     ///
     /// This function does not access any of the node or edge data, or check
@@ -190,6 +195,24 @@ pub const Transaction = struct {
             .bounds = bounds,
             .allocator = self.allocator,
         };
+    }
+};
+
+// TODO: This iterator is inefficient since it ignores the values.
+pub const NodeIterator = struct {
+    inner: rocksdb.Iterator,
+
+    pub fn close(self: NodeIterator) void {
+        self.inner.close();
+    }
+
+    pub fn next(self: *NodeIterator) !?ElementId {
+        if (!self.inner.valid()) return null;
+        const key = self.inner.key();
+        if (key.len != 12) {
+            return Error.CorruptedIndex;
+        }
+        return ElementId.fromBytes(key[0..12].*);
     }
 };
 
@@ -255,9 +278,7 @@ pub const AdjIterator = struct {
     }
 
     pub fn next(self: *AdjIterator) !?AdjEntry {
-        if (!self.inner.valid()) {
-            return null;
-        }
+        if (!self.inner.valid()) return null;
         const key = self.inner.key();
         const value = self.inner.value();
         const result = try AdjEntry.unpackFromKeyValue(key, value);

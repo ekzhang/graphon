@@ -17,7 +17,7 @@ const operator_impls = blk: {
     // Specify implementations of operators here.
     // Format: { op, state type, destructor, run function }
     const operator_impls_raw = .{
-        .{ Plan.Operator.node_scan, scan_ops.State, null, scan_ops.runNodeScan },
+        .{ Plan.Operator.node_scan, scan_ops.NodeScanState, scan_ops.NodeScanState.deinit, scan_ops.runNodeScan },
         .{ Plan.Operator.empty_result, void, null, simple_ops.runEmptyResult },
         .{ Plan.Operator.limit, u64, null, simple_ops.runLimit },
         .{ Plan.Operator.skip, bool, null, simple_ops.runSkip },
@@ -26,18 +26,23 @@ const operator_impls = blk: {
     var impls: std.EnumMap(std.meta.Tag(Plan.Operator), OperatorImpl) = .{};
 
     for (operator_impls_raw) |impl_spec| {
+        const spec_tag, const spec_state, const spec_deinit, const spec_run = impl_spec;
         const Impl = struct {
             fn init(allocator: Allocator) Allocator.Error!OperatorState {
-                const state = try allocator.create(impl_spec[1]);
-                return OperatorState.of(impl_spec[1], state, impl_spec[2]);
+                const state = try allocator.create(spec_state);
+                switch (@typeInfo(spec_state)) {
+                    .Struct => state.* = std.mem.zeroInit(spec_state, .{}),
+                    else => state.* = std.mem.zeroes(spec_state),
+                }
+                return OperatorState.of(spec_state, state, spec_deinit);
             }
             fn run(op: Plan.Operator, state: *anyopaque, exec: *Executor, op_index: u32) Error!bool {
                 const op1 = @field(op, @tagName(impl_spec[0]));
-                const state1 = @as(*impl_spec[1], @ptrCast(@alignCast(state)));
-                return impl_spec[3](op1, state1, exec, op_index);
+                const state1 = @as(*spec_state, @ptrCast(@alignCast(state)));
+                return spec_run(op1, state1, exec, op_index);
             }
         };
-        impls.put(impl_spec[0], OperatorImpl{ .init = &Impl.init, .run = &Impl.run });
+        impls.put(spec_tag, OperatorImpl{ .init = &Impl.init, .run = &Impl.run });
     }
 
     break :blk impls;
