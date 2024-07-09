@@ -6,6 +6,8 @@ const storage = @import("../storage.zig");
 const Plan = @import("../Plan.zig");
 const types = @import("../types.zig");
 
+const test_helpers = @import("../test_helpers.zig");
+
 pub const NodeScanState = struct {
     it: ?storage.NodeIterator,
 
@@ -30,5 +32,48 @@ pub fn runNodeScan(op: Plan.Scan, state: *NodeScanState, exec: *executor.Executo
             exec.assignments[op_index] = types.Value{ .node_ref = next_node.id };
             return true;
         }
+    }
+}
+
+test "node scan" {
+    var tmp = test_helpers.tmp();
+    defer tmp.cleanup();
+
+    const store = try tmp.store("test.db");
+    defer store.db.close();
+
+    const txn = store.txn();
+    defer txn.close();
+
+    const allocator = std.testing.allocator;
+    var plan = Plan{};
+    defer plan.deinit(allocator);
+
+    try plan.results.append(allocator, 0);
+    try plan.ops.append(allocator, Plan.Operator{
+        .node_scan = Plan.Scan{
+            .ident = 0,
+            .label = null,
+        },
+    });
+
+    {
+        // Currently, there are no nodes in the graph to scan through.
+        var exec = try executor.Executor.init(&plan, txn);
+        defer exec.deinit();
+        try std.testing.expect(try exec.run() == null);
+    }
+
+    const n = types.Node{ .id = types.ElementId.generate() };
+    try txn.putNode(n);
+
+    {
+        // There is now one node.
+        var exec = try executor.Executor.init(&plan, txn);
+        defer exec.deinit();
+        var result = try exec.run() orelse unreachable;
+        defer result.deinit(allocator);
+        try std.testing.expectEqual(n.id, result.values[0].node_ref);
+        try std.testing.expect(try exec.run() == null);
     }
 }
