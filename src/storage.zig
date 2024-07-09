@@ -226,7 +226,9 @@ pub const NodeIterator = struct {
             return Error.CorruptedIndex;
         }
         const id = ElementId.fromBytes(key[0..12].*);
-        return try decodeNode(id, self.allocator, self.inner.value());
+        const node = try decodeNode(id, self.allocator, self.inner.value());
+        self.inner.next();
+        return node;
     }
 };
 

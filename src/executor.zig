@@ -234,4 +234,17 @@ test "basic Executor" {
         defer exec.deinit();
         try std.testing.expect(try exec.run() == null);
     }
+
+    const n = types.Node{ .id = types.ElementId.generate() };
+    try txn.putNode(n);
+
+    {
+        // There is now one node.
+        var exec = try Executor.init(&plan, txn);
+        defer exec.deinit();
+        var result = try exec.run() orelse unreachable;
+        defer result.deinit(allocator);
+        try std.testing.expectEqual(n.id, result.values[0].node_ref);
+        try std.testing.expect(try exec.run() == null);
+    }
 }
