@@ -16,6 +16,8 @@ const test_helpers = @import("test_helpers.zig");
 pub const Error = rocksdb.Error || error{
     CorruptedIndex,
     EdgeDataMismatch,
+    EndOfStream,
+    InvalidValueTag,
 };
 
 /// This is the main storage engine type.
@@ -31,6 +33,38 @@ pub const Storage = struct {
         return .{ .inner = self.db.begin(), .allocator = self.allocator };
     }
 };
+
+fn decodeNode(id: ElementId, allocator: Allocator, slice: []const u8) Error!Node {
+    var stream = std.io.fixedBufferStream(slice);
+    const reader = stream.reader();
+
+    var labels = try types.decodeLabels(allocator, reader);
+    errdefer labels.deinit(allocator);
+    var properties = try types.decodeProperties(allocator, reader);
+    errdefer properties.deinit(allocator);
+
+    return Node{ .id = id, .labels = labels, .properties = properties };
+}
+
+fn decodeEdge(id: ElementId, allocator: Allocator, slice: []const u8) Error!Edge {
+    var stream = std.io.fixedBufferStream(slice);
+    const reader = stream.reader();
+
+    const endpoints = [2]ElementId{ try ElementId.decode(reader), try ElementId.decode(reader) };
+    const directed = try reader.readByte() == 1;
+    var labels = try types.decodeLabels(allocator, reader);
+    errdefer labels.deinit(allocator);
+    var properties = try types.decodeProperties(allocator, reader);
+    errdefer properties.deinit(allocator);
+
+    return Edge{
+        .id = id,
+        .endpoints = endpoints,
+        .directed = directed,
+        .labels = labels,
+        .properties = properties,
+    };
+}
 
 /// An isolated transaction inside the storage engine.
 ///
@@ -53,38 +87,14 @@ pub const Transaction = struct {
     pub fn getNode(self: Transaction, id: ElementId) !?Node {
         const value = try self.inner.get(.node, &id.toBytes(), false) orelse return null;
         defer value.close();
-        var stream = std.io.fixedBufferStream(value.bytes());
-        const reader = stream.reader();
-
-        var labels = try types.decodeLabels(self.allocator, reader);
-        errdefer labels.deinit(self.allocator);
-        var properties = try types.decodeProperties(self.allocator, reader);
-        errdefer properties.deinit(self.allocator);
-
-        return Node{ .id = id, .labels = labels, .properties = properties };
+        return try decodeNode(id, self.allocator, value.bytes());
     }
 
     /// Get an edge from the storage engine. Returns `null` if not found.
     pub fn getEdge(self: Transaction, id: ElementId) !?Edge {
         const value = try self.inner.get(.edge, &id.toBytes(), false) orelse return null;
         defer value.close();
-        var stream = std.io.fixedBufferStream(value.bytes());
-        const reader = stream.reader();
-
-        const endpoints = [2]ElementId{ try ElementId.decode(reader), try ElementId.decode(reader) };
-        const directed = try reader.readByte() == 1;
-        var labels = try types.decodeLabels(self.allocator, reader);
-        errdefer labels.deinit(self.allocator);
-        var properties = try types.decodeProperties(self.allocator, reader);
-        errdefer properties.deinit(self.allocator);
-
-        return Edge{
-            .id = id,
-            .endpoints = endpoints,
-            .directed = directed,
-            .labels = labels,
-            .properties = properties,
-        };
+        return try decodeEdge(id, self.allocator, value.bytes());
     }
 
     /// Put a node into the storage engine.
@@ -169,7 +179,10 @@ pub const Transaction = struct {
 
     /// Iterate over all nodes.
     pub fn iterateNodes(self: Transaction) !NodeIterator {
-        return .{ .inner = self.inner.iterate(.node, null, null) };
+        return .{
+            .inner = self.inner.iterate(.node, null, null),
+            .allocator = self.allocator,
+        };
     }
 
     /// Iterate over a subset of the adjacency list.
@@ -198,21 +211,22 @@ pub const Transaction = struct {
     }
 };
 
-// TODO: This iterator is inefficient since it ignores the values.
 pub const NodeIterator = struct {
     inner: rocksdb.Iterator,
+    allocator: Allocator,
 
     pub fn close(self: NodeIterator) void {
         self.inner.close();
     }
 
-    pub fn next(self: *NodeIterator) !?ElementId {
+    pub fn next(self: *NodeIterator) !?Node {
         if (!self.inner.valid()) return null;
         const key = self.inner.key();
         if (key.len != 12) {
             return Error.CorruptedIndex;
         }
-        return ElementId.fromBytes(key[0..12].*);
+        const id = ElementId.fromBytes(key[0..12].*);
+        return try decodeNode(id, self.allocator, self.inner.value());
     }
 };
 
