@@ -11,11 +11,14 @@ const storage = @import("storage.zig");
 const scan_ops = @import("executor/scan_ops.zig");
 const simple_ops = @import("executor/simple_ops.zig");
 
+const test_helpers = @import("test_helpers.zig");
+
 const operator_impls = blk: {
     // Specify implementations of operators here.
     // Format: { op, state type, destructor, run function }
     const operator_impls_raw = .{
         .{ Plan.Operator.node_scan, scan_ops.NodeScanState, scan_ops.NodeScanState.deinit, scan_ops.runNodeScan },
+        .{ Plan.Operator.edge_scan, scan_ops.EdgeScanState, scan_ops.EdgeScanState.deinit, scan_ops.runEdgeScan },
         .{ Plan.Operator.empty_result, void, null, simple_ops.runEmptyResult },
         .{ Plan.Operator.limit, u64, null, simple_ops.runLimit },
         .{ Plan.Operator.skip, bool, null, simple_ops.runSkip },
@@ -203,3 +206,21 @@ pub const Result = struct {
         self.* = undefined;
     }
 };
+
+test Executor {
+    var tmp = test_helpers.tmp();
+    defer tmp.cleanup();
+
+    const store = try tmp.store("test.db");
+    defer store.db.close();
+
+    const txn = store.txn();
+    defer txn.close();
+
+    // Run an empty plan.
+    const plan = Plan{};
+    var exec = try Executor.init(&plan, txn);
+    defer exec.deinit();
+    try std.testing.expect(try exec.run() != null);
+    try std.testing.expect(try exec.run() == null);
+}

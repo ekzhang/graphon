@@ -9,7 +9,7 @@ const types = @import("../types.zig");
 const test_helpers = @import("../test_helpers.zig");
 
 pub const NodeScanState = struct {
-    it: ?storage.NodeIterator,
+    it: ?storage.ScanIterator(types.Node),
 
     pub fn deinit(self: *NodeScanState, _: Allocator) void {
         if (self.it) |it| it.close();
@@ -30,6 +30,33 @@ pub fn runNodeScan(op: Plan.Scan, state: *NodeScanState, exec: *executor.Executo
 
         if (op.label == null or next_node.labels.get(op.label.?) != null) {
             exec.assignments[op_index] = types.Value{ .node_ref = next_node.id };
+            return true;
+        }
+    }
+}
+
+pub const EdgeScanState = struct {
+    it: ?storage.ScanIterator(types.Edge),
+
+    pub fn deinit(self: *EdgeScanState, _: Allocator) void {
+        if (self.it) |it| it.close();
+        self.* = undefined;
+    }
+};
+
+pub fn runEdgeScan(op: Plan.Scan, state: *EdgeScanState, exec: *executor.Executor, op_index: u32) !bool {
+    if (state.it == null) {
+        const has_next = try exec.next(op_index);
+        if (!has_next) return false;
+        state.it = try exec.txn.iterateEdges();
+    }
+    var it = &state.it.?;
+    while (true) {
+        var next_edge: types.Edge = try it.next() orelse return false;
+        defer next_edge.deinit(exec.txn.allocator);
+
+        if (op.label == null or next_edge.labels.get(op.label.?) != null) {
+            exec.assignments[op_index] = types.Value{ .edge_ref = next_edge.id };
             return true;
         }
     }

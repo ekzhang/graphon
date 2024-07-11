@@ -178,10 +178,20 @@ pub const Transaction = struct {
     }
 
     /// Iterate over all nodes.
-    pub fn iterateNodes(self: Transaction) !NodeIterator {
+    pub fn iterateNodes(self: Transaction) !ScanIterator(types.Node) {
         return .{
             .inner = self.inner.iterate(.node, null, null),
             .allocator = self.allocator,
+            ._decode = decodeNode,
+        };
+    }
+
+    /// Iterate over all edges.
+    pub fn iterateEdges(self: Transaction) !ScanIterator(types.Edge) {
+        return .{
+            .inner = self.inner.iterate(.edge, null, null),
+            .allocator = self.allocator,
+            ._decode = decodeEdge,
         };
     }
 
@@ -211,26 +221,31 @@ pub const Transaction = struct {
     }
 };
 
-pub const NodeIterator = struct {
-    inner: rocksdb.Iterator,
-    allocator: Allocator,
+pub fn ScanIterator(comptime T: type) type {
+    return struct {
+        const Self = @This();
 
-    pub fn close(self: NodeIterator) void {
-        self.inner.close();
-    }
+        inner: rocksdb.Iterator,
+        allocator: Allocator,
+        _decode: *const fn (ElementId, Allocator, []const u8) Error!T,
 
-    pub fn next(self: *NodeIterator) !?Node {
-        if (!self.inner.valid()) return null;
-        const key = self.inner.key();
-        if (key.len != 12) {
-            return Error.CorruptedIndex;
+        pub fn close(self: Self) void {
+            self.inner.close();
         }
-        const id = ElementId.fromBytes(key[0..12].*);
-        const node = try decodeNode(id, self.allocator, self.inner.value());
-        self.inner.next();
-        return node;
-    }
-};
+
+        pub fn next(self: *Self) Error!?T {
+            if (!self.inner.valid()) return null;
+            const key = self.inner.key();
+            if (key.len != 12) {
+                return Error.CorruptedIndex;
+            }
+            const id = ElementId.fromBytes(key[0..12].*);
+            const node = try self._decode(id, self.allocator, self.inner.value());
+            self.inner.next();
+            return node;
+        }
+    };
+}
 
 /// An entry returned by scanning the adjacency list of a node.
 pub const AdjEntry = struct {
