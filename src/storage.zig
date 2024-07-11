@@ -233,7 +233,7 @@ pub fn ScanIterator(comptime T: type) type {
             self.inner.close();
         }
 
-        pub fn next(self: *Self) Error!?T {
+        pub fn next(self: Self) Error!?T {
             if (!self.inner.valid()) return null;
             const key = self.inner.key();
             if (key.len != 12) {

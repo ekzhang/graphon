@@ -23,7 +23,7 @@ pub fn runNodeScan(op: Plan.Scan, state: *NodeScanState, exec: *executor.Executo
         if (!has_next) return false;
         state.it = try exec.txn.iterateNodes();
     }
-    var it = &state.it.?;
+    const it = &state.it.?;
     while (true) {
         var next_node: types.Node = try it.next() orelse return false;
         defer next_node.deinit(exec.txn.allocator);
@@ -50,7 +50,7 @@ pub fn runEdgeScan(op: Plan.Scan, state: *EdgeScanState, exec: *executor.Executo
         if (!has_next) return false;
         state.it = try exec.txn.iterateEdges();
     }
-    var it = &state.it.?;
+    const it = &state.it.?;
     while (true) {
         var next_edge: types.Edge = try it.next() orelse return false;
         defer next_edge.deinit(exec.txn.allocator);
