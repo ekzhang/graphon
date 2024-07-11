@@ -94,7 +94,7 @@ pub fn idents(self: Plan) u16 {
     for (self.ops.items) |op| {
         switch (op) {
             .node_scan => |n| idents_chk(&ret, .{n.ident}),
-            .rel_scan => |n| idents_chk(&ret, .{n.ident}),
+            .edge_scan => |n| idents_chk(&ret, .{n.ident}),
             .step => |n| idents_chk(&ret, .{ n.ident_edge, n.ident_dst }),
             .argument => |n| idents_chk(&ret, .{n}),
             .project => |n| {
@@ -112,8 +112,8 @@ pub fn idents(self: Plan) u16 {
 pub const Operator = union(enum) {
     node_scan: Scan,
     // node_by_id,
-    rel_scan: Scan,
-    // rel_by_id,
+    edge_scan: Scan,
+    // edge_by_id,
     step: Step,
     // step_between,
     begin,
@@ -143,7 +143,7 @@ pub const Operator = union(enum) {
     pub fn deinit(self: *Operator, allocator: Allocator) void {
         switch (self.*) {
             .node_scan => |*n| n.deinit(allocator),
-            .rel_scan => |*n| n.deinit(allocator),
+            .edge_scan => |*n| n.deinit(allocator),
             .step => |*n| n.deinit(allocator),
             .begin => {},
             .repeat => {},
@@ -176,7 +176,7 @@ pub const Operator = union(enum) {
     pub fn print(self: Operator, writer: anytype) !void {
         const node_name = switch (self) {
             .node_scan => "NodeScan",
-            .rel_scan => "RelScan",
+            .edge_scan => "EdgeScan",
             .step => "Step",
             .begin => "Begin",
             .repeat => "Repeat",
@@ -202,7 +202,7 @@ pub const Operator = union(enum) {
                 try writer.writeByte(' ');
                 try print_node_spec(writer, n.ident, n.label);
             },
-            .rel_scan => |n| {
+            .edge_scan => |n| {
                 try writer.writeByte(' ');
                 try print_edge_spec(writer, .any, n.ident, n.label);
             },

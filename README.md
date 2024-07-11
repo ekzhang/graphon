@@ -36,7 +36,7 @@ Graphon implements the [GQL](https://www.gqlstandards.org/home) language, which 
 
 The core GQL language includes graph pattern-matching queries, transactional updates, catalog changes, and list data types. Graphon also implements:
 
-- Index creation via `CREATE INDEX` on the properties of nodes and relationships
+- Index creation via `CREATE INDEX` on the properties of nodes and edges
 - Snapshot isolation for concurrent transactions
 
 The following ancillary features are not supported:
@@ -71,10 +71,10 @@ Query plans are binary trees constructed out of the following operations. The de
 
 - `NodeScan`: Scan for nodes in a graph, optionally providing labels.
 - `NodeById`: Fetch the node with an ID.
-- `RelScan`: Scan for relationships in a graph, optionally providing labels.
-- `RelById`: Fetch the relationship with an ID.
-- `Step`: Traverse the graph for relationships from a node.
-- `StepBetween`: Traverse the graph for relationships between two nodes.
+- `EdgeScan`: Scan for edges in a graph, optionally providing labels.
+- `EdgeById`: Fetch the edge with an ID.
+- `Step`: Traverse the graph for edges from a node.
+- `StepBetween`: Traverse the graph for edges between two nodes.
 - `Begin`: Marker node for the start of the right subtree of a repeat or join operator.
 - `Repeat`: Repeat the sub-pattern, used for trail and path queries.
 - `ShortestPath`: Finds the shortest path(s) between two nodes.
@@ -94,7 +94,7 @@ Query plans are binary trees constructed out of the following operations. The de
 - `UnionAll`: Concatenates results from the left and right child operators.
 - `InsertNode`: Insert a graph node with labels and properties.
 - `InsertEdge`: Insert an edge with direction, labels, and properties between two nodes.
-- `Update`: Set, add, or remove labels and properties from nodes and relationships.
-- `Delete`: Delete a node or relationship.
+- `Update`: Set, add, or remove labels and properties from nodes and edges.
+- `Delete`: Delete a node or edge.
 - `Aggregate`: Compute aggregations, grouping by one or more columns.
 - `GroupAggregate`: Compute aggregations, where result table is already ordered into groups.
