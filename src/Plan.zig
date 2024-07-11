@@ -521,7 +521,7 @@ fn check_plan_snapshot(plan: Plan, want: Snap) !void {
 
 test "can create, free and print plan" {
     const allocator = std.testing.allocator;
-    // MATCH (n) RETURN n AS my_node;
+    // MATCH (n) RETURN n;
     var plan = Plan{};
     defer plan.deinit(allocator);
 
