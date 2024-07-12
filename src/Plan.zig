@@ -482,10 +482,11 @@ pub const Exp = union(enum) {
             .ident => |i| try writer.print("%{}", .{i}),
             .parameter => |n| try writer.print("${}", .{n}),
             .binop => |b| {
-                // todo: infix formatting / precedence is broken
+                try writer.writeByte('(');
                 try b.left.print(writer);
-                try writer.print(" %{} ", .{b.op});
+                try writer.print(" {s} ", .{b.op.string()});
                 try b.right.print(writer);
+                try writer.writeByte(')');
             },
         }
     }
@@ -506,6 +507,13 @@ pub const BinopExp = struct {
 pub const Binop = enum {
     add,
     sub,
+
+    fn string(self: Binop) []const u8 {
+        return switch (self) {
+            .add => "+",
+            .sub => "-",
+        };
+    }
 };
 
 const Snap = @import("vendor/snaptest.zig").Snap;
