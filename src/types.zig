@@ -291,6 +291,50 @@ pub const Value = union(ValueKind) {
             .null => return .null,
         }
     }
+
+    /// Add two values together, allocating a result.
+    pub fn add(a: Value, b: Value, allocator: Allocator) Allocator.Error!Value {
+        return switch (a) {
+            .string => |a_| switch (b) {
+                .string => |b_| {
+                    const len = a_.len + b_.len;
+                    const buf = try allocator.alloc(u8, len);
+                    std.mem.copyForwards(u8, buf, a_);
+                    std.mem.copyForwards(u8, buf[a_.len..], b_);
+                    return .{ .string = buf };
+                },
+                else => .null,
+            },
+            .int64 => |a_| switch (b) {
+                .int64 => |b_| .{ .int64 = a_ + b_ },
+                .float64 => |b_| .{ .float64 = @as(f64, @floatFromInt(a_)) + b_ },
+                else => .null,
+            },
+            .float64 => |a_| switch (b) {
+                .int64 => |b_| .{ .float64 = a_ + @as(f64, @floatFromInt(b_)) },
+                .float64 => |b_| .{ .float64 = a_ + b_ },
+                else => .null,
+            },
+            else => .null,
+        };
+    }
+
+    /// Subtract two values.
+    pub fn sub(a: Value, b: Value) Value {
+        return switch (a) {
+            .int64 => |a_| switch (b) {
+                .int64 => |b_| .{ .int64 = a_ - b_ },
+                .float64 => |b_| .{ .float64 = @as(f64, @floatFromInt(a_)) - b_ },
+                else => .null,
+            },
+            .float64 => |a_| switch (b) {
+                .int64 => |b_| .{ .float64 = a_ - @as(f64, @floatFromInt(b_)) },
+                .float64 => |b_| .{ .float64 = a_ - b_ },
+                else => .null,
+            },
+            else => .null,
+        };
+    }
 };
 
 /// A property graph node.

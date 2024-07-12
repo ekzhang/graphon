@@ -224,3 +224,46 @@ test Executor {
     try std.testing.expect(try exec.run() != null);
     try std.testing.expect(try exec.run() == null);
 }
+
+/// Evaluate an expression given assignments.
+fn evaluate(exp: Plan.Exp, assignments: []const Value, allocator: Allocator) Allocator.Error!Value {
+    return switch (exp) {
+        .literal => |v| v.dupe(allocator),
+        .ident => |i| assignments[i].dupe(allocator),
+        .parameter => |_| std.debug.panic("parameters not implemented yet", .{}),
+        .binop => |binop| {
+            var lhs = try evaluate(binop.left, assignments, allocator);
+            defer lhs.deinit(allocator);
+            var rhs = try evaluate(binop.right, assignments, allocator);
+            defer rhs.deinit(allocator);
+            return switch (binop.op) {
+                .add => try lhs.add(rhs, allocator),
+                .sub => lhs.sub(rhs),
+            };
+        },
+    };
+}
+
+test evaluate {
+    const allocator = std.testing.allocator;
+
+    try std.testing.expectEqual(
+        Value{ .int64 = 12 },
+        try evaluate(Plan.Exp{ .literal = Value{ .int64 = 12 } }, &.{}, allocator),
+    );
+
+    try std.testing.expectEqual(
+        Value{ .int64 = 13 },
+        try evaluate(Plan.Exp{ .ident = 0 }, &.{Value{ .int64 = 13 }}, allocator),
+    );
+
+    var bop = Plan.BinopExp{
+        .op = Plan.Binop.sub,
+        .left = Plan.Exp{ .literal = Value{ .int64 = 500 } },
+        .right = Plan.Exp{ .ident = 0 },
+    };
+    try std.testing.expectEqual(
+        Value{ .int64 = 420 },
+        try evaluate(Plan.Exp{ .binop = &bop }, &.{Value{ .int64 = 80 }}, allocator),
+    );
+}

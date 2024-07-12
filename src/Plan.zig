@@ -459,6 +459,7 @@ pub const Properties = std.MultiArrayList(struct { key: []u8, value: Exp });
 /// A low-level expression used by query plan operators.
 pub const Exp = union(enum) {
     literal: Value,
+    ident: u32,
     parameter: u32,
     binop: *BinopExp,
 
@@ -478,6 +479,7 @@ pub const Exp = union(enum) {
     pub fn print(self: Exp, writer: anytype) !void {
         switch (self) {
             .literal => |v| try v.print(writer),
+            .ident => |i| try writer.print("%{}", .{i}),
             .parameter => |n| try writer.print("${}", .{n}),
             .binop => |b| {
                 // todo: infix formatting / precedence is broken
@@ -504,8 +506,6 @@ pub const BinopExp = struct {
 pub const Binop = enum {
     add,
     sub,
-    mul,
-    div,
 };
 
 const Snap = @import("vendor/snaptest.zig").Snap;
