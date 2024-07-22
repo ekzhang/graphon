@@ -125,7 +125,8 @@ pub const ValueKind = enum(u8) {
     // date, datetime, duration
     node_ref = 4,
     edge_ref = 5,
-    null = 6,
+    id = 6,
+    null = 7,
 };
 
 /// Encode a length-delimited byte buffer.
@@ -209,11 +210,12 @@ pub fn freeProperties(allocator: Allocator, properties: *std.StringArrayHashMapU
 ///
 /// Reference: ISO/IEC 39075:2024, Section 18.9.
 pub const Value = union(ValueKind) {
-    string: []const u8,
+    string: []const u8, // Binary-safe string.
     int64: i64,
     float64: f64,
-    node_ref: ElementId,
-    edge_ref: ElementId,
+    node_ref: ElementId, // Reference to a node (must exist).
+    edge_ref: ElementId, // Reference to an edge (must exist).
+    id: ElementId, // Not necessarily populated by node or edge.
     null,
 
     pub fn deinit(self: *Value, allocator: Allocator) void {
@@ -240,6 +242,7 @@ pub const Value = union(ValueKind) {
             .float64 => |f| try writer.print("{}", .{f}),
             .node_ref => |id| try writer.print("{s}", .{id.toString()}),
             .edge_ref => |id| try writer.print("{s}", .{id.toString()}),
+            .id => |id| try writer.print("{s}", .{id.toString()}),
             .null => try writer.print("null", .{}),
         }
     }
@@ -257,6 +260,7 @@ pub const Value = union(ValueKind) {
             .float64 => |f| try writer.writeInt(u64, @bitCast(f), .big),
             .node_ref => |id| try id.encode(writer),
             .edge_ref => |id| try id.encode(writer),
+            .id => |id| try id.encode(writer),
             .null => {},
         }
     }
@@ -287,6 +291,10 @@ pub const Value = union(ValueKind) {
             .edge_ref => {
                 const id = try ElementId.decode(reader);
                 return .{ .edge_ref = id };
+            },
+            .id => {
+                const id = try ElementId.decode(reader);
+                return .{ .id = id };
             },
             .null => return .null,
         }

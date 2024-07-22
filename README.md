@@ -70,8 +70,8 @@ The database itself is written in Zig and based on RocksDB as a foundational sto
 Query plans are binary trees constructed out of the following operations. The design here was influenced by other databases, particularly the internal representations of [Postgres](https://github.com/postgres/postgres/blob/REL_16_3/src/backend/commands/explain.c#L1177-L1180) and [Neo4j](https://neo4j.com/docs/cypher-manual/current/planning-and-tuning/operators/operators-detail/).
 
 - `NodeScan`: Scan for nodes in a graph, optionally providing labels.
-- `NodeById`: Fetch the node with an ID.
 - `EdgeScan`: Scan for edges in a graph, optionally providing labels.
+- `NodeById`: Fetch the node with an ID.
 - `EdgeById`: Fetch the edge with an ID.
 - `Step`: Traverse the graph for edges from a node.
 - `StepBetween`: Traverse the graph for edges between two nodes.

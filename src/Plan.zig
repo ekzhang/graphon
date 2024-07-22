@@ -95,7 +95,7 @@ pub fn idents(self: Plan) u16 {
         switch (op) {
             .node_scan => |n| idents_chk(&ret, .{n.ident}),
             .edge_scan => |n| idents_chk(&ret, .{n.ident}),
-            .step => |n| idents_chk(&ret, .{ n.ident_edge, n.ident_dst }),
+            .step => |n| idents_chk(&ret, .{ n.ident_edge, n.ident_dest }),
             .argument => |n| idents_chk(&ret, .{n}),
             .project => |n| {
                 for (n.items) |c| idents_chk(&ret, .{c.ident});
@@ -111,9 +111,9 @@ pub fn idents(self: Plan) u16 {
 /// A single step in the query plan, which may depend on previous steps.
 pub const Operator = union(enum) {
     node_scan: Scan,
-    // node_by_id,
     edge_scan: Scan,
-    // edge_by_id,
+    node_by_id: LookupId,
+    edge_by_id: LookupId,
     step: Step,
     // step_between,
     begin,
@@ -144,6 +144,8 @@ pub const Operator = union(enum) {
         switch (self.*) {
             .node_scan => |*n| n.deinit(allocator),
             .edge_scan => |*n| n.deinit(allocator),
+            .node_by_id => {},
+            .edge_by_id => {},
             .step => |*n| n.deinit(allocator),
             .begin => {},
             .repeat => {},
@@ -177,6 +179,8 @@ pub const Operator = union(enum) {
         const node_name = switch (self) {
             .node_scan => "NodeScan",
             .edge_scan => "EdgeScan",
+            .node_by_id => "NodeById",
+            .edge_by_id => "EdgeById",
             .step => "Step",
             .begin => "Begin",
             .repeat => "Repeat",
@@ -206,11 +210,17 @@ pub const Operator = union(enum) {
                 try writer.writeByte(' ');
                 try print_edge_spec(writer, .any, n.ident, n.label);
             },
+            .node_by_id => |n| {
+                try writer.print(" %{} -> %{}", .{ n.ident_id, n.ident_ref });
+            },
+            .edge_by_id => |n| {
+                try writer.print(" %{} -> %{}", .{ n.ident_id, n.ident_ref });
+            },
             .step => |n| {
                 try writer.writeByte(' ');
                 try print_node_spec(writer, n.ident_src, null);
                 try print_edge_spec(writer, n.direction, n.ident_edge, n.edge_label);
-                try print_node_spec(writer, n.ident_dst, null);
+                try print_node_spec(writer, n.ident_dest, null);
             },
             .begin => {},
             .repeat => std.debug.panic("repeat unimplemented", .{}),
@@ -299,7 +309,7 @@ pub const Operator = union(enum) {
                 try print_labels(writer, n.labels.items);
                 try print_properties(writer, n.properties);
                 try writer.writeAll(direction.rightPart());
-                try print_node_spec(writer, n.ident_dst, null);
+                try print_node_spec(writer, n.ident_dest, null);
             },
         }
     }
@@ -366,10 +376,15 @@ pub const Scan = struct {
     }
 };
 
+pub const LookupId = struct {
+    ident_ref: u16, // Name of the bound entity reference (output).
+    ident_id: u16, // Name of the ID to look up (input).
+};
+
 pub const Step = struct {
-    ident_src: u16, // Name of the starting node.
-    ident_edge: ?u16, // Name of the edge, to be bound.
-    ident_dst: ?u16, // Name of the ending node, to be bound.
+    ident_src: u16, // Name of the starting node (input).
+    ident_edge: ?u16, // Name of the edge, to be bound (output).
+    ident_dest: ?u16, // Name of the ending node, to be bound (output).
     direction: EdgeDirection,
     edge_label: ?[]u8, // Label to traverse on the edge.
 
@@ -438,7 +453,7 @@ pub const InsertNode = struct {
 pub const InsertEdge = struct {
     ident: ?u16,
     ident_src: u16,
-    ident_dst: u16,
+    ident_dest: u16,
     directed: bool,
     labels: std.ArrayListUnmanaged([]u8),
     properties: Properties,
@@ -550,7 +565,7 @@ test "can create, free and print plan" {
         .step = Step{
             .ident_src = 0,
             .ident_edge = 1,
-            .ident_dst = 2,
+            .ident_dest = 2,
             .direction = .right_or_undirected,
             .edge_label = try allocator.dupe(u8, "Likes"),
         },
