@@ -34,6 +34,15 @@ pub fn runEdgeById(op: Plan.LookupId, _: *void, exec: *executor.Executor, op_ind
     }
 }
 
+pub fn runAnti(_: void, state: *bool, exec: *executor.Executor, op_index: u32) !bool {
+    // Anti only returns up to one row, so we keep track of this with the state.
+    if (state.*) return false;
+    state.* = true;
+
+    // Return a row if and only if there are no rows.
+    return !(try exec.next(op_index));
+}
+
 pub fn runEmptyResult(_: void, _: *void, exec: *executor.Executor, op_index: u32) !bool {
     // Consume all results, and then do not return them.
     while (try exec.next(op_index)) {}

@@ -23,6 +23,7 @@ const operator_impls = blk: {
         .{ Plan.Operator.node_by_id, void, null, simple_ops.runNodeById },
         .{ Plan.Operator.edge_by_id, void, null, simple_ops.runEdgeById },
         .{ Plan.Operator.step, step_ops.StepState, step_ops.StepState.deinit, step_ops.runStep },
+        .{ Plan.Operator.anti, bool, null, simple_ops.runAnti },
         .{ Plan.Operator.empty_result, void, null, simple_ops.runEmptyResult },
         .{ Plan.Operator.limit, u64, null, simple_ops.runLimit },
         .{ Plan.Operator.skip, bool, null, simple_ops.runSkip },
