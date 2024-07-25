@@ -23,10 +23,12 @@ const operator_impls = blk: {
         .{ Plan.Operator.node_by_id, void, null, simple_ops.runNodeById },
         .{ Plan.Operator.edge_by_id, void, null, simple_ops.runEdgeById },
         .{ Plan.Operator.step, step_ops.StepState, step_ops.StepState.deinit, step_ops.runStep },
+        .{ Plan.Operator.begin, bool, null, simple_ops.runBegin },
         .{ Plan.Operator.anti, bool, null, simple_ops.runAnti },
         .{ Plan.Operator.empty_result, void, null, simple_ops.runEmptyResult },
         .{ Plan.Operator.limit, u64, null, simple_ops.runLimit },
         .{ Plan.Operator.skip, bool, null, simple_ops.runSkip },
+        .{ Plan.Operator.union_all, bool, null, simple_ops.runUnionAll },
     };
 
     var impls: std.EnumMap(std.meta.Tag(Plan.Operator), OperatorImpl) = .{};
@@ -82,7 +84,9 @@ const OperatorState = struct {
 };
 
 /// Error type returned by running a query plan.
-pub const Error = storage.Error;
+pub const Error = storage.Error || error{
+    MalformedPlan,
+};
 
 /// State corresponding to a query plan while it is executing.
 pub const Executor = struct {

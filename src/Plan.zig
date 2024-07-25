@@ -61,18 +61,13 @@ pub fn print(self: Plan, writer: anytype) !void {
     var idx = self.ops.items.len;
     while (idx > 0) : (idx -= 1) {
         const op = self.ops.items[idx - 1];
-        const level_change: i32 = switch (op) {
-            .repeat, .semi_join, .join, .union_all => 1,
-            .begin => -1,
-            else => 0,
-        };
-        if (level_change == -1 and level > 1) {
+        if (op == .begin and level > 1) {
             level -= 1;
         }
         try writer.writeByte('\n');
         try writer.writeByteNTimes(' ', 2 * level);
         try op.print(writer);
-        if (level_change == 1) {
+        if (op.hasSubquery()) {
             level += 1;
         }
     }
@@ -106,6 +101,26 @@ pub fn idents(self: Plan) u16 {
         }
     }
     return ret;
+}
+
+/// Given a join-style operation's index, return the index of the matching 'Begin'
+/// operation or null if not found.
+pub fn subqueryBegin(self: Plan, op_index: u32) ?u32 {
+    std.debug.assert(self.ops.items[op_index].hasSubquery());
+    var level: u32 = 1;
+    var i = op_index + 1;
+    while (i < self.ops.items.len) : (i += 1) {
+        const op = self.ops.items[i];
+        if (op == .begin) {
+            if (level == 1) {
+                return i;
+            }
+            level -= 1;
+        } else if (op.hasSubquery()) {
+            level += 1;
+        }
+    }
+    return null;
 }
 
 /// A single step in the query plan, which may depend on previous steps.
@@ -312,6 +327,14 @@ pub const Operator = union(enum) {
                 try print_node_spec(writer, n.ident_dest, null);
             },
         }
+    }
+
+    /// Return if this operator type has a subquery.
+    pub fn hasSubquery(self: Operator) bool {
+        return switch (self) {
+            .repeat, .semi_join, .join, .union_all => true,
+            else => false,
+        };
     }
 };
 
