@@ -51,6 +51,19 @@ pub fn runAnti(_: void, state: *bool, exec: *executor.Executor, op_index: u32) !
     return !(try exec.next(op_index));
 }
 
+pub fn runProject(op: std.ArrayListUnmanaged(Plan.ProjectClause), _: *void, exec: *executor.Executor, op_index: u32) !bool {
+    if (!try exec.next(op_index)) return false;
+    for (op.items) |clause| {
+        // This allows later assignment clauses to depend on earlier ones in the list.
+        exec.assignments[clause.ident] = try executor.evaluate(
+            clause.exp,
+            exec.assignments.items,
+            exec.txn.allocator,
+        );
+    }
+    return true;
+}
+
 pub fn runEmptyResult(_: void, _: *void, exec: *executor.Executor, op_index: u32) !bool {
     // Consume all results, and then do not return them.
     while (try exec.next(op_index)) {}

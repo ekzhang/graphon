@@ -25,6 +25,7 @@ const operator_impls = blk: {
         .{ Plan.Operator.step, step_ops.StepState, step_ops.StepState.deinit, step_ops.runStep },
         .{ Plan.Operator.begin, bool, null, simple_ops.runBegin },
         .{ Plan.Operator.anti, bool, null, simple_ops.runAnti },
+        .{ Plan.Operator.project, void, null, simple_ops.runProject },
         .{ Plan.Operator.empty_result, void, null, simple_ops.runEmptyResult },
         .{ Plan.Operator.limit, u64, null, simple_ops.runLimit },
         .{ Plan.Operator.skip, bool, null, simple_ops.runSkip },
@@ -235,7 +236,7 @@ test Executor {
 }
 
 /// Evaluate an expression given assignments.
-fn evaluate(exp: Plan.Exp, assignments: []const Value, allocator: Allocator) Allocator.Error!Value {
+pub fn evaluate(exp: Plan.Exp, assignments: []const Value, allocator: Allocator) Allocator.Error!Value {
     return switch (exp) {
         .literal => |v| v.dupe(allocator),
         .ident => |i| assignments[i].dupe(allocator),
