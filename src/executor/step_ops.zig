@@ -101,7 +101,7 @@ pub fn runStep(op: Plan.Step, state: *StepState, exec: *executor.Executor, op_in
     }
 }
 
-test "tree steps" {
+test "triangle steps" {
     var tmp = test_helpers.tmp();
     defer tmp.cleanup();
 
@@ -115,31 +115,96 @@ test "tree steps" {
     var plan = Plan{};
     defer plan.deinit(allocator);
 
-    try plan.results.append(allocator, 0);
+    try plan.results.appendSlice(allocator, &[_]u16{ 0, 1, 2 });
     try plan.ops.append(allocator, Plan.Operator{
         .node_scan = Plan.Scan{
             .ident = 0,
             .label = null,
         },
     });
+    try plan.ops.append(allocator, Plan.Operator{
+        .step = Plan.Step{
+            .ident_src = 0,
+            .ident_edge = 1,
+            .ident_dest = 2,
+            .direction = .right,
+            .edge_label = null,
+        },
+    });
+
+    const n1 = types.Node{ .id = .{ .value = 1 } };
+    const n2 = types.Node{ .id = .{ .value = 2 } };
+    const n3 = types.Node{ .id = .{ .value = 3 } };
+    try txn.putNode(n1);
+    try txn.putNode(n2);
+    try txn.putNode(n3);
 
     {
-        // Currently, there are no nodes in the graph to scan through.
+        // No edges found.
         var exec = try executor.Executor.init(&plan, txn);
         defer exec.deinit();
         try std.testing.expect(try exec.run() == null);
     }
 
-    const n = types.Node{ .id = types.ElementId.generate() };
-    try txn.putNode(n);
+    const e1 = types.Edge{
+        .id = .{ .value = 11 },
+        .endpoints = .{ n1.id, n2.id },
+        .directed = true,
+    };
+    try txn.putEdge(e1);
 
     {
-        // There is now one node.
+        // There is now one directed edge.
         var exec = try executor.Executor.init(&plan, txn);
         defer exec.deinit();
         var result = try exec.run() orelse unreachable;
         defer result.deinit(allocator);
-        try std.testing.expectEqual(n.id, result.values[0].node_ref);
+        try std.testing.expectEqual(n1.id, result.values[0].node_ref);
+        try std.testing.expectEqual(e1.id, result.values[1].edge_ref);
+        try std.testing.expectEqual(n2.id, result.values[2].node_ref);
+        try std.testing.expect(try exec.run() == null);
+    }
+
+    const e2 = types.Edge{
+        .id = .{ .value = 12 },
+        .endpoints = .{ n2.id, n3.id },
+        .directed = true,
+    };
+    try txn.putEdge(e2);
+
+    {
+        // We should see two edges now.
+        var exec = try executor.Executor.init(&plan, txn);
+        defer exec.deinit();
+        var result = try exec.run() orelse unreachable;
+        defer result.deinit(allocator);
+        var result2 = try exec.run() orelse unreachable;
+        defer result2.deinit(allocator);
+        try std.testing.expect(try exec.run() == null);
+    }
+
+    // Try doing a two-edge traversal.
+    try plan.results.appendSlice(allocator, &[_]u16{ 3, 4 });
+    try plan.ops.append(allocator, Plan.Operator{
+        .step = Plan.Step{
+            .ident_src = 2,
+            .ident_edge = 3,
+            .ident_dest = 4,
+            .direction = .right,
+            .edge_label = null,
+        },
+    });
+
+    {
+        var exec = try executor.Executor.init(&plan, txn);
+        defer exec.deinit();
+        var result = try exec.run() orelse unreachable;
+        defer result.deinit(allocator);
+        try std.testing.expectEqual(n1.id, result.values[0].node_ref);
+        try std.testing.expectEqual(e1.id, result.values[1].edge_ref);
+        try std.testing.expectEqual(n2.id, result.values[2].node_ref);
+        try std.testing.expectEqual(e2.id, result.values[3].edge_ref);
+        try std.testing.expectEqual(n3.id, result.values[4].node_ref);
         try std.testing.expect(try exec.run() == null);
     }
 }
