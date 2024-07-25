@@ -34,14 +34,6 @@ pub fn runEdgeById(op: Plan.LookupId, _: *void, exec: *executor.Executor, op_ind
     }
 }
 
-/// Subquery execution will eventually trickle down to a 'Begin' operator, which
-/// needs to return true exactly once to act as the start of a query.
-pub fn runBegin(_: void, state: *bool, _: *executor.Executor, _: u32) !bool {
-    if (state.*) return false;
-    state.* = true;
-    return true;
-}
-
 pub fn runAnti(_: void, state: *bool, exec: *executor.Executor, op_index: u32) !bool {
     // Anti only returns up to one row, so we keep track of this with the state.
     if (state.*) return false;
@@ -87,20 +79,6 @@ pub fn runSkip(op: u64, state: *bool, exec: *executor.Executor, op_index: u32) !
                 return false;
             }
         }
-    }
-    return try exec.next(op_index);
-}
-
-/// This returns all values from the left subquery, then all values from the
-/// right subquery.
-pub fn runUnionAll(_: void, state: *bool, exec: *executor.Executor, op_index: u32) !bool {
-    if (!state.*) {
-        const j = exec.plan.subqueryBegin(op_index) orelse return error.MalformedPlan;
-        const has_next_left = try exec.next(j);
-        if (has_next_left) {
-            return true;
-        }
-        state.* = true; // We finished the left subquery, move on below
     }
     return try exec.next(op_index);
 }
