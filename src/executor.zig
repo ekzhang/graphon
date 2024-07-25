@@ -8,6 +8,8 @@ const types = @import("types.zig");
 const Value = types.Value;
 const storage = @import("storage.zig");
 
+const join_ops = @import("executor/join_ops.zig");
+const modify_ops = @import("executor/modify_ops.zig");
 const scan_ops = @import("executor/scan_ops.zig");
 const simple_ops = @import("executor/simple_ops.zig");
 const step_ops = @import("executor/step_ops.zig");
@@ -30,6 +32,8 @@ const operator_impls = blk: {
         .{ Plan.Operator.limit, u64, null, simple_ops.runLimit },
         .{ Plan.Operator.skip, bool, null, simple_ops.runSkip },
         .{ Plan.Operator.union_all, bool, null, simple_ops.runUnionAll },
+        .{ Plan.Operator.insert_node, void, null, modify_ops.runInsertNode },
+        .{ Plan.Operator.insert_edge, void, null, modify_ops.runInsertEdge },
     };
 
     var impls: std.EnumMap(std.meta.Tag(Plan.Operator), OperatorImpl) = .{};
@@ -87,6 +91,7 @@ const OperatorState = struct {
 /// Error type returned by running a query plan.
 pub const Error = storage.Error || error{
     MalformedPlan,
+    WrongType,
 };
 
 /// State corresponding to a query plan while it is executing.
