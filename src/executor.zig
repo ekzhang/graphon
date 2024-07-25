@@ -26,6 +26,8 @@ const operator_impls = blk: {
         .{ Plan.Operator.edge_by_id, void, null, simple_ops.runEdgeById },
         .{ Plan.Operator.step, step_ops.StepState, step_ops.StepState.deinit, step_ops.runStep },
         .{ Plan.Operator.begin, bool, null, join_ops.runBegin },
+        .{ Plan.Operator.join, join_ops.JoinState, null, join_ops.runJoin },
+        .{ Plan.Operator.semi_join, void, null, join_ops.runSemiJoin },
         .{ Plan.Operator.anti, bool, null, simple_ops.runAnti },
         .{ Plan.Operator.project, void, null, simple_ops.runProject },
         .{ Plan.Operator.empty_result, void, null, simple_ops.runEmptyResult },
@@ -161,6 +163,16 @@ pub const Executor = struct {
         }
         if (operator_impls.get(self.plan.ops.items[op_index])) |impl| {
             state.* = try impl.init(self.txn.allocator);
+        }
+    }
+
+    /// Reset the state of all operators in the given range in the plan. Useful
+    /// for resetting a subquery in a join.
+    pub fn resetStateRange(self: *Executor, start_index: u32, end_index: u32) Allocator.Error!void {
+        std.debug.assert(start_index <= end_index);
+        var i = start_index;
+        while (i < end_index) : (i += 1) {
+            try self.resetState(i);
         }
     }
 
