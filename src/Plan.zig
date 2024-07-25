@@ -132,11 +132,11 @@ pub const Operator = union(enum) {
     step: Step,
     // step_between,
     begin,
+    argument: u16,
     repeat, // unimplemented
     // shortest_path,
-    join, // unimplemented
-    semi_join, // unimplemented
-    argument: u16,
+    join,
+    semi_join,
     anti,
     project: std.ArrayListUnmanaged(ProjectClause),
     // project_endpoints: ProjectEndpoints,
@@ -163,10 +163,10 @@ pub const Operator = union(enum) {
             .edge_by_id => {},
             .step => |*n| n.deinit(allocator),
             .begin => {},
+            .argument => {},
             .repeat => {},
             .join => {},
             .semi_join => {},
-            .argument => {},
             .anti => {},
             .project => |*n| {
                 for (n.items) |*c| c.deinit(allocator);
@@ -198,10 +198,10 @@ pub const Operator = union(enum) {
             .edge_by_id => "EdgeById",
             .step => "Step",
             .begin => "Begin",
+            .argument => "Argument",
             .repeat => "Repeat",
             .join => "Join",
             .semi_join => "SemiJoin",
-            .argument => "Argument",
             .anti => "Anti",
             .project => "Project",
             .empty_result => "EmptyResult",
@@ -238,12 +238,12 @@ pub const Operator = union(enum) {
                 try print_node_spec(writer, n.ident_dest, null);
             },
             .begin => {},
-            .repeat => std.debug.panic("repeat unimplemented", .{}),
-            .join => std.debug.panic("join unimplemented", .{}),
-            .semi_join => std.debug.panic("semi_join unimplemented", .{}),
             .argument => |n| {
                 try writer.print(" %{}", .{n});
             },
+            .repeat => std.debug.panic("repeat unimplemented", .{}),
+            .join => std.debug.panic("join unimplemented", .{}),
+            .semi_join => std.debug.panic("semi_join unimplemented", .{}),
             .anti => {},
             .project => |n| {
                 var first = true;

@@ -76,11 +76,11 @@ Query plans are binary trees constructed out of the following operations. The de
 - `Step`: Traverse the graph for edges from a node.
 - `StepBetween`: Traverse the graph for edges between two nodes.
 - `Begin`: Marker node for the start of the right subtree of a repeat or join operator.
+- `Argument`: Marks a variable for the node or edge being repeated in a path.
 - `Repeat`: Repeat the sub-pattern, used for trail and path queries.
 - `ShortestPath`: Finds the shortest path(s) between two nodes.
-- `Join`: Take rows from the left side, execute the tree on the right side, and return both.
-- `SemiJoin`: Return rows from the left side where the right side is present.
-- `Argument`: Get a variable for the node being repeated, or the right side of a join.
+- `Join`: Take rows from the left subquery, execute the tree on the right subquery, and return both.
+- `SemiJoin`: Return rows from the left subquery where the right subquery is not null.
 - `Anti`: Test for the absence of a pattern, yielding a single row.
 - `Project`: Execute expressions or remap variable names.
 - `ProjectEndpoints`: Find the endpoints of an edge.
@@ -91,7 +91,7 @@ Query plans are binary trees constructed out of the following operations. The de
 - `Skip`: Skip rows from the result.
 - `Sort`: Sort results by a provided key.
 - `Top`: Return some number of top rows by a provided key in sorted order (sort then limit).
-- `UnionAll`: Concatenates results from the left and right child operators.
+- `UnionAll`: Concatenates results from the left and right subqueries.
 - `InsertNode`: Insert a graph node with labels and properties.
 - `InsertEdge`: Insert an edge with direction, labels, and properties between two nodes.
 - `Update`: Set, add, or remove labels and properties from nodes and edges.
