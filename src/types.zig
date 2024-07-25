@@ -126,7 +126,8 @@ pub const ValueKind = enum(u8) {
     node_ref = 4,
     edge_ref = 5,
     id = 6,
-    null = 7,
+    bool = 7,
+    null = 8,
 };
 
 /// Encode a length-delimited byte buffer.
@@ -216,6 +217,7 @@ pub const Value = union(ValueKind) {
     node_ref: ElementId, // Reference to a node (must exist).
     edge_ref: ElementId, // Reference to an edge (must exist).
     id: ElementId, // Not necessarily populated by node or edge.
+    bool: bool,
     null,
 
     pub fn deinit(self: *Value, allocator: Allocator) void {
@@ -243,6 +245,7 @@ pub const Value = union(ValueKind) {
             .node_ref => |id| try writer.print("{s}", .{id.toString()}),
             .edge_ref => |id| try writer.print("{s}", .{id.toString()}),
             .id => |id| try writer.print("{s}", .{id.toString()}),
+            .bool => |b| try writer.print("{s}", .{if (b) "TRUE" else "FALSE"}),
             .null => try writer.print("null", .{}),
         }
     }
@@ -261,6 +264,7 @@ pub const Value = union(ValueKind) {
             .node_ref => |id| try id.encode(writer),
             .edge_ref => |id| try id.encode(writer),
             .id => |id| try id.encode(writer),
+            .bool => |b| try writer.writeByte(if (b) 1 else 0),
             .null => {},
         }
     }
@@ -295,6 +299,10 @@ pub const Value = union(ValueKind) {
             .id => {
                 const id = try ElementId.decode(reader);
                 return .{ .id = id };
+            },
+            .bool => {
+                const b = try reader.readByte();
+                return .{ .bool = b != 0 };
             },
             .null => return .null,
         }
@@ -341,6 +349,43 @@ pub const Value = union(ValueKind) {
                 else => .null,
             },
             else => .null,
+        };
+    }
+
+    /// Check if two values are equal.
+    pub fn eql(a: Value, b: Value) bool {
+        return switch (a) {
+            .string => |a_| switch (b) {
+                .string => |b_| std.mem.eql(u8, a_, b_),
+                else => false,
+            },
+            .int64 => |a_| switch (b) {
+                .int64 => |b_| a_ == b_,
+                .float64 => |b_| @as(f64, @floatFromInt(a_)) == b_,
+                else => false,
+            },
+            .float64 => |a_| switch (b) {
+                .int64 => |b_| a_ == @as(f64, @floatFromInt(b_)),
+                .float64 => |b_| a_ == b_,
+                else => false,
+            },
+            .node_ref => |a_| switch (b) {
+                .node_ref => |b_| a_.value == b_.value,
+                else => false,
+            },
+            .edge_ref => |a_| switch (b) {
+                .edge_ref => |b_| a_.value == b_.value,
+                else => false,
+            },
+            .id => |a_| switch (b) {
+                .id => |b_| a_.value == b_.value,
+                else => false,
+            },
+            .bool => |a_| switch (b) {
+                .bool => |b_| a_ == b_,
+                else => false,
+            },
+            .null => b == .null,
         };
     }
 };

@@ -57,7 +57,7 @@ pub fn runProject(op: std.ArrayListUnmanaged(Plan.ProjectClause), _: *void, exec
         // This allows later assignment clauses to depend on earlier ones in the list.
         exec.assignments[clause.ident] = try executor.evaluate(
             clause.exp,
-            exec.assignments.items,
+            exec.assignments,
             exec.txn.allocator,
         );
     }

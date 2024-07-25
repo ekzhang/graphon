@@ -545,11 +545,15 @@ pub const BinopExp = struct {
 pub const Binop = enum {
     add,
     sub,
+    eql,
+    neq,
 
     fn string(self: Binop) []const u8 {
         return switch (self) {
             .add => "+",
             .sub => "-",
+            .eql => "=",
+            .neq => "<>",
         };
     }
 };

@@ -249,6 +249,8 @@ pub fn evaluate(exp: Plan.Exp, assignments: []const Value, allocator: Allocator)
             return switch (binop.op) {
                 .add => try lhs.add(rhs, allocator),
                 .sub => lhs.sub(rhs),
+                .eql => .{ .bool = lhs.eql(rhs) },
+                .neq => .{ .bool = !lhs.eql(rhs) },
             };
         },
     };
