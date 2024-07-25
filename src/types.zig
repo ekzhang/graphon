@@ -388,6 +388,21 @@ pub const Value = union(ValueKind) {
             .null => b == .null,
         };
     }
+
+    /// Returns whether a value is truthy.
+    ///
+    /// All values are generally truthy, except for the following values: false,
+    /// 0, -0, "", null, and NaN.
+    pub fn truthy(self: Value) bool {
+        return switch (self) {
+            .string => |s| s.len > 0,
+            .int64 => |n| n != 0,
+            .float64 => |f| f != 0 and !std.math.isNan(f),
+            .node_ref, .edge_ref, .id => true,
+            .bool => |b| b,
+            .null => false,
+        };
+    }
 };
 
 /// A property graph node.

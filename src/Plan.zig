@@ -141,7 +141,7 @@ pub const Operator = union(enum) {
     project: std.ArrayListUnmanaged(ProjectClause),
     // project_endpoints: ProjectEndpoints,
     empty_result,
-    filter: std.ArrayListUnmanaged(FilterClause), // unimplemented
+    filter: std.ArrayListUnmanaged(FilterClause),
     limit: u64,
     distinct: std.ArrayListUnmanaged(u16), // unimplemented
     skip: u64,
@@ -430,7 +430,10 @@ pub const ProjectClause = struct {
 
 /// A filter clause that can be applied to the query.
 pub const FilterClause = union(enum) {
-    bool_exp: Exp, // should be a boolean expression
+    /// Include a row if the expression is truthy.
+    bool_exp: Exp,
+
+    /// CHeck that a node or edge has the given label.
     ident_label: struct {
         ident: u16,
         label: []u8,
