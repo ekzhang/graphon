@@ -132,7 +132,7 @@ pub const Operator = union(enum) {
     step: Step,
     // step_between,
     begin,
-    argument: u16,
+    argument: u16, // unimplemented
     repeat, // unimplemented
     // shortest_path,
     join,
@@ -141,12 +141,12 @@ pub const Operator = union(enum) {
     project: std.ArrayListUnmanaged(ProjectClause),
     // project_endpoints: ProjectEndpoints,
     empty_result,
-    filter: std.ArrayListUnmanaged(FilterClause),
+    filter: std.ArrayListUnmanaged(FilterClause), // unimplemented
     limit: u64,
-    distinct: std.ArrayListUnmanaged(u16),
+    distinct: std.ArrayListUnmanaged(u16), // unimplemented
     skip: u64,
-    sort: std.MultiArrayList(SortClause),
-    top: u64,
+    sort: std.MultiArrayList(SortClause), // unimplemented
+    top: u64, // unimplemented
     union_all,
     // update,
     insert_node: InsertNode,
