@@ -3,7 +3,7 @@
 A very small graph database.
 
 ```gql
-MATCH (db:Database {name: 'graphon'})<-[:wrote]-(p:Person)
+MATCH (db:Database {name: 'graphon'})<-[:Wrote]-(p:Person)
 RETURN p.name
 ```
 
@@ -36,14 +36,14 @@ Graphon partially implements the [GQL](https://www.gqlstandards.org/home) langua
 
 Graph queries look like this:
 
-```cypher
+```gql
 MATCH (a:User {name: 'Eric'})->[:Likes]->(f:Food)
 RETURN f.name, f.calories
 ```
 
 You can also insert, modify, and delete graph data.
 
-```cypher
+```gql
 // Insert nodes and edges
 INSERT (a:Building {address: '285 Fulton St', city: 'New York', state: 'NY', zipcode: 10007})
 INSERT (a)-[:Nearby]-(:Geography {name: 'Hudson River', type: 'water'})
