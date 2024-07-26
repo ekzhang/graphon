@@ -245,7 +245,7 @@ pub const Value = union(ValueKind) {
             .node_ref => |id| try writer.print("{s}", .{id.toString()}),
             .edge_ref => |id| try writer.print("{s}", .{id.toString()}),
             .id => |id| try writer.print("{s}", .{id.toString()}),
-            .bool => |b| try writer.print("{s}", .{if (b) "TRUE" else "FALSE"}),
+            .bool => |b| try writer.print("{s}", .{if (b) "true" else "false"}),
             .null => try writer.print("null", .{}),
         }
     }

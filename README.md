@@ -17,7 +17,7 @@ To start a database, just download the binary and run it.
 
 ```sh-session
 $ graphon
-$ curl 'http://localhost:7687/?query=RETURN%2055'
+$ curl "http://127.0.0.1:7687/?query=RETURN%2055"
 55
 ```
 
@@ -25,27 +25,47 @@ The recommended way to explore a running Graphon database is through the CLI.
 
 ```sh-session
 $ graphon-cli
-Connected to https://127.0.0.1:7687
+Connected to http://127.0.0.1:7687
 > RETURN 100 * 3
 300
 ```
 
 ## Features
 
-Graphon implements the [GQL](https://www.gqlstandards.org/home) language, which is defined in the [ISO/IEC 39075:2024](https://www.iso.org/standard/76120.html) international standard for operations on property graphs.
+Graphon partially implements the [GQL](https://www.gqlstandards.org/home) language, which is defined in the [ISO/IEC 39075:2024](https://www.iso.org/standard/76120.html) international standard for operations on property graphs. This standard was recently published in April 2024, so there's not a whole lot of resources about it.
 
-The core GQL language includes graph pattern-matching queries, transactional updates, catalog changes, and list data types. Graphon also implements:
+Graph queries look like this:
 
-- Index creation via `CREATE INDEX` on the properties of nodes and edges
-- Snapshot isolation for concurrent transactions
+```cypher
+MATCH (a:User {name: 'Eric'})->[:Likes]->(f:Food)
+RETURN f.name, f.calories
+```
 
-The following ancillary features are not supported:
+You can also insert, modify, and delete graph data.
+
+```cypher
+// Insert nodes and edges
+INSERT (a:Building {address: '285 Fulton St', city: 'New York', state: 'NY', zipcode: 10007})
+INSERT (a)-[:Nearby]-(:Geography {name: 'Hudson River', type: 'water'})
+INSERT (a)-[:Nearby]-(:Geography {name: 'The Battery', type: 'park'})
+
+// Modify properties
+MATCH (p:Person {name: 'Eric'}) SET p.age = 23
+
+// Delete a node and attached edges
+MATCH (x:Account)-[:Invoice {unpaid: true}]->(:Account {id: 627})
+DETACH DELETE x
+```
+
+The core GQL language includes graph pattern-matching queries, transactional updates, catalog changes, and list data types. Graphon can be queried via HTTP (results sent in JSON format) or [Bolt](https://neo4j.com/docs/bolt/current/) sessions. Concurrent transactions implement [snapshot isolation](https://jepsen.io/consistency/models/snapshot-isolation).
+
+These features are _explicitly_ not supported:
 
 - Having multiple directories and schemas in one database
 - Having multiple graphs in one database
-- Graph, node, and edge types
+- Typed graphs, nodes, and edges (i.e., closed type schemas)
 - Named procedures
-- Timezone offset as per-session state (UTC is assumed)
+- The datetime data type and time zones
 
 You could consider using Graphon when you want something small and low-overhead, yet still powerful.
 
@@ -53,7 +73,7 @@ You could consider using Graphon when you want something small and low-overhead,
 
 Graphon is a very small project. It tries to be fast where possible, but the query planner is not going to be very advanced. It won't perfectly optimize every query out there.
 
-The author has never made a database before, so there will be bugs. Also, the on-disk format is unstable. We aim to be ACID, but we currently make no guarantees about consistency or durabillity because once again, there are likely bugs. **You may lose your data at any time. Do not use Graphon as a store for production data.**
+I made this database primarily out of personal interest, to experiment with algorithms, and to learn what goes into a modern database. There will be bugs. Also, the on-disk format is unstable. **Do not use Graphon as a store for production data.**
 
 ## Architecture
 
@@ -67,7 +87,7 @@ The database itself is written in Zig and based on RocksDB as a foundational sto
 
 ### Query plans
 
-Query plans are binary trees constructed out of the following operations. The design here was influenced by other databases, particularly the internal representations of [Postgres](https://github.com/postgres/postgres/blob/REL_16_3/src/backend/commands/explain.c#L1177-L1180) and [Neo4j](https://neo4j.com/docs/cypher-manual/current/planning-and-tuning/operators/operators-detail/).
+Query plans are constructed out of the following operations. The design here was influenced by other databases, particularly the internal representations of [Postgres](https://github.com/postgres/postgres/blob/REL_16_3/src/backend/commands/explain.c#L1177-L1180) and [Neo4j](https://neo4j.com/docs/cypher-manual/current/planning-and-tuning/operators/operators-detail/).
 
 - `NodeScan`: Scan for nodes in a graph, optionally providing labels.
 - `EdgeScan`: Scan for edges in a graph, optionally providing labels.
@@ -98,3 +118,5 @@ Query plans are binary trees constructed out of the following operations. The de
 - `Delete`: Delete a node or edge.
 - `Aggregate`: Compute aggregations, grouping by one or more columns.
 - `GroupAggregate`: Compute aggregations, where result table is already ordered into groups.
+
+There needs to be particular attention paid to graph algorithms to implement certain kinds of path queries efficiently, especially those that traverse paths or trails. We'll add new types of backend operations as Graphon's query language increases in expressivity.
