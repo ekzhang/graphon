@@ -79,9 +79,9 @@ I made this database primarily out of personal interest, to experiment with algo
 
 The database itself is written in Zig and based on RocksDB as a foundational storage layer.
 
-1. **Connection manager:** Accept GQL requests over HTTP and Bolt protocols.
+1. **Session manager:** Listens for requests over HTTP and Bolt protocols, creates new sessions.
 2. **Tokenizer and parser:** Convert text queries into an abstract syntax tree.
-3. **Query planner:** Materialize and optimize a plan for executing the query.
+3. **Query planner:** Translate each query into an optimized, low-level query plan.
 4. **Execution engine:** Safely execute query plans with specific graph algorithms in an interruptible, streaming API.
 5. **Storage and transactions:** Move and fetch data from durable storage, hold transaction locks, and page files via RocksDB.
 
