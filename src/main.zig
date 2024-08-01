@@ -2,6 +2,7 @@ const std = @import("std");
 const allocator = std.heap.c_allocator;
 
 const rocksdb = @import("storage/rocksdb.zig");
+const graphon = @import("graphon.zig");
 
 fn rocksdb_insert_perf() !void {
     const db = try rocksdb.DB.open("/tmp/graphon");
