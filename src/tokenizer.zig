@@ -6,6 +6,7 @@
 //! https://github.com/ziglang/zig/blob/0.12.x/LICENSE
 
 const std = @import("std");
+const code_point = @import("zg/code_point");
 
 pub const Token = struct {
     tag: Tag,
@@ -347,78 +348,63 @@ pub const Token = struct {
 
     pub const Tag = enum {
         invalid,
-        invalid_periodasterisks,
         identifier,
-        string_literal,
-        multiline_string_literal_line,
-        char_literal,
-        eof,
-        builtin,
-        bang,
-        pipe,
-        pipe_pipe,
-        pipe_equal,
-        equal,
-        equal_equal,
-        equal_angle_bracket_right,
-        bang_equal,
-        l_paren,
-        r_paren,
-        semicolon,
-        percent,
-        percent_equal,
-        l_brace,
-        r_brace,
-        l_bracket,
-        r_bracket,
-        period,
-        period_asterisk,
-        ellipsis2,
-        ellipsis3,
-        caret,
-        caret_equal,
-        plus,
-        plus_plus,
-        plus_equal,
-        plus_percent,
-        plus_percent_equal,
-        plus_pipe,
-        plus_pipe_equal,
-        minus,
-        minus_equal,
-        minus_percent,
-        minus_percent_equal,
-        minus_pipe,
-        minus_pipe_equal,
-        asterisk,
-        asterisk_equal,
-        asterisk_asterisk,
-        asterisk_percent,
-        asterisk_percent_equal,
-        asterisk_pipe,
-        asterisk_pipe_equal,
-        arrow,
-        colon,
-        slash,
-        slash_equal,
-        comma,
-        ampersand,
-        ampersand_equal,
-        question_mark,
-        angle_bracket_left,
-        angle_bracket_left_equal,
-        angle_bracket_angle_bracket_left,
-        angle_bracket_angle_bracket_left_equal,
-        angle_bracket_angle_bracket_left_pipe,
-        angle_bracket_angle_bracket_left_pipe_equal,
-        angle_bracket_right,
-        angle_bracket_right_equal,
-        angle_bracket_angle_bracket_right,
-        angle_bracket_angle_bracket_right_equal,
-        tilde,
+        string_literal, // includes both character and byte string literals
+        char_literal, // not part of the GQL spec
         number_literal,
-        doc_comment,
-        container_doc_comment,
+        eof,
+
+        // Standalone punctuation, see "<GQL special character>"
+        ampersand, // &
+        asterisk, // *
+        colon, // :
+        equal, // =, used as the equals operator, not assignment
+        not_equal, // <>
+        comma, // ,
+        bang, // !, used for label negation
+        l_paren, // (
+        r_paren, // )
+        l_brace, // {
+        r_brace, // }
+        l_bracket, // [
+        r_bracket, // ]
+        minus, // -
+        period, // .
+        plus, // +
+        question_mark, // ?
+        slash, // /
+        pipe, // |
+        pipe_pipe, // ||, concatenation operator
+        percent, // %
+        tilde, // ~
+        angle_bracket_left, // <
+        angle_bracket_left_equal, // <=
+        angle_bracket_right, // >
+        angle_bracket_right_equal, // >=
+        implies, // =>
+
+        // Arrows, see "<delimiter token>"
+        bracket_right_arrow, // ]->
+        bracket_tilde_right_arrow, // ]~>
+        left_arrow, // <-
+        left_arrow_bracket, // <-[
+        left_arrow_tilde, // <~
+        left_arrow_tilde_bracket, // <~[
+        left_minus_right, // <->
+        left_minus_slash, // <-/
+        left_tilde_slash, // <~/
+        minus_left_bracket, // -[
+        minus_slash, // -/
+        right_arrow, // ->
+        right_bracket_minus, // ]-
+        right_bracket_tilde, // ]~
+        slash_minus, // /-
+        slash_minus_right, // /->
+        slash_tilde, // /~
+        slash_tilde_right, // /~>
+        tilde_left_bracket, // ~[
+        tilde_right_arrow, // ~>
+        tilde_slash, // ~/
 
         keyword_abs,
         keyword_acos,
@@ -738,78 +724,60 @@ pub const Token = struct {
                 .invalid,
                 .identifier,
                 .string_literal,
-                .multiline_string_literal_line,
                 .char_literal,
-                .eof,
-                .builtin,
                 .number_literal,
-                .doc_comment,
-                .container_doc_comment,
+                .eof,
                 => null,
 
-                .invalid_periodasterisks => ".**",
-                .bang => "!",
-                .pipe => "|",
-                .pipe_pipe => "||",
-                .pipe_equal => "|=",
+                .ampersand => "&",
+                .asterisk => "*",
+                .colon => ":",
                 .equal => "=",
-                .equal_equal => "==",
-                .equal_angle_bracket_right => "=>",
-                .bang_equal => "!=",
+                .not_equal => "<>",
+                .comma => ",",
+                .bang => "!",
                 .l_paren => "(",
                 .r_paren => ")",
-                .semicolon => ";",
-                .percent => "%",
-                .percent_equal => "%=",
                 .l_brace => "{",
                 .r_brace => "}",
                 .l_bracket => "[",
                 .r_bracket => "]",
-                .period => ".",
-                .period_asterisk => ".*",
-                .ellipsis2 => "..",
-                .ellipsis3 => "...",
-                .caret => "^",
-                .caret_equal => "^=",
-                .plus => "+",
-                .plus_plus => "++",
-                .plus_equal => "+=",
-                .plus_percent => "+%",
-                .plus_percent_equal => "+%=",
-                .plus_pipe => "+|",
-                .plus_pipe_equal => "+|=",
                 .minus => "-",
-                .minus_equal => "-=",
-                .minus_percent => "-%",
-                .minus_percent_equal => "-%=",
-                .minus_pipe => "-|",
-                .minus_pipe_equal => "-|=",
-                .asterisk => "*",
-                .asterisk_equal => "*=",
-                .asterisk_asterisk => "**",
-                .asterisk_percent => "*%",
-                .asterisk_percent_equal => "*%=",
-                .asterisk_pipe => "*|",
-                .asterisk_pipe_equal => "*|=",
-                .arrow => "->",
-                .colon => ":",
-                .slash => "/",
-                .slash_equal => "/=",
-                .comma => ",",
-                .ampersand => "&",
-                .ampersand_equal => "&=",
+                .period => ".",
+                .plus => "+",
                 .question_mark => "?",
+                .slash => "/",
+                .pipe => "|",
+                .pipe_pipe => "||",
+                .percent => "%",
+                .tilde => "~",
                 .angle_bracket_left => "<",
                 .angle_bracket_left_equal => "<=",
-                .angle_bracket_angle_bracket_left => "<<",
-                .angle_bracket_angle_bracket_left_equal => "<<=",
-                .angle_bracket_angle_bracket_left_pipe => "<<|",
-                .angle_bracket_angle_bracket_left_pipe_equal => "<<|=",
                 .angle_bracket_right => ">",
                 .angle_bracket_right_equal => ">=",
-                .angle_bracket_angle_bracket_right => ">>",
-                .angle_bracket_angle_bracket_right_equal => ">>=",
-                .tilde => "~",
+                .implies => "=>",
+
+                .bracket_right_arrow => "]->",
+                .bracket_tilde_right_arrow => "]~>",
+                .left_arrow => "<-",
+                .left_arrow_bracket => "<-[",
+                .left_arrow_tilde => "<~",
+                .left_arrow_tilde_bracket => "<~[",
+                .left_minus_right => "<->",
+                .left_minus_slash => "</-",
+                .left_tilde_slash => "<~/",
+                .minus_left_bracket => "-[",
+                .minus_slash => "-/",
+                .right_arrow => "->",
+                .right_bracket_minus => "]-",
+                .right_bracket_tilde => "]~",
+                .slash_minus => "/-",
+                .slash_minus_right => "/->",
+                .slash_tilde => "/~",
+                .slash_tilde_right => "/~>",
+                .tilde_left_bracket => "~[",
+                .tilde_right_arrow => "~>",
+                .tilde_slash => "~/",
 
                 .keyword_abs => "ABS",
                 .keyword_acos => "ACOS",
@@ -1130,12 +1098,10 @@ pub const Token = struct {
             return tag.lexeme() orelse switch (tag) {
                 .invalid => "invalid bytes",
                 .identifier => "an identifier",
-                .string_literal, .multiline_string_literal_line => "a string literal",
+                .string_literal => "a string literal",
                 .char_literal => "a character literal",
                 .eof => "EOF",
-                .builtin => "a builtin function",
                 .number_literal => "a number literal",
-                .doc_comment, .container_doc_comment => "a document comment",
                 else => unreachable,
             };
         }
@@ -1166,14 +1132,12 @@ pub const Tokenizer = struct {
         builtin,
         string_literal,
         string_literal_backslash,
-        multiline_string_literal_line,
         char_literal,
         char_literal_backslash,
         char_literal_hex_escape,
         char_literal_unicode_escape_saw_u,
         char_literal_unicode_escape,
         char_literal_end,
-        backslash,
         equal,
         bang,
         pipe,
@@ -1206,7 +1170,6 @@ pub const Tokenizer = struct {
         angle_bracket_angle_bracket_right,
         period,
         period_2,
-        period_asterisk,
         saw_at_sign,
     };
 
@@ -1316,10 +1279,6 @@ pub const Tokenizer = struct {
                     },
                     '^' => {
                         state = .caret;
-                    },
-                    '\\' => {
-                        state = .backslash;
-                        result.tag = .multiline_string_literal_line;
                     },
                     '{' => {
                         result.tag = .l_brace;
@@ -1518,15 +1477,6 @@ pub const Tokenizer = struct {
                     'a'...'z', 'A'...'Z', '_', '0'...'9' => {},
                     else => break,
                 },
-                .backslash => switch (c) {
-                    '\\' => {
-                        state = .multiline_string_literal_line;
-                    },
-                    else => {
-                        result.tag = .invalid;
-                        break;
-                    },
-                },
                 .string_literal => switch (c) {
                     0, '\n' => {
                         result.tag = .invalid;
@@ -1677,33 +1627,6 @@ pub const Tokenizer = struct {
                     else => {
                         result.tag = .invalid;
                         break;
-                    },
-                },
-
-                .multiline_string_literal_line => switch (c) {
-                    0 => {
-                        if (self.index != self.buffer.len) {
-                            result.tag = .invalid;
-                            result.loc.end = self.index;
-                            self.index += 1;
-                            return result;
-                        }
-                        break;
-                    },
-                    '\n' => {
-                        self.index += 1;
-                        break;
-                    },
-                    '\t' => {},
-                    else => {
-                        if (self.invalidCharacterLength()) |len| {
-                            result.tag = .invalid;
-                            result.loc.end = self.index;
-                            self.index += len;
-                            return result;
-                        }
-
-                        self.index += (std.unicode.utf8ByteSequenceLength(c) catch unreachable) - 1;
                     },
                 },
 
@@ -1872,9 +1795,6 @@ pub const Tokenizer = struct {
                     '.' => {
                         state = .period_2;
                     },
-                    '*' => {
-                        state = .period_asterisk;
-                    },
                     else => {
                         result.tag = .period;
                         break;
@@ -1889,17 +1809,6 @@ pub const Tokenizer = struct {
                     },
                     else => {
                         result.tag = .ellipsis2;
-                        break;
-                    },
-                },
-
-                .period_asterisk => switch (c) {
-                    '*' => {
-                        result.tag = .invalid_periodasterisks;
-                        break;
-                    },
-                    else => {
-                        result.tag = .period_asterisk;
                         break;
                     },
                 },
@@ -2357,14 +2266,6 @@ test "string identifier and builtin fns" {
     });
 }
 
-test "multiline string literal with literal tab" {
-    try testTokenize(
-        \\\\foo	bar
-    , &.{
-        .multiline_string_literal_line,
-    });
-}
-
 test "comments with literal tab" {
     try testTokenize(
         \\//foo	bar
@@ -2422,35 +2323,9 @@ test "UTF-8 BOM is recognized and skipped" {
 test "correctly parse pointer assignment" {
     try testTokenize("b.*=3;\n", &.{
         .identifier,
-        .period_asterisk,
         .equal,
         .number_literal,
         .semicolon,
-    });
-}
-
-test "correctly parse pointer dereference followed by asterisk" {
-    try testTokenize("\"b\".* ** 10", &.{
-        .string_literal,
-        .period_asterisk,
-        .asterisk_asterisk,
-        .number_literal,
-    });
-
-    try testTokenize("(\"b\".*)** 10", &.{
-        .l_paren,
-        .string_literal,
-        .period_asterisk,
-        .r_paren,
-        .asterisk_asterisk,
-        .number_literal,
-    });
-
-    try testTokenize("\"b\".*** 10", &.{
-        .string_literal,
-        .invalid_periodasterisks,
-        .asterisk_asterisk,
-        .number_literal,
     });
 }
 
