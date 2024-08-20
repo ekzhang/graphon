@@ -1,3 +1,10 @@
+//! Tokenizer for GQL statements. This is heavily borrowed and modified from the
+//! Zig language tokenizer, which exported from the standard library as the
+//! `std.zig.Tokenizer` struct.
+//!
+//! The Zig standard library is available under the MIT license.
+//! https://github.com/ziglang/zig/blob/0.12.x/LICENSE
+
 const std = @import("std");
 
 pub const Token = struct {
@@ -15,7 +22,7 @@ pub const Token = struct {
     /// All keywords are case-insensitive (but canonically uppercase).
     ///
     /// Reference: ISO/IEC 39075:2024, Section 4.3.5.1 and Section 21.3.
-    pub const keywords = std.StaticStringMap(Tag).initComptime(.{
+    pub const keywords = std.StaticStringMapWithEql(Tag, std.static_string_map.eqlAsciiIgnoreCase).initComptime(.{
         // Reserved word
         .{ "ABS", .keyword_abs },
         .{ "ACOS", .keyword_acos },
@@ -333,6 +340,7 @@ pub const Token = struct {
         .{ "ZONE", .keyword_zone },
     });
 
+    /// Lookup a keyword for the given string. Unlike Zig, this is case-insensitive.
     pub fn getKeyword(bytes: []const u8) ?Tag {
         return keywords.get(bytes);
     }
