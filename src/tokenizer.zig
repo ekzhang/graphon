@@ -1139,7 +1139,6 @@ pub const Tokenizer = struct {
         char_literal_unicode_escape,
         char_literal_end,
         equal,
-        bang,
         pipe,
         minus,
         minus_percent,
@@ -1164,10 +1163,7 @@ pub const Tokenizer = struct {
         plus_percent,
         plus_pipe,
         angle_bracket_left,
-        angle_bracket_angle_bracket_left,
-        angle_bracket_angle_bracket_left_pipe,
         angle_bracket_right,
-        angle_bracket_angle_bracket_right,
         period,
         period_2,
         saw_at_sign,
@@ -1215,9 +1211,6 @@ pub const Tokenizer = struct {
                     },
                     '=' => {
                         state = .equal;
-                    },
-                    '!' => {
-                        state = .bang;
                     },
                     '|' => {
                         state = .pipe;
@@ -1630,18 +1623,6 @@ pub const Tokenizer = struct {
                     },
                 },
 
-                .bang => switch (c) {
-                    '=' => {
-                        result.tag = .bang_equal;
-                        self.index += 1;
-                        break;
-                    },
-                    else => {
-                        result.tag = .bang;
-                        break;
-                    },
-                },
-
                 .pipe => switch (c) {
                     '=' => {
                         result.tag = .pipe_equal;
@@ -1723,9 +1704,6 @@ pub const Tokenizer = struct {
                 },
 
                 .angle_bracket_left => switch (c) {
-                    '<' => {
-                        state = .angle_bracket_angle_bracket_left;
-                    },
                     '=' => {
                         result.tag = .angle_bracket_left_equal;
                         self.index += 1;
@@ -1737,37 +1715,7 @@ pub const Tokenizer = struct {
                     },
                 },
 
-                .angle_bracket_angle_bracket_left => switch (c) {
-                    '=' => {
-                        result.tag = .angle_bracket_angle_bracket_left_equal;
-                        self.index += 1;
-                        break;
-                    },
-                    '|' => {
-                        state = .angle_bracket_angle_bracket_left_pipe;
-                    },
-                    else => {
-                        result.tag = .angle_bracket_angle_bracket_left;
-                        break;
-                    },
-                },
-
-                .angle_bracket_angle_bracket_left_pipe => switch (c) {
-                    '=' => {
-                        result.tag = .angle_bracket_angle_bracket_left_pipe_equal;
-                        self.index += 1;
-                        break;
-                    },
-                    else => {
-                        result.tag = .angle_bracket_angle_bracket_left_pipe;
-                        break;
-                    },
-                },
-
                 .angle_bracket_right => switch (c) {
-                    '>' => {
-                        state = .angle_bracket_angle_bracket_right;
-                    },
                     '=' => {
                         result.tag = .angle_bracket_right_equal;
                         self.index += 1;
@@ -1775,18 +1723,6 @@ pub const Tokenizer = struct {
                     },
                     else => {
                         result.tag = .angle_bracket_right;
-                        break;
-                    },
-                },
-
-                .angle_bracket_angle_bracket_right => switch (c) {
-                    '=' => {
-                        result.tag = .angle_bracket_angle_bracket_right_equal;
-                        self.index += 1;
-                        break;
-                    },
-                    else => {
-                        result.tag = .angle_bracket_angle_bracket_right;
                         break;
                     },
                 },
@@ -2586,9 +2522,9 @@ test "invalid token with unfinished escape right before eof" {
 }
 
 test "saturating operators" {
-    try testTokenize("<<", &.{.angle_bracket_angle_bracket_left});
-    try testTokenize("<<|", &.{.angle_bracket_angle_bracket_left_pipe});
-    try testTokenize("<<|=", &.{.angle_bracket_angle_bracket_left_pipe_equal});
+    try testTokenize("<<", &.{ .angle_bracket_left, .angle_bracket_left });
+    try testTokenize("<<|", &.{ .angle_bracket_left, .angle_bracket_left, .pipe });
+    try testTokenize("<<|=", &.{ .angle_bracket_left, .angle_bracket_left, .pipe, .equal });
 
     try testTokenize("*", &.{.asterisk});
     try testTokenize("*|", &.{.asterisk_pipe});
