@@ -409,6 +409,9 @@ pub const Token = struct {
         tilde_right_arrow, // ~>
         tilde_slash, // ~/
 
+        // Miscellaneous characters
+        semicolon, // ;, allowed at the end of queries, not part of the spec
+
         keyword_abs,
         keyword_acos,
         keyword_all,
@@ -782,6 +785,8 @@ pub const Token = struct {
                 .tilde_right_arrow => "~>",
                 .tilde_slash => "~/",
 
+                .semicolon => ";",
+
                 .keyword_abs => "ABS",
                 .keyword_acos => "ACOS",
                 .keyword_all => "ALL",
@@ -1148,8 +1153,6 @@ pub const Tokenizer = struct {
         slash,
         line_comment_start,
         line_comment,
-        doc_comment_start,
-        doc_comment,
         int,
         int_exponent,
         int_period,
@@ -1249,7 +1252,7 @@ pub const Tokenizer = struct {
                         break;
                     },
                     ':' => {
-                        result.state = .colon;
+                        state = .colon;
                     },
                     '%' => {
                         result.tag = .percent;
@@ -1320,7 +1323,7 @@ pub const Tokenizer = struct {
                     },
                     'a'...'z', 'A'...'Z', '_' => {
                         state = .builtin;
-                        result.tag = .builtin;
+                        // result.tag = .builtin; TODO
                     },
                     else => {
                         result.tag = .invalid;
@@ -1608,7 +1611,7 @@ pub const Tokenizer = struct {
                         state = .line_comment_start;
                     },
                     '=' => {
-                        result.tag = .slash_equal;
+                        // result.tag = .slash_equal; TODO
                         self.index += 1;
                         break;
                     },
@@ -1627,13 +1630,6 @@ pub const Tokenizer = struct {
                         }
                         break;
                     },
-                    '/' => {
-                        state = .doc_comment_start;
-                    },
-                    '!' => {
-                        result.tag = .container_doc_comment;
-                        state = .doc_comment;
-                    },
                     '\n' => {
                         state = .start;
                         result.loc.start = self.index + 1;
@@ -1643,42 +1639,6 @@ pub const Tokenizer = struct {
                     },
                     else => {
                         state = .line_comment;
-
-                        if (self.invalidCharacterLength()) |len| {
-                            result.tag = .invalid;
-                            result.loc.end = self.index;
-                            self.index += len;
-                            return result;
-                        }
-
-                        self.index += (std.unicode.utf8ByteSequenceLength(c) catch unreachable) - 1;
-                    },
-                },
-                .doc_comment_start => switch (c) {
-                    '/' => {
-                        state = .line_comment;
-                    },
-                    0 => {
-                        if (self.index != self.buffer.len) {
-                            result.tag = .invalid;
-                            result.loc.end = self.index;
-                            self.index += 1;
-                            return result;
-                        }
-                        result.tag = .doc_comment;
-                        break;
-                    },
-                    '\n' => {
-                        result.tag = .doc_comment;
-                        break;
-                    },
-                    '\t' => {
-                        state = .doc_comment;
-                        result.tag = .doc_comment;
-                    },
-                    else => {
-                        state = .doc_comment;
-                        result.tag = .doc_comment;
 
                         if (self.invalidCharacterLength()) |len| {
                             result.tag = .invalid;
@@ -1704,20 +1664,6 @@ pub const Tokenizer = struct {
                         state = .start;
                         result.loc.start = self.index + 1;
                     },
-                    '\t' => {},
-                    else => {
-                        if (self.invalidCharacterLength()) |len| {
-                            result.tag = .invalid;
-                            result.loc.end = self.index;
-                            self.index += len;
-                            return result;
-                        }
-
-                        self.index += (std.unicode.utf8ByteSequenceLength(c) catch unreachable) - 1;
-                    },
-                },
-                .doc_comment => switch (c) {
-                    0, '\n' => break,
                     '\t' => {},
                     else => {
                         if (self.invalidCharacterLength()) |len| {
@@ -1780,7 +1726,7 @@ pub const Tokenizer = struct {
 
     fn invalidCharacterLength(self: *Tokenizer) ?u3 {
         const c0 = self.buffer[self.index];
-        if (std.ascii.isAscii(c0)) {
+        if (std.ascii.isASCII(c0)) {
             if (c0 == '\r') {
                 if (self.index + 1 < self.buffer.len and self.buffer[self.index + 1] == '\n') {
                     // Carriage returns are *only* allowed just before a linefeed as part of a CRLF pair, otherwise
@@ -1824,18 +1770,25 @@ pub const Tokenizer = struct {
 };
 
 test "keywords" {
-    try testTokenize("test const else", &.{ .keyword_test, .keyword_const, .keyword_else });
+    try testTokenize("match PARTITION oRdEr BY partition", &.{
+        .keyword_match,
+        .keyword_partition,
+        .keyword_order,
+        .keyword_by,
+        .keyword_partition,
+    });
 }
 
-test "line comment followed by top-level comptime" {
+test "line comment followed by statement" {
     try testTokenize(
         \\// line comment
-        \\comptime {}
+        \\MATCH ();
         \\
     , &.{
-        .keyword_comptime,
-        .l_brace,
-        .r_brace,
+        .keyword_match,
+        .l_paren,
+        .r_paren,
+        .semicolon,
     });
 }
 
@@ -2041,21 +1994,6 @@ test "illegal unicode codepoints" {
     try testTokenize("//\xe2\x80\xaa", &.{});
 }
 
-test "string identifier and builtin fns" {
-    try testTokenize(
-        \\const @"if" = @import("std");
-    , &.{
-        .keyword_const,
-        .identifier,
-        .equal,
-        .builtin,
-        .l_paren,
-        .string_literal,
-        .r_paren,
-        .semicolon,
-    });
-}
-
 test "comments with literal tab" {
     try testTokenize(
         \\//foo	bar
@@ -2064,12 +2002,7 @@ test "comments with literal tab" {
         \\//	foo
         \\///	foo
         \\///	/foo
-    , &.{
-        .container_doc_comment,
-        .doc_comment,
-        .doc_comment,
-        .doc_comment,
-    });
+    , &.{});
 }
 
 test "pipe and then invalid" {
@@ -2079,15 +2012,17 @@ test "pipe and then invalid" {
     });
 }
 
-test "line comment and doc comment" {
+test "line comments in two forms" {
     try testTokenize("//", &.{});
     try testTokenize("// a / b", &.{});
     try testTokenize("// /", &.{});
-    try testTokenize("/// a", &.{.doc_comment});
-    try testTokenize("///", &.{.doc_comment});
+    try testTokenize("/// a", &.{});
+    try testTokenize("///", &.{});
     try testTokenize("////", &.{});
-    try testTokenize("//!", &.{.container_doc_comment});
-    try testTokenize("//!!", &.{.container_doc_comment});
+    try testTokenize("--", &.{});
+    try testTokenize("-- hello world!", &.{});
+    try testTokenize("---", &.{});
+    try testTokenize("-- ---", &.{});
 }
 
 test "line comment followed by identifier" {
@@ -2382,7 +2317,7 @@ test "null byte before eof" {
     try testTokenize("\x00", &.{.invalid});
     try testTokenize("// NUL\x00\n", &.{.invalid});
     try testTokenize("///\x00\n", &.{.invalid});
-    try testTokenize("/// NUL\x00\n", &.{ .doc_comment, .invalid });
+    try testTokenize("/// NUL\x00\n", &.{.invalid});
 }
 
 fn testTokenize(source: [:0]const u8, expected_token_tags: []const Token.Tag) !void {
