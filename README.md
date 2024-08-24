@@ -66,6 +66,7 @@ These features are _explicitly_ not supported:
 - Typed graphs, nodes, and edges (i.e., closed type schemas)
 - Named procedures
 - The datetime data type and time zones
+- Identifiers (variable names) using non-ASCII characters
 
 You could consider using Graphon when you want something small and low-overhead, yet still powerful.
 
