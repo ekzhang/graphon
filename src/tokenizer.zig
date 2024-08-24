@@ -358,6 +358,7 @@ pub const Token = struct {
         ampersand, // &
         asterisk, // *
         colon, // :
+        colon_colon, // ::
         equal, // =, used as the equals operator, not assignment
         not_equal, // <>
         comma, // ,
@@ -370,6 +371,8 @@ pub const Token = struct {
         r_bracket, // ]
         minus, // -
         period, // .
+        ellipsis2, // ..
+        ellipsis3, // ...
         plus, // +
         question_mark, // ?
         slash, // /
@@ -1140,12 +1143,8 @@ pub const Tokenizer = struct {
         char_literal_end,
         equal,
         pipe,
+        colon,
         minus,
-        minus_percent,
-        minus_pipe,
-        asterisk,
-        asterisk_percent,
-        asterisk_pipe,
         slash,
         line_comment_start,
         line_comment,
@@ -1156,12 +1155,6 @@ pub const Tokenizer = struct {
         int_period,
         float,
         float_exponent,
-        ampersand,
-        caret,
-        percent,
-        plus,
-        plus_percent,
-        plus_pipe,
         angle_bracket_left,
         angle_bracket_right,
         period,
@@ -1245,33 +1238,39 @@ pub const Tokenizer = struct {
                         self.index += 1;
                         break;
                     },
+                    '!' => {
+                        result.tag = .bang;
+                        self.index += 1;
+                        break;
+                    },
                     '?' => {
                         result.tag = .question_mark;
                         self.index += 1;
                         break;
                     },
                     ':' => {
-                        result.tag = .colon;
+                        result.state = .colon;
+                    },
+                    '%' => {
+                        result.tag = .percent;
                         self.index += 1;
                         break;
                     },
-                    '%' => {
-                        state = .percent;
-                    },
                     '*' => {
-                        state = .asterisk;
+                        result.tag = .asterisk;
+                        self.index += 1;
+                        break;
                     },
                     '+' => {
-                        state = .plus;
+                        result.tag = .plus;
+                        self.index += 1;
+                        break;
                     },
                     '<' => {
                         state = .angle_bracket_left;
                     },
                     '>' => {
                         state = .angle_bracket_right;
-                    },
-                    '^' => {
-                        state = .caret;
                     },
                     '{' => {
                         result.tag = .l_brace;
@@ -1298,7 +1297,9 @@ pub const Tokenizer = struct {
                         state = .slash;
                     },
                     '&' => {
-                        state = .ampersand;
+                        result.tag = .ampersand;
+                        self.index += 1;
+                        break;
                     },
                     '0'...'9' => {
                         state = .int;
@@ -1323,136 +1324,6 @@ pub const Tokenizer = struct {
                     },
                     else => {
                         result.tag = .invalid;
-                        break;
-                    },
-                },
-
-                .ampersand => switch (c) {
-                    '=' => {
-                        result.tag = .ampersand_equal;
-                        self.index += 1;
-                        break;
-                    },
-                    else => {
-                        result.tag = .ampersand;
-                        break;
-                    },
-                },
-
-                .asterisk => switch (c) {
-                    '=' => {
-                        result.tag = .asterisk_equal;
-                        self.index += 1;
-                        break;
-                    },
-                    '*' => {
-                        result.tag = .asterisk_asterisk;
-                        self.index += 1;
-                        break;
-                    },
-                    '%' => {
-                        state = .asterisk_percent;
-                    },
-                    '|' => {
-                        state = .asterisk_pipe;
-                    },
-                    else => {
-                        result.tag = .asterisk;
-                        break;
-                    },
-                },
-
-                .asterisk_percent => switch (c) {
-                    '=' => {
-                        result.tag = .asterisk_percent_equal;
-                        self.index += 1;
-                        break;
-                    },
-                    else => {
-                        result.tag = .asterisk_percent;
-                        break;
-                    },
-                },
-
-                .asterisk_pipe => switch (c) {
-                    '=' => {
-                        result.tag = .asterisk_pipe_equal;
-                        self.index += 1;
-                        break;
-                    },
-                    else => {
-                        result.tag = .asterisk_pipe;
-                        break;
-                    },
-                },
-
-                .percent => switch (c) {
-                    '=' => {
-                        result.tag = .percent_equal;
-                        self.index += 1;
-                        break;
-                    },
-                    else => {
-                        result.tag = .percent;
-                        break;
-                    },
-                },
-
-                .plus => switch (c) {
-                    '=' => {
-                        result.tag = .plus_equal;
-                        self.index += 1;
-                        break;
-                    },
-                    '+' => {
-                        result.tag = .plus_plus;
-                        self.index += 1;
-                        break;
-                    },
-                    '%' => {
-                        state = .plus_percent;
-                    },
-                    '|' => {
-                        state = .plus_pipe;
-                    },
-                    else => {
-                        result.tag = .plus;
-                        break;
-                    },
-                },
-
-                .plus_percent => switch (c) {
-                    '=' => {
-                        result.tag = .plus_percent_equal;
-                        self.index += 1;
-                        break;
-                    },
-                    else => {
-                        result.tag = .plus_percent;
-                        break;
-                    },
-                },
-
-                .plus_pipe => switch (c) {
-                    '=' => {
-                        result.tag = .plus_pipe_equal;
-                        self.index += 1;
-                        break;
-                    },
-                    else => {
-                        result.tag = .plus_pipe;
-                        break;
-                    },
-                },
-
-                .caret => switch (c) {
-                    '=' => {
-                        result.tag = .caret_equal;
-                        self.index += 1;
-                        break;
-                    },
-                    else => {
-                        result.tag = .caret;
                         break;
                     },
                 },
@@ -1624,11 +1495,6 @@ pub const Tokenizer = struct {
                 },
 
                 .pipe => switch (c) {
-                    '=' => {
-                        result.tag = .pipe_equal;
-                        self.index += 1;
-                        break;
-                    },
                     '|' => {
                         result.tag = .pipe_pipe;
                         self.index += 1;
@@ -1641,13 +1507,8 @@ pub const Tokenizer = struct {
                 },
 
                 .equal => switch (c) {
-                    '=' => {
-                        result.tag = .equal_equal;
-                        self.index += 1;
-                        break;
-                    },
                     '>' => {
-                        result.tag = .equal_angle_bracket_right;
+                        result.tag = .implies;
                         self.index += 1;
                         break;
                     },
@@ -1657,22 +1518,33 @@ pub const Tokenizer = struct {
                     },
                 },
 
+                .colon => switch (c) {
+                    ':' => {
+                        result.tag = .colon_colon;
+                        self.index += 1;
+                        break;
+                    },
+                    else => {
+                        result.tag = .colon;
+                        break;
+                    },
+                },
+
                 .minus => switch (c) {
+                    '/' => {
+                        result.tag = .minus_slash;
+                        self.index += 1;
+                        break;
+                    },
+                    '[' => {
+                        result.tag = .minus_left_bracket;
+                        self.index += 1;
+                        break;
+                    },
                     '>' => {
-                        result.tag = .arrow;
+                        result.tag = .right_arrow;
                         self.index += 1;
                         break;
-                    },
-                    '=' => {
-                        result.tag = .minus_equal;
-                        self.index += 1;
-                        break;
-                    },
-                    '%' => {
-                        state = .minus_percent;
-                    },
-                    '|' => {
-                        state = .minus_pipe;
                     },
                     else => {
                         result.tag = .minus;
@@ -1680,32 +1552,14 @@ pub const Tokenizer = struct {
                     },
                 },
 
-                .minus_percent => switch (c) {
-                    '=' => {
-                        result.tag = .minus_percent_equal;
-                        self.index += 1;
-                        break;
-                    },
-                    else => {
-                        result.tag = .minus_percent;
-                        break;
-                    },
-                },
-                .minus_pipe => switch (c) {
-                    '=' => {
-                        result.tag = .minus_pipe_equal;
-                        self.index += 1;
-                        break;
-                    },
-                    else => {
-                        result.tag = .minus_pipe;
-                        break;
-                    },
-                },
-
                 .angle_bracket_left => switch (c) {
                     '=' => {
                         result.tag = .angle_bracket_left_equal;
+                        self.index += 1;
+                        break;
+                    },
+                    '>' => {
+                        result.tag = .not_equal;
                         self.index += 1;
                         break;
                     },
@@ -2519,24 +2373,6 @@ test "invalid token with unfinished escape right before eof" {
     try testTokenize("\"\\", &.{.invalid});
     try testTokenize("'\\", &.{.invalid});
     try testTokenize("'\\u", &.{.invalid});
-}
-
-test "saturating operators" {
-    try testTokenize("<<", &.{ .angle_bracket_left, .angle_bracket_left });
-    try testTokenize("<<|", &.{ .angle_bracket_left, .angle_bracket_left, .pipe });
-    try testTokenize("<<|=", &.{ .angle_bracket_left, .angle_bracket_left, .pipe, .equal });
-
-    try testTokenize("*", &.{.asterisk});
-    try testTokenize("*|", &.{.asterisk_pipe});
-    try testTokenize("*|=", &.{.asterisk_pipe_equal});
-
-    try testTokenize("+", &.{.plus});
-    try testTokenize("+|", &.{.plus_pipe});
-    try testTokenize("+|=", &.{.plus_pipe_equal});
-
-    try testTokenize("-", &.{.minus});
-    try testTokenize("-|", &.{.minus_pipe});
-    try testTokenize("-|=", &.{.minus_pipe_equal});
 }
 
 test "null byte before eof" {
