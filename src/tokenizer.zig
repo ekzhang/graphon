@@ -1534,6 +1534,9 @@ pub const Tokenizer = struct {
                 },
 
                 .minus => switch (c) {
+                    '-' => {
+                        state = .line_comment_start;
+                    },
                     '/' => {
                         result.tag = .minus_slash;
                         self.index += 1;
