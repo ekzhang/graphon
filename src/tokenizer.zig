@@ -369,7 +369,6 @@ pub const Token = struct {
         invalid,
         identifier,
         string_literal, // includes both character and byte string literals
-        char_literal, // not part of the GQL spec
         number_literal,
         eof,
 
@@ -749,7 +748,6 @@ pub const Token = struct {
                 .invalid,
                 .identifier,
                 .string_literal,
-                .char_literal,
                 .number_literal,
                 .eof,
                 => null,
@@ -1126,7 +1124,6 @@ pub const Token = struct {
                 .invalid => "invalid bytes",
                 .identifier => "an identifier",
                 .string_literal => "a string literal",
-                .char_literal => "a character literal",
                 .eof => "EOF",
                 .number_literal => "a number literal",
                 else => unreachable,
@@ -1156,15 +1153,9 @@ pub const Tokenizer = struct {
     const State = enum {
         start,
         identifier,
-        builtin,
         string_literal,
         string_literal_backslash,
-        char_literal,
-        char_literal_backslash,
-        char_literal_hex_escape,
-        char_literal_unicode_escape_saw_u,
-        char_literal_unicode_escape,
-        char_literal_end,
+        string_literal_delimiter,
         equal,
         pipe,
         colon,
@@ -1202,7 +1193,8 @@ pub const Tokenizer = struct {
                 .end = undefined,
             },
         };
-        var seen_escape_digits: usize = undefined;
+        var string_delimiter: u8 = undefined;
+        var string_noescape = false;
         while (true) : (self.index += 1) {
             const c = self.buffer[self.index];
             switch (state) {
@@ -1219,12 +1211,10 @@ pub const Tokenizer = struct {
                     ' ', '\n', '\t', '\r' => {
                         result.loc.start = self.index + 1;
                     },
-                    '"' => {
+                    '"', '\'', '`' => {
                         state = .string_literal;
                         result.tag = .string_literal;
-                    },
-                    '\'' => {
-                        state = .char_literal;
+                        string_delimiter = c;
                     },
                     'a'...'z', 'A'...'Z', '_' => {
                         state = .identifier;
@@ -1341,13 +1331,11 @@ pub const Tokenizer = struct {
                 },
 
                 .saw_at_sign => switch (c) {
-                    '"' => {
-                        result.tag = .identifier;
+                    '"', '\'', '`' => {
+                        result.tag = .string_literal;
                         state = .string_literal;
-                    },
-                    'a'...'z', 'A'...'Z', '_' => {
-                        state = .builtin;
-                        // result.tag = .builtin; TODO
+                        string_delimiter = c;
+                        string_noescape = true;
                     },
                     else => {
                         result.tag = .invalid;
@@ -1364,12 +1352,9 @@ pub const Tokenizer = struct {
                         break;
                     },
                 },
-                .builtin => switch (c) {
-                    'a'...'z', 'A'...'Z', '_', '0'...'9' => {},
-                    else => break,
-                },
-                .string_literal => switch (c) {
-                    0, '\n' => {
+
+                .string_literal, .string_literal_backslash => switch (c) {
+                    0 => {
                         result.tag = .invalid;
                         result.loc.end = self.index;
                         if (self.index != self.buffer.len) {
@@ -1377,14 +1362,33 @@ pub const Tokenizer = struct {
                         }
                         return result;
                     },
-                    '\\' => {
-                        state = .string_literal_backslash;
+                    '\\' => if (!string_noescape) {
+                        switch (state) {
+                            .string_literal => state = .string_literal_backslash,
+                            .string_literal_backslash => state = .string_literal,
+                            else => unreachable,
+                        }
                     },
-                    '"' => {
-                        self.index += 1;
-                        break;
-                    },
+                    '\n', '\t' => {},
                     else => {
+                        if (state == .string_literal_backslash) {
+                            state = .string_literal;
+                        } else if (c == string_delimiter) {
+                            if (string_noescape) {
+                                self.index += 1;
+                                break;
+                            }
+                            // In normal strings (not noescape @"..."), the presence of a doubled
+                            // delimiter is used as an escape sequence.
+                            //
+                            // For example, in "foo""bar", the string is the same as 'foo"bar'. This
+                            // is extremely confusing in my opinion, but it's in the spec!
+                            //
+                            // Reference: ISO/IEC 39075:2024, Section 21.2, Syntax Rules.
+                            state = .string_literal_delimiter;
+                            continue;
+                        }
+
                         if (self.invalidCharacterLength()) |len| {
                             result.tag = .invalid;
                             result.loc.end = self.index;
@@ -1395,130 +1399,15 @@ pub const Tokenizer = struct {
                         self.index += (std.unicode.utf8ByteSequenceLength(c) catch unreachable) - 1;
                     },
                 },
-
-                .string_literal_backslash => switch (c) {
-                    0, '\n' => {
-                        result.tag = .invalid;
-                        result.loc.end = self.index;
-                        if (self.index != self.buffer.len) {
-                            self.index += 1;
-                        }
-                        return result;
-                    },
-                    else => {
+                .string_literal_delimiter => {
+                    std.debug.assert(!string_noescape);
+                    if (c == string_delimiter) {
+                        // Only continue processing on double delimiter (escape format). Otherwise,
+                        // this is the end of the string.
                         state = .string_literal;
-
-                        if (self.invalidCharacterLength()) |len| {
-                            result.tag = .invalid;
-                            result.loc.end = self.index;
-                            self.index += len;
-                            return result;
-                        }
-
-                        self.index += (std.unicode.utf8ByteSequenceLength(c) catch unreachable) - 1;
-                    },
-                },
-
-                .char_literal => switch (c) {
-                    0, '\n', '\'' => {
-                        result.tag = .invalid;
-                        result.loc.end = self.index;
-                        if (self.index != self.buffer.len) {
-                            self.index += 1;
-                        }
-                        return result;
-                    },
-                    '\\' => {
-                        state = .char_literal_backslash;
-                    },
-                    else => {
-                        state = .char_literal_end;
-
-                        if (self.invalidCharacterLength()) |len| {
-                            result.tag = .invalid;
-                            result.loc.end = self.index;
-                            self.index += len;
-                            return result;
-                        }
-
-                        self.index += (std.unicode.utf8ByteSequenceLength(c) catch unreachable) - 1;
-                    },
-                },
-
-                .char_literal_backslash => switch (c) {
-                    0, '\n' => {
-                        result.tag = .invalid;
-                        result.loc.end = self.index;
-                        if (self.index != self.buffer.len) {
-                            self.index += 1;
-                        }
-                        return result;
-                    },
-                    'x' => {
-                        state = .char_literal_hex_escape;
-                        seen_escape_digits = 0;
-                    },
-                    'u' => {
-                        state = .char_literal_unicode_escape_saw_u;
-                    },
-                    else => {
-                        state = .char_literal_end;
-
-                        if (self.invalidCharacterLength()) |len| {
-                            result.tag = .invalid;
-                            result.loc.end = self.index;
-                            self.index += len;
-                            return result;
-                        }
-
-                        self.index += (std.unicode.utf8ByteSequenceLength(c) catch unreachable) - 1;
-                    },
-                },
-
-                .char_literal_hex_escape => switch (c) {
-                    '0'...'9', 'a'...'f', 'A'...'F' => {
-                        seen_escape_digits += 1;
-                        if (seen_escape_digits == 2) {
-                            state = .char_literal_end;
-                        }
-                    },
-                    else => {
-                        result.tag = .invalid;
+                    } else {
                         break;
-                    },
-                },
-
-                .char_literal_unicode_escape_saw_u => switch (c) {
-                    '{' => {
-                        state = .char_literal_unicode_escape;
-                    },
-                    else => {
-                        result.tag = .invalid;
-                        break;
-                    },
-                },
-
-                .char_literal_unicode_escape => switch (c) {
-                    '0'...'9', 'a'...'f', 'A'...'F' => {},
-                    '}' => {
-                        state = .char_literal_end; // too many/few digits handled later
-                    },
-                    else => {
-                        result.tag = .invalid;
-                        break;
-                    },
-                },
-
-                .char_literal_end => switch (c) {
-                    '\'' => {
-                        result.tag = .char_literal;
-                        self.index += 1;
-                        break;
-                    },
-                    else => {
-                        result.tag = .invalid;
-                        break;
-                    },
+                    }
                 },
 
                 .pipe => switch (c) {
@@ -1803,17 +1692,12 @@ pub const Tokenizer = struct {
                     0 => {
                         // If a null character is in the middle of the buffer, it is invalid. In
                         // addition, EOF means an unclosed block comment, also invalid.
+                        result.tag = .invalid;
+                        result.loc.end = self.index;
                         if (self.index != self.buffer.len) {
-                            result.tag = .invalid;
-                            result.loc.end = self.index;
                             self.index += 1;
-                            return result;
-                        } else {
-                            // We still want to return EOF after the invalid tag if at the end.
-                            result.tag = .invalid;
-                            result.loc.end = self.index;
-                            return result;
                         }
+                        return result;
                     },
                     '*' => {
                         state = .block_comment_asterisk;
@@ -2006,93 +1890,24 @@ test "unknown length pointer and then c pointer" {
     });
 }
 
-test "code point literal with hex escape" {
-    try testTokenize(
-        \\'\x1b'
-    , &.{.char_literal});
-    try testTokenize(
-        \\'\x1'
-    , &.{ .invalid, .invalid });
-}
-
-test "newline in char literal" {
-    try testTokenize(
-        \\'
-        \\'
-    , &.{ .invalid, .invalid });
-}
-
 test "newline in string literal" {
     try testTokenize(
         \\"
         \\"
-    , &.{ .invalid, .invalid });
-}
-
-test "code point literal with unicode escapes" {
-    // Valid unicode escapes
-    try testTokenize(
-        \\'\u{3}'
-    , &.{.char_literal});
-    try testTokenize(
-        \\'\u{01}'
-    , &.{.char_literal});
-    try testTokenize(
-        \\'\u{2a}'
-    , &.{.char_literal});
-    try testTokenize(
-        \\'\u{3f9}'
-    , &.{.char_literal});
-    try testTokenize(
-        \\'\u{6E09aBc1523}'
-    , &.{.char_literal});
-    try testTokenize(
-        \\"\u{440}"
     , &.{.string_literal});
-
-    // Invalid unicode escapes
-    try testTokenize(
-        \\'\u'
-    , &.{ .invalid, .invalid });
-    try testTokenize(
-        \\'\u{{'
-    , &.{ .invalid, .l_brace, .invalid });
-    try testTokenize(
-        \\'\u{}'
-    , &.{.char_literal});
-    try testTokenize(
-        \\'\u{s}'
-    , &.{
-        .invalid,
-        .identifier,
-        .r_brace,
-        .invalid,
-    });
-    try testTokenize(
-        \\'\u{2z}'
-    , &.{
-        .invalid,
-        .identifier,
-        .r_brace,
-        .invalid,
-    });
-    try testTokenize(
-        \\'\u{4a'
-    , &.{ .invalid, .invalid }); // 4a is valid
-
-    // Test old-style unicode literals
-    try testTokenize(
-        \\'\u0333'
-    , &.{ .invalid, .number_literal, .invalid });
-    try testTokenize(
-        \\'\U0333'
-    , &.{ .invalid, .number_literal, .invalid });
 }
 
-test "code point literal with unicode code point" {
-    try testTokenize(
-        \\'💩'
-    , &.{.char_literal});
+test "string literals" {
+    try testTokenize("''``\"\"", &.{ .string_literal, .string_literal, .string_literal });
+    try testTokenize("'\\n'", &.{.string_literal});
+    try testTokenize("'\\'", &.{.invalid});
+    try testTokenize("@'\\'", &.{.string_literal});
+    try testTokenize("'\"`'", &.{.string_literal});
+
+    try testTokenize("'''", &.{.invalid});
+    try testTokenize("''''", &.{.string_literal}); // '
+    try testTokenize("'''''", &.{.invalid});
+    try testTokenize("@''''", &.{ .string_literal, .string_literal }); // two empty strings
 }
 
 test "float literal e exponent" {
@@ -2113,17 +1928,11 @@ test "float literal p exponent" {
     });
 }
 
-test "chars" {
-    try testTokenize("'c'", &.{.char_literal});
-}
-
 test "invalid token characters" {
     try testTokenize("#", &.{.invalid});
     try testTokenize("`", &.{.invalid});
     try testTokenize("'c", &.{.invalid});
     try testTokenize("'", &.{.invalid});
-    try testTokenize("''", &.{.invalid});
-    try testTokenize("'\n'", &.{ .invalid, .invalid });
 }
 
 test "invalid literal/comment characters" {
@@ -2264,7 +2073,6 @@ test "correctly parse an accessor" {
 
 test "range literals" {
     try testTokenize("0...9", &.{ .number_literal, .ellipsis3, .number_literal });
-    try testTokenize("'0'...'9'", &.{ .char_literal, .ellipsis3, .char_literal });
     try testTokenize("0x00...0x09", &.{ .number_literal, .ellipsis3, .number_literal });
     try testTokenize("0b00...0b11", &.{ .number_literal, .ellipsis3, .number_literal });
     try testTokenize("0o00...0o11", &.{ .number_literal, .ellipsis3, .number_literal });
