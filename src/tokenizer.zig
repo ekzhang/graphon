@@ -1171,6 +1171,8 @@ pub const Tokenizer = struct {
         minus,
         slash,
         line_comment,
+        block_comment,
+        block_comment_asterisk,
         int,
         int_exponent,
         int_period,
@@ -1631,6 +1633,9 @@ pub const Tokenizer = struct {
                     '/' => {
                         state = .line_comment;
                     },
+                    '*' => {
+                        state = .block_comment;
+                    },
                     '=' => {
                         // result.tag = .slash_equal; TODO
                         self.index += 1;
@@ -1657,6 +1662,44 @@ pub const Tokenizer = struct {
                     },
                     '\t' => {},
                     else => {
+                        if (self.invalidCharacterLength()) |len| {
+                            result.tag = .invalid;
+                            result.loc.end = self.index;
+                            self.index += len;
+                            return result;
+                        }
+
+                        self.index += (std.unicode.utf8ByteSequenceLength(c) catch unreachable) - 1;
+                    },
+                },
+                .block_comment, .block_comment_asterisk => switch (c) {
+                    0 => {
+                        // If a null character is in the middle of the buffer, it is invalid. In
+                        // addition, EOF means an unclosed block comment, also invalid.
+                        if (self.index != self.buffer.len) {
+                            result.tag = .invalid;
+                            result.loc.end = self.index;
+                            self.index += 1;
+                            return result;
+                        } else {
+                            // We still want to return EOF after the invalid tag if at the end.
+                            result.tag = .invalid;
+                            result.loc.end = self.index;
+                            return result;
+                        }
+                    },
+                    '*' => {
+                        state = .block_comment_asterisk;
+                    },
+                    '/' => {
+                        if (state == .block_comment_asterisk) {
+                            state = .start;
+                            result.loc.start = self.index + 1;
+                        }
+                    },
+                    '\n', '\t' => {},
+                    else => {
+                        state = .block_comment;
                         if (self.invalidCharacterLength()) |len| {
                             result.tag = .invalid;
                             result.loc.end = self.index;
@@ -2027,6 +2070,15 @@ test "line comment followed by identifier" {
         .identifier,
         .comma,
     });
+}
+
+test "block comments" {
+    try testTokenize("/* hello world */", &.{});
+    try testTokenize("/**/", &.{});
+    try testTokenize("/*****/", &.{});
+    try testTokenize("/*/", &.{.invalid});
+    try testTokenize("/*\t\n\r\n  \n\n*/", &.{});
+    try testTokenize("/*\r \n*/", &.{ .invalid, .asterisk, .slash });
 }
 
 test "UTF-8 BOM is recognized and skipped" {
