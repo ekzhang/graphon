@@ -1169,7 +1169,10 @@ pub const Tokenizer = struct {
         pipe,
         colon,
         minus,
+        tilde,
         slash,
+        slash_minus,
+        slash_tilde,
         line_comment,
         block_comment,
         block_comment_asterisk,
@@ -1179,7 +1182,12 @@ pub const Tokenizer = struct {
         float,
         float_exponent,
         angle_bracket_left,
+        angle_bracket_left_minus,
+        angle_bracket_left_tilde,
         angle_bracket_right,
+        r_bracket,
+        r_bracket_minus,
+        r_bracket_tilde,
         period,
         period_2,
         saw_at_sign,
@@ -1247,9 +1255,7 @@ pub const Tokenizer = struct {
                         break;
                     },
                     ']' => {
-                        result.tag = .r_bracket;
-                        self.index += 1;
-                        break;
+                        state = .r_bracket;
                     },
                     ';' => {
                         result.tag = .semicolon;
@@ -1305,16 +1311,14 @@ pub const Tokenizer = struct {
                         self.index += 1;
                         break;
                     },
-                    '~' => {
-                        result.tag = .tilde;
-                        self.index += 1;
-                        break;
-                    },
                     '.' => {
                         state = .period;
                     },
                     '-' => {
                         state = .minus;
+                    },
+                    '~' => {
+                        state = .tilde;
                     },
                     '/' => {
                         state = .slash;
@@ -1578,6 +1582,28 @@ pub const Tokenizer = struct {
                     },
                 },
 
+                .tilde => switch (c) {
+                    '/' => {
+                        result.tag = .tilde_slash;
+                        self.index += 1;
+                        break;
+                    },
+                    '>' => {
+                        result.tag = .tilde_right_arrow;
+                        self.index += 1;
+                        break;
+                    },
+                    '[' => {
+                        result.tag = .tilde_left_bracket;
+                        self.index += 1;
+                        break;
+                    },
+                    else => {
+                        result.tag = .tilde;
+                        break;
+                    },
+                },
+
                 .angle_bracket_left => switch (c) {
                     '=' => {
                         result.tag = .angle_bracket_left_equal;
@@ -1589,8 +1615,51 @@ pub const Tokenizer = struct {
                         self.index += 1;
                         break;
                     },
+                    '-' => {
+                        state = .angle_bracket_left_minus;
+                    },
+                    '~' => {
+                        state = .angle_bracket_left_tilde;
+                    },
                     else => {
                         result.tag = .angle_bracket_left;
+                        break;
+                    },
+                },
+                .angle_bracket_left_minus => switch (c) {
+                    '[' => {
+                        result.tag = .left_arrow_bracket;
+                        self.index += 1;
+                        break;
+                    },
+                    '>' => {
+                        result.tag = .left_minus_right;
+                        self.index += 1;
+                        break;
+                    },
+                    '/' => {
+                        result.tag = .left_minus_slash;
+                        self.index += 1;
+                        break;
+                    },
+                    else => {
+                        result.tag = .left_arrow;
+                        break;
+                    },
+                },
+                .angle_bracket_left_tilde => switch (c) {
+                    '[' => {
+                        result.tag = .left_arrow_tilde_bracket;
+                        self.index += 1;
+                        break;
+                    },
+                    '/' => {
+                        result.tag = .left_tilde_slash;
+                        self.index += 1;
+                        break;
+                    },
+                    else => {
+                        result.tag = .left_arrow_tilde;
                         break;
                     },
                 },
@@ -1603,6 +1672,41 @@ pub const Tokenizer = struct {
                     },
                     else => {
                         result.tag = .angle_bracket_right;
+                        break;
+                    },
+                },
+
+                .r_bracket => switch (c) {
+                    '-' => {
+                        state = .r_bracket_minus;
+                    },
+                    '~' => {
+                        state = .r_bracket_tilde;
+                    },
+                    else => {
+                        result.tag = .r_bracket;
+                        break;
+                    },
+                },
+                .r_bracket_minus => switch (c) {
+                    '>' => {
+                        result.tag = .bracket_right_arrow;
+                        self.index += 1;
+                        break;
+                    },
+                    else => {
+                        result.tag = .right_bracket_minus;
+                        break;
+                    },
+                },
+                .r_bracket_tilde => switch (c) {
+                    '>' => {
+                        result.tag = .bracket_tilde_right_arrow;
+                        self.index += 1;
+                        break;
+                    },
+                    else => {
+                        result.tag = .right_bracket_tilde;
                         break;
                     },
                 },
@@ -1636,13 +1740,36 @@ pub const Tokenizer = struct {
                     '*' => {
                         state = .block_comment;
                     },
-                    '=' => {
-                        // result.tag = .slash_equal; TODO
+                    '-' => {
+                        state = .slash_minus;
+                    },
+                    '~' => {
+                        state = .slash_tilde;
+                    },
+                    else => {
+                        result.tag = .slash;
+                        break;
+                    },
+                },
+                .slash_minus => switch (c) {
+                    '>' => {
+                        result.tag = .slash_minus_right;
                         self.index += 1;
                         break;
                     },
                     else => {
-                        result.tag = .slash;
+                        result.tag = .slash_minus;
+                        break;
+                    },
+                },
+                .slash_tilde => switch (c) {
+                    '>' => {
+                        result.tag = .slash_tilde_right;
+                        self.index += 1;
+                        break;
+                    },
+                    else => {
+                        result.tag = .slash_tilde;
                         break;
                     },
                 },
@@ -1811,6 +1938,42 @@ test "keywords" {
         .keyword_by,
         .keyword_partition,
     });
+}
+
+test "graph arrows" {
+    try testTokenize(
+        \\ ]-> ]~> <- <-[ <~ <~[ <-> <-/ <~/
+        \\ -[ -/ -> ]- ]~ /- /-> /~ /~>
+        \\ ~[ ~> ~/
+    , &.{
+        .bracket_right_arrow,
+        .bracket_tilde_right_arrow,
+        .left_arrow,
+        .left_arrow_bracket,
+        .left_arrow_tilde,
+        .left_arrow_tilde_bracket,
+        .left_minus_right,
+        .left_minus_slash,
+        .left_tilde_slash,
+        .minus_left_bracket,
+        .minus_slash,
+        .right_arrow,
+        .right_bracket_minus,
+        .right_bracket_tilde,
+        .slash_minus,
+        .slash_minus_right,
+        .slash_tilde,
+        .slash_tilde_right,
+        .tilde_left_bracket,
+        .tilde_right_arrow,
+        .tilde_slash,
+    });
+
+    // Cannot have spaces in between arrows.
+    try testTokenize("]->", &.{.bracket_right_arrow});
+    try testTokenize("] ->", &.{ .r_bracket, .right_arrow });
+    try testTokenize("]- >", &.{ .right_bracket_minus, .angle_bracket_right });
+    try testTokenize("] - >", &.{ .r_bracket, .minus, .angle_bracket_right });
 }
 
 test "line comment followed by statement" {
