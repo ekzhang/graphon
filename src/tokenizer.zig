@@ -1,5 +1,5 @@
 //! Tokenizer for GQL statements. This is heavily borrowed and modified from the
-//! Zig language tokenizer, which exported from the standard library as the
+//! Zig language tokenizer, which is exported from the standard library as the
 //! `std.zig.Tokenizer` struct.
 //!
 //! The Zig standard library is available under the MIT license.
@@ -26,7 +26,6 @@
 // THE SOFTWARE.
 
 const std = @import("std");
-const code_point = @import("zg/code_point");
 
 pub const Token = struct {
     tag: Tag,
@@ -1171,7 +1170,6 @@ pub const Tokenizer = struct {
         colon,
         minus,
         slash,
-        line_comment_start,
         line_comment,
         int,
         int_exponent,
@@ -1555,7 +1553,7 @@ pub const Tokenizer = struct {
 
                 .minus => switch (c) {
                     '-' => {
-                        state = .line_comment_start;
+                        state = .line_comment;
                     },
                     '/' => {
                         result.tag = .minus_slash;
@@ -1631,7 +1629,7 @@ pub const Tokenizer = struct {
 
                 .slash => switch (c) {
                     '/' => {
-                        state = .line_comment_start;
+                        state = .line_comment;
                     },
                     '=' => {
                         // result.tag = .slash_equal; TODO
@@ -1641,36 +1639,6 @@ pub const Tokenizer = struct {
                     else => {
                         result.tag = .slash;
                         break;
-                    },
-                },
-                .line_comment_start => switch (c) {
-                    0 => {
-                        if (self.index != self.buffer.len) {
-                            result.tag = .invalid;
-                            result.loc.end = self.index;
-                            self.index += 1;
-                            return result;
-                        }
-                        break;
-                    },
-                    '\n' => {
-                        state = .start;
-                        result.loc.start = self.index + 1;
-                    },
-                    '\t' => {
-                        state = .line_comment;
-                    },
-                    else => {
-                        state = .line_comment;
-
-                        if (self.invalidCharacterLength()) |len| {
-                            result.tag = .invalid;
-                            result.loc.end = self.index;
-                            self.index += len;
-                            return result;
-                        }
-
-                        self.index += (std.unicode.utf8ByteSequenceLength(c) catch unreachable) - 1;
                     },
                 },
                 .line_comment => switch (c) {
@@ -2338,7 +2306,7 @@ test "invalid token with unfinished escape right before eof" {
 test "null byte before eof" {
     try testTokenize("123 \x00 456", &.{ .number_literal, .invalid, .number_literal });
     try testTokenize("//\x00", &.{.invalid});
-    // try testTokenize("/*\x00", &.{.invalid});
+    try testTokenize("/*\x00", &.{.invalid});
     try testTokenize("\x00", &.{.invalid});
     try testTokenize("// NUL\x00\n", &.{.invalid});
     try testTokenize("///\x00\n", &.{.invalid});

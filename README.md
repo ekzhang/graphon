@@ -59,13 +59,13 @@ DETACH DELETE x
 
 The core GQL language includes graph pattern-matching queries, transactional updates, catalog changes, and list data types. Graphon can be queried via HTTP (results sent in JSON format) or [Bolt](https://neo4j.com/docs/bolt/current/) sessions. Concurrent transactions implement [snapshot isolation](https://jepsen.io/consistency/models/snapshot-isolation).
 
-These features are _explicitly_ not supported:
+These features are _explicitly_ not currently supported:
 
 - Having multiple directories and schemas in one database
 - Having multiple graphs in one database
 - Typed graphs, nodes, and edges (i.e., closed type schemas)
 - Named procedures
-- The datetime data type and time zones
+- The datetime data type and storing time zones
 - Identifiers (variable names) using non-ASCII characters
 
 You could consider using Graphon when you want something small and low-overhead, yet still powerful.
