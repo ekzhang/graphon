@@ -51,8 +51,8 @@ GQL is a powerful language. Here is a larger example that demonstrates a few fea
 
 ```gql
 MATCH TRAIL (follower:Person) ((nodes)-[:Follows]->()){1,3} (influencer:Person),
-      (influencer)-[:Created]->(post:Post),
-      (follower)-[:Likes]->(post)
+            (influencer)-[:Created]->(post:Post),
+            (follower)-[:Likes]->(post)
 WHERE post.likes_count > 100
 OPTIONAL MATCH (influencer)-[:Created]->(otherPost:Post)
          WHERE otherPost.creation_date > DATE '2024-01-01'
