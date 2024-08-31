@@ -74,7 +74,7 @@ pub fn runFilter(op: std.ArrayListUnmanaged(Plan.FilterClause), _: *void, exec: 
                     }
                 },
                 .ident_label => |ident_label| {
-                    // Must be a reference, otherwise we give a type error.
+                    // Must be a reference, otherwise we return a type error.
                     switch (exec.assignments[ident_label.ident]) {
                         .node_ref => |node_id| {
                             var node = try exec.txn.getNode(node_id) orelse continue :filter;

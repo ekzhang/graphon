@@ -34,7 +34,11 @@ pub fn main() !void {
     var args = try std.process.argsWithAllocator(allocator);
     defer args.deinit();
 
-    const C = enum { help, rocksdb_insert_perf };
+    const C = enum {
+        help,
+        rocksdb_insert_perf,
+        shell,
+    };
 
     _ = args.next(); // skip program name
     const command = std.meta.stringToEnum(C, args.next() orelse "help") orelse {
@@ -45,6 +49,10 @@ pub fn main() !void {
         .help => {
             std.debug.print("usage: graphon <command>\n", .{});
             return;
+        },
+        .shell => {
+            // Open a GQL shell into a temporary database.
+            @panic("not implemented");
         },
         .rocksdb_insert_perf => {
             try rocksdb_insert_perf();

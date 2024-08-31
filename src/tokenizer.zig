@@ -3,7 +3,7 @@
 //! `std.zig.Tokenizer` struct.
 //!
 //! The Zig standard library is available under the MIT license.
-//! https://github.com/ziglang/zig/blob/0.12.x/LICENSE
+//! https://github.com/ziglang/zig/blob/0.13.0/LICENSE
 
 // Copyright (c) Zig contributors
 //
