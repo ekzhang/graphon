@@ -32,13 +32,38 @@ Connected to http://127.0.0.1:7687
 
 ## Features
 
-Graphon partially implements the [GQL](https://www.gqlstandards.org/home) language, which is defined in the [ISO/IEC 39075:2024](https://www.iso.org/standard/76120.html) international standard for operations on property graphs. This standard was recently published in April 2024, so there's not a whole lot of resources about it.
+Graphon implements the [GQL](https://www.gqlstandards.org/home) language for graph queries, which is defined in [ISO/IEC 39075:2024](https://www.iso.org/standard/76120.html). This standard was recently published in April 2024, so there's not many resources on it yet. You can find some documentation on the [Google Spanner](https://cloud.google.com/spanner/docs/reference/standard-sql/graph-intro) website.
 
-Graph queries look like this:
+A simple graph query looks like this:
 
 ```gql
 MATCH (a:User {name: 'Eric'})->[:Likes]->(f:Food)
 RETURN f.name, f.calories
+```
+
+GQL is a powerful language. Here is a larger example that demonstrates a few features:
+
+- **Pattern Matching:** Find a variable-length path (trail) between follower and influencer nodes, allowing for a chain of connections between one and three `Follows` relationships deep.
+- **Complex Filtering:** Uses the `WHERE` clause to filter for influencers who have created popular posts (with more than 100 likes).
+- **Aggregation:** `OPTIONAL MATCH` finds recent posts created by the influencer to enrich the output, and `WITH` implicitly aggregates them.
+- **Structured Output:** Returns distinct named results including names, the titles of popular posts, the count of recent posts, and the entire trail of connections.
+- **Ordering and Limiting:** Orders and limits the output to the top 10 results.
+
+```gql
+MATCH TRAIL (follower:Person) ((nodes)-[:Follows]->()){1,3} (influencer:Person),
+            (influencer)-[:Created]->(post:Post),
+            (follower)-[:Likes]->(post)
+WHERE post.likes_count > 100
+OPTIONAL MATCH (influencer)-[:Created]->(otherPost:Post)
+         WHERE otherPost.creation_date > DATE '2024-01-01'
+WITH follower, influencer, post, nodes, COUNT(otherPost) AS recentPosts
+RETURN DISTINCT follower.name AS FollowerName,
+                influencer.name AS InfluencerName,
+                post.title AS PopularPost,
+                recentPosts AS RecentPostCount,
+                nodes AS FollowerTrail
+ORDER BY RecentPostCount DESC, InfluencerName
+LIMIT 10;
 ```
 
 You can also insert, modify, and delete graph data.
@@ -57,9 +82,11 @@ MATCH (x:Account)-[:Invoice {unpaid: true}]->(:Account {id: 627})
 DETACH DELETE x
 ```
 
-The core GQL language includes graph pattern-matching queries, transactional updates, catalog changes, and list data types. Graphon can be queried via HTTP (results sent in JSON format) or [Bolt](https://neo4j.com/docs/bolt/current/) sessions. Concurrent transactions implement [snapshot isolation](https://jepsen.io/consistency/models/snapshot-isolation).
+Graphon can be queried via HTTP (results sent in JSON format) or [Bolt](https://neo4j.com/docs/bolt/current/) sessions. Concurrent transactions implement [snapshot isolation](https://jepsen.io/consistency/models/snapshot-isolation) to ensure consistency.
 
-These features are _explicitly_ not currently supported:
+The core GQL language includes graph pattern-matching queries, transactional updates, catalog changes, and list data types.
+
+These features are explicitly _not_ supported right now:
 
 - Having multiple directories and schemas in one database
 - Having multiple graphs in one database
