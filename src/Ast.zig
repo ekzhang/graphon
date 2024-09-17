@@ -330,11 +330,21 @@ pub const Node = struct {
 
         /// Both lhs and rhs unused.
         string_literal,
+
+        /// Invalid node state, produced when a node is unreserved.
+        zombie,
     };
 
     pub const Data = struct {
         lhs: Index,
         rhs: Index,
+    };
+
+    pub const SubRange = struct {
+        /// Index into sub_list.
+        start: Index,
+        /// Index into sub_list.
+        end: Index,
     };
 };
 
