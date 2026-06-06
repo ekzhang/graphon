@@ -27,7 +27,7 @@ pub const Error = rocksdb.Error || Allocator.Error || std.Io.Reader.Error || std
 pub const Storage = struct {
     db: rocksdb.DB,
     allocator: Allocator = if (builtin.is_test) std.testing.allocator else std.heap.c_allocator,
-    io: std.Io = if (builtin.is_test) std.testing.io else std.Io.Threaded.init(std.heap.c_allocator, .{}),
+    io: std.Io = if (builtin.is_test) std.testing.io else undefined,
 
     pub fn txn(self: Storage) Transaction {
         return .{ .inner = self.db.begin(), .allocator = self.allocator, .io = self.io };

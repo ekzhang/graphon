@@ -1,12 +1,19 @@
 const std = @import("std");
 
 const rocksdb = @import("storage/rocksdb.zig");
+const storage = @import("storage.zig");
+const query = @import("query.zig");
 const graphon = @import("graphon.zig");
 
+const default_db_path = "/tmp/graphon.db";
+const default_host = "127.0.0.1";
+const default_port: u16 = 7687;
+const json_headers = [_]std.http.Header{.{ .name = "content-type", .value = "application/json" }};
+
 fn rocksdb_insert_perf(io: std.Io) !void {
-    const db = try rocksdb.DB.open("/tmp/graphon");
+    const db = try rocksdb.DB.open("/tmp/graphon-perf");
     defer db.close();
-    std.debug.print("opened database at /tmp/graphon\n", .{});
+    std.debug.print("opened database at /tmp/graphon-perf\n", .{});
 
     const n_keys = 2_000_000;
     const size_of_key = 128;
@@ -34,32 +41,218 @@ fn rocksdb_insert_perf(io: std.Io) !void {
 }
 
 pub fn main(init: std.process.Init) !void {
+    const allocator = std.heap.c_allocator;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
+
+    if (args.len == 1) {
+        try serve(init.io, allocator, default_db_path, default_host, default_port);
+        return;
+    }
 
     const C = enum {
         help,
-        rocksdb_insert_perf,
+        serve,
+        query,
         shell,
+        rocksdb_insert_perf,
     };
 
-    const command_name = if (args.len > 1) args[1] else "help";
-    const command = std.meta.stringToEnum(C, command_name) orelse {
-        std.debug.print("invalid command\n", .{});
+    const command = std.meta.stringToEnum(C, args[1]) orelse {
+        std.debug.print("invalid command: {s}\n", .{args[1]});
+        usage();
         std.process.exit(1);
     };
     switch (command) {
-        .help => {
-            std.debug.print("usage: graphon <command>\n", .{});
-            return;
+        .help => usage(),
+        .serve => {
+            const path = if (args.len > 2) args[2] else default_db_path;
+            try serve(init.io, allocator, path, default_host, default_port);
         },
-        .shell => {
-            // Open a GQL shell into a temporary database.
-            @panic("not implemented");
+        .query => {
+            if (args.len < 3) {
+                std.debug.print("usage: graphon query <GQL>\n", .{});
+                std.process.exit(1);
+            }
+            const source = try std.mem.joinZ(allocator, " ", args[2..]);
+            defer allocator.free(source);
+            var result = try executeLocal(allocator, init.io, default_db_path, source);
+            defer result.deinit(allocator);
+            var stdout_buffer: [4096]u8 = undefined;
+            var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buffer);
+            try result.writeJson(&stdout_writer.interface);
+            try stdout_writer.interface.writeByte('\n');
+            try stdout_writer.interface.flush();
         },
-        .rocksdb_insert_perf => {
-            try rocksdb_insert_perf(init.io);
-        },
+        .shell => try localShell(allocator, init.io, default_db_path),
+        .rocksdb_insert_perf => try rocksdb_insert_perf(init.io),
     }
 
     _ = graphon;
+}
+
+fn usage() void {
+    std.debug.print(
+        \\usage:
+        \\  graphon                         start HTTP server on 127.0.0.1:7687
+        \\  graphon serve [db-path]          start HTTP server
+        \\  graphon query <GQL>              run one query against /tmp/graphon.db
+        \\  graphon shell                    run a local GQL shell
+        \\  graphon rocksdb_insert_perf      run RocksDB insert benchmark
+        \\
+    , .{});
+}
+
+fn executeLocal(allocator: std.mem.Allocator, io: std.Io, db_path: []const u8, source: [:0]const u8) !query.ResultSet {
+    const db = try rocksdb.DB.open(db_path);
+    defer db.close();
+    const store = storage.Storage{ .db = db, .allocator = allocator, .io = io };
+    return try query.execute(allocator, io, store, source);
+}
+
+fn localShell(allocator: std.mem.Allocator, io: std.Io, db_path: []const u8) !void {
+    var stdout_buffer: [4096]u8 = undefined;
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
+    const stdout = &stdout_writer.interface;
+    var stdin_buffer: [4096]u8 = undefined;
+    var stdin_reader = std.Io.File.stdin().reader(io, &stdin_buffer);
+    const stdin = &stdin_reader.interface;
+
+    try stdout.print("Opened local Graphon database at {s}\n", .{db_path});
+    while (true) {
+        try stdout.writeAll("> ");
+        try stdout.flush();
+        const line = (try stdin.takeDelimiter('\n')) orelse break;
+        const trimmed = std.mem.trim(u8, line, " \t\r\n");
+        if (trimmed.len == 0) continue;
+        if (std.mem.eql(u8, trimmed, ":quit") or std.mem.eql(u8, trimmed, ":exit")) break;
+        const source = try allocator.dupeZ(u8, trimmed);
+        defer allocator.free(source);
+        var result = executeLocal(allocator, io, db_path, source) catch |err| {
+            try stdout.print("error: {s}\n", .{@errorName(err)});
+            continue;
+        };
+        defer result.deinit(allocator);
+        try result.writeJson(stdout);
+        try stdout.writeByte('\n');
+    }
+}
+
+fn serve(io: std.Io, allocator: std.mem.Allocator, db_path: []const u8, host: []const u8, port: u16) !void {
+    const db = try rocksdb.DB.open(db_path);
+    defer db.close();
+    const store = storage.Storage{ .db = db, .allocator = allocator, .io = io };
+
+    const addr = try std.Io.net.IpAddress.parse(host, port);
+    var server = try addr.listen(io, .{ .reuse_address = true });
+    defer server.deinit(io);
+
+    std.debug.print("Graphon listening at http://{s}:{d}/ using {s}\n", .{ host, port, db_path });
+    while (true) {
+        const stream = server.accept(io) catch |err| {
+            std.debug.print("accept error: {s}\n", .{@errorName(err)});
+            continue;
+        };
+        handleConnection(allocator, io, store, stream) catch |err| {
+            std.debug.print("connection error: {s}\n", .{@errorName(err)});
+        };
+    }
+}
+
+fn handleConnection(allocator: std.mem.Allocator, io: std.Io, store: storage.Storage, stream: std.Io.net.Stream) !void {
+    defer stream.close(io);
+
+    var recv_buffer: [16 * 1024]u8 = undefined;
+    var send_buffer: [16 * 1024]u8 = undefined;
+    var stream_reader = stream.reader(io, &recv_buffer);
+    var stream_writer = stream.writer(io, &send_buffer);
+    var http_server = std.http.Server.init(&stream_reader.interface, &stream_writer.interface);
+
+    while (http_server.reader.state == .ready) {
+        var request = http_server.receiveHead() catch |err| switch (err) {
+            error.HttpConnectionClosing => return,
+            else => return err,
+        };
+        try handleRequest(allocator, io, store, &request);
+    }
+}
+
+fn handleRequest(allocator: std.mem.Allocator, io: std.Io, store: storage.Storage, request: *std.http.Server.Request) !void {
+    if (request.head.method != .GET) {
+        try request.respond("{\"error\":\"only GET is supported\"}", .{
+            .status = .method_not_allowed,
+            .keep_alive = false,
+            .extra_headers = &json_headers,
+        });
+        return;
+    }
+
+    const raw_query = queryParam(allocator, request.head.target, "query") catch |err| {
+        var body = std.Io.Writer.Allocating.init(allocator);
+        defer body.deinit();
+        try body.writer.print("{{\"error\":\"{s}\"}}", .{@errorName(err)});
+        try request.respond(body.written(), .{
+            .status = .bad_request,
+            .keep_alive = false,
+            .extra_headers = &json_headers,
+        });
+        return;
+    };
+    defer allocator.free(raw_query);
+    const gql = try allocator.dupeZ(u8, raw_query);
+    defer allocator.free(gql);
+
+    var result = query.execute(allocator, io, store, gql) catch |err| {
+        var body = std.Io.Writer.Allocating.init(allocator);
+        defer body.deinit();
+        try body.writer.print("{{\"error\":\"{s}\"}}", .{@errorName(err)});
+        try request.respond(body.written(), .{
+            .status = .bad_request,
+            .keep_alive = false,
+            .extra_headers = &json_headers,
+        });
+        return;
+    };
+    defer result.deinit(allocator);
+
+    var body = std.Io.Writer.Allocating.init(allocator);
+    defer body.deinit();
+    try result.writeJson(&body.writer);
+    try request.respond(body.written(), .{ .extra_headers = &json_headers });
+}
+
+fn queryParam(allocator: std.mem.Allocator, target: []const u8, name: []const u8) ![]u8 {
+    const q_pos = std.mem.indexOfScalar(u8, target, '?') orelse return error.InvalidRequest;
+    var params = std.mem.splitScalar(u8, target[q_pos + 1 ..], '&');
+    while (params.next()) |param| {
+        const eq_pos = std.mem.indexOfScalar(u8, param, '=') orelse continue;
+        const key = param[0..eq_pos];
+        if (!std.mem.eql(u8, key, name)) continue;
+        return try percentDecode(allocator, param[eq_pos + 1 ..]);
+    }
+    return error.InvalidRequest;
+}
+
+fn percentDecode(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(allocator);
+    var i: usize = 0;
+    while (i < input.len) : (i += 1) {
+        switch (input[i]) {
+            '+' => try out.append(allocator, ' '),
+            '%' => {
+                if (i + 2 >= input.len) return error.InvalidRequest;
+                const byte = std.fmt.parseInt(u8, input[i + 1 .. i + 3], 16) catch return error.InvalidRequest;
+                try out.append(allocator, byte);
+                i += 2;
+            },
+            else => try out.append(allocator, input[i]),
+        }
+    }
+    return try out.toOwnedSlice(allocator);
+}
+
+test "percent decode query parameter" {
+    const decoded = try queryParam(std.testing.allocator, "/?query=RETURN%20100%20%2A%203", "query");
+    defer std.testing.allocator.free(decoded);
+    try std.testing.expectEqualStrings("RETURN 100 * 3", decoded);
 }
