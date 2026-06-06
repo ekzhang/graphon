@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+
+jobs:
+  build-and-test:
+    name: Build and Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+
+      - name: Install RocksDB
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y librocksdb-dev pkg-config
+
+      - name: Build
+        run: zig build
+
+      - name: Test
+        run: zig build test
