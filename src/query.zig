@@ -48,35 +48,39 @@ pub const ResultSet = struct {
     }
 
     pub fn writeJson(self: ResultSet, writer: *std.Io.Writer) !void {
+        var json: std.json.Stringify = .{ .writer = writer, .options = .{} };
+
         if (self.rows_affected) |n| {
-            try writer.print("{{\"ok\":true,\"rows_affected\":{d}}}", .{n});
+            try json.beginObject();
+            try json.objectField("ok");
+            try json.write(true);
+            try json.objectField("rows_affected");
+            try json.write(n);
+            try json.endObject();
             return;
         }
 
         // Keep README examples nice: `RETURN 55` over HTTP responds with `55`.
         if (self.columns.len == 1 and self.rows.len == 1) {
-            try writeJsonValue(writer, self.rows[0].values[0]);
+            try writeJsonValue(&json, self.rows[0].values[0]);
             return;
         }
 
-        try writer.writeByte('[');
-        for (self.rows, 0..) |row, row_i| {
-            if (row_i != 0) try writer.writeByte(',');
-            try writer.writeByte('{');
+        try json.beginArray();
+        for (self.rows) |row| {
+            try json.beginObject();
             for (self.columns, 0..) |column, col_i| {
-                if (col_i != 0) try writer.writeByte(',');
-                try writeJsonString(writer, column);
-                try writer.writeByte(':');
-                try writeJsonValue(writer, row.values[col_i]);
+                try json.objectField(column);
+                try writeJsonValue(&json, row.values[col_i]);
             }
-            try writer.writeByte('}');
+            try json.endObject();
         }
-        try writer.writeByte(']');
+        try json.endArray();
     }
 };
 
 pub const Row = struct {
-    values: []Value,
+    values: []ResultValue,
 
     pub fn deinit(self: *Row, allocator: Allocator) void {
         for (self.values) |*value| value.deinit(allocator);
@@ -85,29 +89,123 @@ pub const Row = struct {
     }
 };
 
-fn writeJsonString(writer: *std.Io.Writer, s: []const u8) !void {
-    try writer.writeByte('"');
-    for (s) |c| switch (c) {
-        '"' => try writer.writeAll("\\\""),
-        '\\' => try writer.writeAll("\\\\"),
-        '\n' => try writer.writeAll("\\n"),
-        '\r' => try writer.writeAll("\\r"),
-        '\t' => try writer.writeAll("\\t"),
-        0...8, 11...12, 14...0x1f => try writer.print("\\u{x:0>4}", .{c}),
-        else => try writer.writeByte(c),
-    };
-    try writer.writeByte('"');
+pub const ResultValue = union(enum) {
+    scalar: Value,
+    node: NodeObject,
+    edge: EdgeObject,
+
+    pub fn deinit(self: *ResultValue, allocator: Allocator) void {
+        switch (self.*) {
+            .scalar => |*value| value.deinit(allocator),
+            .node => |*node| node.deinit(allocator),
+            .edge => |*edge| edge.deinit(allocator),
+        }
+        self.* = undefined;
+    }
+};
+
+pub const NodeObject = struct {
+    id: ElementId,
+    labels: [][]u8,
+    properties: []ResultProperty,
+
+    pub fn deinit(self: *NodeObject, allocator: Allocator) void {
+        for (self.labels) |label| allocator.free(label);
+        allocator.free(self.labels);
+        for (self.properties) |*property| property.deinit(allocator);
+        allocator.free(self.properties);
+        self.* = undefined;
+    }
+};
+
+pub const EdgeObject = struct {
+    id: ElementId,
+    endpoints: [2]ElementId,
+    directed: bool,
+    labels: [][]u8,
+    properties: []ResultProperty,
+
+    pub fn deinit(self: *EdgeObject, allocator: Allocator) void {
+        for (self.labels) |label| allocator.free(label);
+        allocator.free(self.labels);
+        for (self.properties) |*property| property.deinit(allocator);
+        allocator.free(self.properties);
+        self.* = undefined;
+    }
+};
+
+pub const ResultProperty = struct {
+    key: []u8,
+    value: Value,
+
+    pub fn deinit(self: *ResultProperty, allocator: Allocator) void {
+        allocator.free(self.key);
+        self.value.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+fn writeJsonValue(json: *std.json.Stringify, value: ResultValue) !void {
+    switch (value) {
+        .scalar => |scalar| try writeJsonScalar(json, scalar),
+        .node => |node| try writeJsonNode(json, node),
+        .edge => |edge| try writeJsonEdge(json, edge),
+    }
 }
 
-fn writeJsonValue(writer: *std.Io.Writer, value: Value) !void {
+fn writeJsonScalar(json: *std.json.Stringify, value: Value) !void {
     switch (value) {
-        .string => |s| try writeJsonString(writer, s),
-        .int64 => |n| try writer.print("{d}", .{n}),
-        .float64 => |f| try writer.print("{d}", .{f}),
-        .bool => |b| try writer.writeAll(if (b) "true" else "false"),
-        .null => try writer.writeAll("null"),
-        .node_ref, .edge_ref, .id => |id| try writeJsonString(writer, &id.toString()),
+        .string => |s| try json.write(s),
+        .int64 => |n| try json.write(n),
+        .float64 => |f| try json.write(f),
+        .bool => |b| try json.write(b),
+        .null => try json.write(null),
+        .node_ref, .edge_ref, .id => |id| {
+            const id_string = id.toString();
+            try json.write(id_string[0..]);
+        },
     }
+}
+
+fn writeJsonNode(json: *std.json.Stringify, node: NodeObject) !void {
+    try json.beginObject();
+    try json.objectField("id");
+    const id = node.id.toString();
+    try json.write(id[0..]);
+    try json.objectField("labels");
+    try json.write(node.labels);
+    try json.objectField("properties");
+    try writeJsonProperties(json, node.properties);
+    try json.endObject();
+}
+
+fn writeJsonEdge(json: *std.json.Stringify, edge: EdgeObject) !void {
+    try json.beginObject();
+    try json.objectField("id");
+    const id = edge.id.toString();
+    try json.write(id[0..]);
+    try json.objectField("start");
+    const start = edge.endpoints[0].toString();
+    try json.write(start[0..]);
+    try json.objectField("end");
+    const end = edge.endpoints[1].toString();
+    try json.write(end[0..]);
+    try json.objectField("directed");
+    try json.write(edge.directed);
+    try json.objectField("labels");
+    try json.write(edge.labels);
+    try json.objectField("properties");
+    try writeJsonProperties(json, edge.properties);
+    try json.endObject();
+}
+
+fn writeJsonProperties(json: *std.json.Stringify, properties: []const ResultProperty) !void {
+    try json.beginObject();
+    for (properties) |property| {
+        try json.objectField(property.key);
+        try writeJsonScalar(json, property.value);
+    }
+    try json.endObject();
 }
 
 pub fn execute(allocator: Allocator, io: std.Io, store: storage.Storage, source: [:0]const u8) Error!ResultSet {
@@ -1184,16 +1282,80 @@ fn appendReturnRow(
     binding: Binding,
     items: []const ReturnItem,
 ) Error!void {
-    const values = try allocator.alloc(Value, items.len);
+    const values = try allocator.alloc(ResultValue, items.len);
     errdefer allocator.free(values);
-    for (values) |*v| v.* = .null;
+    for (values) |*v| v.* = .{ .scalar = .null };
     errdefer for (values) |*v| v.deinit(allocator);
 
     for (items, 0..) |item, i| {
         values[i].deinit(allocator);
-        values[i] = try evalExpr(allocator, txn, binding, item.expr);
+        values[i] = try evalReturnExpr(allocator, txn, binding, item.expr);
     }
     try out_rows.append(allocator, .{ .values = values });
+}
+
+fn evalReturnExpr(allocator: Allocator, txn: storage.Transaction, binding: Binding, expr: Expr) Error!ResultValue {
+    switch (expr) {
+        .variable => |name| {
+            const bound = binding.vars.get(name) orelse return error.UnknownIdentifier;
+            return switch (bound) {
+                .node => |id| blk: {
+                    var node = try txn.getNode(id) orelse return .{ .scalar = .null };
+                    defer node.deinit(allocator);
+                    break :blk .{ .node = try nodeObjectFromNode(allocator, node) };
+                },
+                .edge => |id| blk: {
+                    var edge = try txn.getEdge(id) orelse return .{ .scalar = .null };
+                    defer edge.deinit(allocator);
+                    break :blk .{ .edge = try edgeObjectFromEdge(allocator, edge) };
+                },
+            };
+        },
+        else => return .{ .scalar = try evalExpr(allocator, txn, binding, expr) },
+    }
+}
+
+fn nodeObjectFromNode(allocator: Allocator, node: types.Node) Allocator.Error!NodeObject {
+    return .{
+        .id = node.id,
+        .labels = try cloneLabels(allocator, node.labels.keys()),
+        .properties = try cloneResultProperties(allocator, node.properties.keys(), node.properties.values()),
+    };
+}
+
+fn edgeObjectFromEdge(allocator: Allocator, edge: types.Edge) Allocator.Error!EdgeObject {
+    return .{
+        .id = edge.id,
+        .endpoints = edge.endpoints,
+        .directed = edge.directed,
+        .labels = try cloneLabels(allocator, edge.labels.keys()),
+        .properties = try cloneResultProperties(allocator, edge.properties.keys(), edge.properties.values()),
+    };
+}
+
+fn cloneLabels(allocator: Allocator, labels: []const []const u8) Allocator.Error![][]u8 {
+    const out = try allocator.alloc([]u8, labels.len);
+    errdefer allocator.free(out);
+    for (out) |*label| label.* = &.{};
+    errdefer for (out) |label| allocator.free(label);
+    for (labels, 0..) |label, i| {
+        out[i] = try allocator.dupe(u8, label);
+    }
+    return out;
+}
+
+fn cloneResultProperties(allocator: Allocator, keys: []const []const u8, values: []const Value) Allocator.Error![]ResultProperty {
+    const out = try allocator.alloc(ResultProperty, keys.len);
+    errdefer allocator.free(out);
+    for (out) |*property| property.* = .{ .key = &.{}, .value = .null };
+    errdefer for (out) |*property| property.deinit(allocator);
+    for (keys, values, 0..) |key, value, i| {
+        out[i] = .{
+            .key = try allocator.dupe(u8, key),
+            .value = try value.dupe(allocator),
+        };
+    }
+    return out;
 }
 
 fn columnNames(allocator: Allocator, items: []const ReturnItem) Allocator.Error![]const []u8 {
@@ -1296,7 +1458,7 @@ test "return arithmetic" {
     var result = try execForTest(store, "RETURN 100 * 3");
     defer result.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 1), result.rows.len);
-    try std.testing.expectEqual(Value{ .int64 = 300 }, result.rows[0].values[0]);
+    try std.testing.expectEqual(Value{ .int64 = 300 }, result.rows[0].values[0].scalar);
 
     const json = try jsonForTest(result);
     defer std.testing.allocator.free(json);
@@ -1328,8 +1490,8 @@ test "insert match return and detach delete" {
         var result = try execForTest(store, "MATCH (a:User {name: 'Eric'})->[:Likes]->(f:Food) RETURN f.name, f.calories");
         defer result.deinit(std.testing.allocator);
         try std.testing.expectEqual(@as(usize, 1), result.rows.len);
-        try std.testing.expectEqualStrings("Pizza", result.rows[0].values[0].string);
-        try std.testing.expectEqual(Value{ .int64 = 285 }, result.rows[0].values[1]);
+        try std.testing.expectEqualStrings("Pizza", result.rows[0].values[0].scalar.string);
+        try std.testing.expectEqual(Value{ .int64 = 285 }, result.rows[0].values[1].scalar);
     }
     {
         var result = try execForTest(store, "MATCH (f:Food {name: 'Pizza'}) DETACH DELETE f");
@@ -1340,6 +1502,33 @@ test "insert match return and detach delete" {
         var result = try execForTest(store, "MATCH (a:User {name: 'Eric'})->[:Likes]->(f:Food) RETURN f.name, f.calories");
         defer result.deinit(std.testing.allocator);
         try std.testing.expectEqual(@as(usize, 0), result.rows.len);
+    }
+}
+
+test "returning a node includes labels and properties" {
+    var tmp = @import("test_helpers.zig").tmp();
+    defer tmp.cleanup();
+    const store = try tmp.store("test.db");
+    defer store.db.close();
+
+    {
+        var result = try execForTest(store, "INSERT (:Person {name: 'Alice', age: 30})");
+        defer result.deinit(std.testing.allocator);
+    }
+    {
+        var result = try execForTest(store, "MATCH (a:Person {name: 'Alice'}) RETURN a");
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 1), result.rows.len);
+        const node = result.rows[0].values[0].node;
+        try std.testing.expectEqual(@as(usize, 1), node.labels.len);
+        try std.testing.expectEqualStrings("Person", node.labels[0]);
+        try std.testing.expectEqual(@as(usize, 2), node.properties.len);
+
+        const json = try jsonForTest(result);
+        defer std.testing.allocator.free(json);
+        try std.testing.expect(std.mem.indexOf(u8, json, "\"labels\":[\"Person\"]") != null);
+        try std.testing.expect(std.mem.indexOf(u8, json, "\"name\":\"Alice\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, json, "\"age\":30") != null);
     }
 }
 
@@ -1361,6 +1550,6 @@ test "set updates matched properties" {
     {
         var result = try execForTest(store, "MATCH (p:Person {name: 'Eric'}) RETURN p.age");
         defer result.deinit(std.testing.allocator);
-        try std.testing.expectEqual(Value{ .int64 = 23 }, result.rows[0].values[0]);
+        try std.testing.expectEqual(Value{ .int64 = 23 }, result.rows[0].values[0].scalar);
     }
 }

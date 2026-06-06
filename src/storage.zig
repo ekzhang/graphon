@@ -346,6 +346,34 @@ test "put node and edge" {
     try std.testing.expectEqual(null, try txn.getEdge(e.id));
 }
 
+test "committed nodes persist after reopening database" {
+    var tmp = test_helpers.tmp();
+    defer tmp.cleanup();
+    const path = tmp.path("persist.db");
+
+    const id = ElementId{ .value = 42 };
+    {
+        const db = try rocksdb.DB.open(path);
+        defer db.close();
+        const store = Storage{ .db = db };
+        const txn = store.txn();
+        defer txn.close();
+        try txn.putNode(Node{ .id = id });
+        try txn.commit();
+    }
+
+    {
+        const db = try rocksdb.DB.open(path);
+        defer db.close();
+        const store = Storage{ .db = db };
+        const txn = store.txn();
+        defer txn.close();
+        var node = try txn.getNode(id) orelse return error.TestFailed;
+        defer node.deinit(txn.allocator);
+        try std.testing.expectEqual(id, node.id);
+    }
+}
+
 test "iterate adjacency" {
     var tmp = test_helpers.tmp();
     defer tmp.cleanup();
