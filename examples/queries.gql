@@ -1,0 +1,28 @@
+MATCH (a:Account)
+RETURN COLLECT_LIST(a) AS AccountList;
+
+// CARDINALIY() / SIZE() of list
+
+// iterating list -> values
+// iterating binding table -> records
+
+FOR x IN [1, 2, 3]
+RETURN x;
+
+FOR row IN TABLE {
+    MATCH (a:Account {age: 13}) RETURN a
+    UNION ALL
+    MATCH (a:Account {age: 14}) RETURN a
+}
+LET a = row.a
+MATCH (a)->[:Paid]->(b:Account)
+RETURN a, b;
+
+for row in binding table {
+    match (a:Account {age: 13}) return a
+    union all
+    match (a:Account {age: 14}) return a
+}
+let a = row.a
+match (a)->[:Paid]->(b:Account)
+return a, b;

@@ -278,8 +278,14 @@ pub const Node = struct {
         root,
 
         /// Section 14.3, `extra_data[lhs..rhs]`.
-        /// `(MATCH | LET | FOR | FILTER | ORDER BY ...)* RETURN ...`
-        simple_query_statement,
+        /// `(MATCH | LET | FOR | FILTER | ORDER BY ...)* RETURN ... [ORDER BY/OFFSET/LIMIT]`,
+        /// `(MATCH | LET | FOR | FILTER | ORDER BY ...)* FINISH`.
+        ///
+        /// We only implement the "ambient" version of the statements, since switching between
+        /// graphs with `USE <GraphName>` is unsupported currently.
+        ///
+        /// Data-modifying statements are also included (INSERT, SET, REMOVE, DELETE).
+        linear_query_statement,
 
         /// Section 14.4, `extra_data[lhs..rhs]`.
         /// `MATCH <graph_pattern>`
@@ -288,7 +294,11 @@ pub const Node = struct {
         match_statement,
 
         /// Section 14.11, `extra_data[lhs..rhs]`.
+        /// `RETURN _, _, _, ...`
         return_statement,
+
+        /// Section 14.11, `FINISH`.
+        finish_statement,
 
         /// Section 14.11, `lhs AS rhs`.
         return_alias,

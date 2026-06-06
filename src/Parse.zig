@@ -170,7 +170,7 @@ fn failMsg(p: *Parse, msg: Ast.Error) error{ ParseError, OutOfMemory } {
     return error.ParseError;
 }
 
-/// Root <- skip container_doc_comment? ContainerMembers eof
+/// Root <- Statement* eof
 pub fn parseRoot(p: *Parse) !void {
     // Root node must be index 0.
     p.nodes.appendAssumeCapacity(.{
@@ -178,16 +178,65 @@ pub fn parseRoot(p: *Parse) !void {
         .main_token = 0,
         .data = undefined,
     });
-    const root_members = try p.parseContainerMembers();
-    const root_decls = try root_members.toSpan(p);
-    if (p.token_tags[p.tok_i] != .eof) {
-        try p.warnExpected(.eof);
+
+    const scratch_top = p.scratch.items.len;
+    defer p.scratch.shrinkRetainingCapacity(scratch_top);
+    while (true) {
+        if (p.token_tags[p.tok_i] == .eof) break;
+        const statement = try p.expectStatementRecoverable();
+        if (statement == 0) break;
+        try p.scratch.append(p.gpa, statement);
+        // Must have semicolon after every statement if there are multiple statements.
+        _ = p.expectToken(.semicolon) catch break;
     }
+    _ = p.expectToken(.eof);
+
+    const statements = p.scratch.items[scratch_top..];
+    const root_span = try p.listToSpan(statements);
     p.nodes.items(.data)[0] = .{
-        .lhs = root_decls.start,
-        .rhs = root_decls.end,
+        .lhs = root_span.start,
+        .rhs = root_span.end,
     };
 }
+
+/// Statement (linear_query_statement)
+///     <- SimpleQueryStatement* KEYWORD_finish
+///      / SimpleQueryStatement* ReturnStatement OrderByAndPageStatement?
+fn expectStatement(p: *Parse) Error!Node.Index {
+    switch (p.token_tags[p.tok_i]) {
+        .keyword_match, .keyword_optional => {
+            //TODO
+        },
+        .keyword_return => {
+            //TODO
+        },
+        .keyword_finish => {
+            //TODO
+        },
+    }
+    return null_node;
+}
+
+/// If a parse error occurs, reports an error, but then finds the next statement
+/// and returns that one instead. If a parse error occurs but there is no following
+/// statement, returns 0.
+fn expectStatementRecoverable(p: *Parse) Error!Node.Index {
+    while (true) {
+        return p.expectStatement() catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.ParseError => {
+                p.findNextStmt(); // Try to skip to the next statement.
+                switch (p.token_tags[p.tok_i]) {
+                    .r_brace => return null_node,
+                    .eof => return error.ParseError,
+                    else => continue,
+                }
+            },
+        };
+    }
+}
+
+const null_node: Node.Index = 0;
 
 test {
     _ = @import("parser_test.zig");
