@@ -43,7 +43,7 @@ pub fn runAnti(_: void, state: *bool, exec: *executor.Executor, op_index: u32) !
     return !(try exec.next(op_index));
 }
 
-pub fn runProject(op: std.ArrayListUnmanaged(Plan.ProjectClause), _: *void, exec: *executor.Executor, op_index: u32) !bool {
+pub fn runProject(op: std.ArrayList(Plan.ProjectClause), _: *void, exec: *executor.Executor, op_index: u32) !bool {
     if (!try exec.next(op_index)) return false;
     for (op.items) |clause| {
         // This allows later assignment clauses to depend on earlier ones in the list.
@@ -60,7 +60,7 @@ pub fn runEmptyResult(_: void, _: *void, exec: *executor.Executor, op_index: u32
     return false;
 }
 
-pub fn runFilter(op: std.ArrayListUnmanaged(Plan.FilterClause), _: *void, exec: *executor.Executor, op_index: u32) !bool {
+pub fn runFilter(op: std.ArrayList(Plan.FilterClause), _: *void, exec: *executor.Executor, op_index: u32) !bool {
     filter: while (true) {
         if (!try exec.next(op_index)) return false;
 

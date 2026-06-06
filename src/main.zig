@@ -1,10 +1,9 @@
 const std = @import("std");
-const allocator = std.heap.c_allocator;
 
 const rocksdb = @import("storage/rocksdb.zig");
 const graphon = @import("graphon.zig");
 
-fn rocksdb_insert_perf() !void {
+fn rocksdb_insert_perf(io: std.Io) !void {
     const db = try rocksdb.DB.open("/tmp/graphon");
     defer db.close();
     std.debug.print("opened database at /tmp/graphon\n", .{});
@@ -12,27 +11,30 @@ fn rocksdb_insert_perf() !void {
     const n_keys = 2_000_000;
     const size_of_key = 128;
 
-    var prng = std.rand.DefaultPrng.init(0);
+    var prng = std.Random.DefaultPrng.init(0);
     const rand = prng.random();
     var buf: [size_of_key]u8 = undefined;
-    var timer = try std.time.Timer.start();
-    var total_time: u64 = 0;
+    var last = std.Io.Timestamp.now(io, .awake);
+    var total_time: std.Io.Duration = .zero;
     for (0..n_keys) |i| {
         if ((i + 1) % 100_000 == 0) {
-            const elapsed = timer.lap();
-            std.debug.print("putting key {d} / lap {}\n", .{ i + 1, std.fmt.fmtDuration(elapsed) });
-            total_time += elapsed;
+            const now = std.Io.Timestamp.now(io, .awake);
+            const elapsed = last.durationTo(now);
+            last = now;
+            std.debug.print("putting key {d} / lap {f}\n", .{ i + 1, elapsed });
+            total_time.nanoseconds += elapsed.nanoseconds;
         }
         rand.bytes(buf[0..]);
         try db.put(.default, buf[0..], buf[0..]);
     }
-    total_time += timer.lap();
-    std.debug.print("total time: {}\n", .{std.fmt.fmtDuration(total_time)});
+    const now = std.Io.Timestamp.now(io, .awake);
+    const elapsed = last.durationTo(now);
+    total_time.nanoseconds += elapsed.nanoseconds;
+    std.debug.print("total time: {f}\n", .{total_time});
 }
 
-pub fn main() !void {
-    var args = try std.process.argsWithAllocator(allocator);
-    defer args.deinit();
+pub fn main(init: std.process.Init) !void {
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     const C = enum {
         help,
@@ -40,10 +42,10 @@ pub fn main() !void {
         shell,
     };
 
-    _ = args.next(); // skip program name
-    const command = std.meta.stringToEnum(C, args.next() orelse "help") orelse {
+    const command_name = if (args.len > 1) args[1] else "help";
+    const command = std.meta.stringToEnum(C, command_name) orelse {
         std.debug.print("invalid command\n", .{});
-        std.posix.exit(1);
+        std.process.exit(1);
     };
     switch (command) {
         .help => {
@@ -55,7 +57,9 @@ pub fn main() !void {
             @panic("not implemented");
         },
         .rocksdb_insert_perf => {
-            try rocksdb_insert_perf();
+            try rocksdb_insert_perf(init.io);
         },
     }
+
+    _ = graphon;
 }

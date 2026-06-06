@@ -14,17 +14,18 @@ pub const SimpleTmpDir = struct {
         for (self.paths.items) |p| {
             testing.allocator.free(p);
         }
-        self.paths.deinit();
+        self.paths.deinit(testing.allocator);
         self.tmp_dir.cleanup();
     }
 
     pub fn path(self: *SimpleTmpDir, subpath: []const u8) []const u8 {
-        const dir_path = self.tmp_dir.dir.realpathAlloc(testing.allocator, ".") catch
-            std.debug.panic("realpathAlloc failed", .{});
-        defer testing.allocator.free(dir_path);
+        var dir_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const dir_path_len = self.tmp_dir.dir.realPath(testing.io, &dir_path_buf) catch
+            std.debug.panic("realPath failed", .{});
+        const dir_path = dir_path_buf[0..dir_path_len];
         const full_path = std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ dir_path, subpath }) catch
             std.debug.panic("failed to allocPrint", .{});
-        self.paths.append(full_path) catch
+        self.paths.append(testing.allocator, full_path) catch
             std.debug.panic("failed to append full_path", .{});
         return full_path;
     }
@@ -37,6 +38,5 @@ pub const SimpleTmpDir = struct {
 
 pub fn tmp() SimpleTmpDir {
     const tmp_dir = testing.tmpDir(.{});
-    const paths = std.ArrayList([]const u8).init(testing.allocator);
-    return SimpleTmpDir{ .tmp_dir = tmp_dir, .paths = paths };
+    return SimpleTmpDir{ .tmp_dir = tmp_dir, .paths = .empty };
 }

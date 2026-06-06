@@ -47,7 +47,7 @@ const operator_impls = blk: {
             fn init(allocator: Allocator) Allocator.Error!OperatorState {
                 const state = try allocator.create(spec_state);
                 switch (@typeInfo(spec_state)) {
-                    .Struct => state.* = std.mem.zeroInit(spec_state, .{}),
+                    .@"struct" => state.* = std.mem.zeroInit(spec_state, .{}),
                     else => state.* = std.mem.zeroes(spec_state),
                 }
                 return OperatorState.of(spec_state, state, spec_deinit);
@@ -162,7 +162,8 @@ pub const Executor = struct {
             state.destroy(p, self.txn.allocator);
             state.* = .{ .ptr = null, .destroy = undefined };
         }
-        if (operator_impls.get(self.plan.ops.items[op_index])) |impl| {
+        const op_tag = std.meta.activeTag(self.plan.ops.items[op_index]);
+        if (operator_impls.get(op_tag)) |impl| {
             state.* = try impl.init(self.txn.allocator);
         }
     }
@@ -196,7 +197,8 @@ pub const Executor = struct {
 
         const op_index = end_index - 1;
         const op = self.plan.ops.items[op_index];
-        if (operator_impls.get(op)) |impl| {
+        const op_tag = std.meta.activeTag(op);
+        if (operator_impls.get(op_tag)) |impl| {
             return impl.run(op, self.states[op_index].ptr.?, self, op_index);
         } else {
             std.debug.panic("unimplemented operator {s}", .{@tagName(op)});
@@ -258,7 +260,7 @@ pub fn evaluate(exp: Plan.Exp, assignments: []const Value, allocator: Allocator)
     return switch (exp) {
         .literal => |v| v.dupe(allocator),
         .ident => |i| assignments[i].dupe(allocator),
-        .parameter => |_| std.debug.panic("parameters not implemented yet", .{}),
+        .parameter => std.debug.panic("parameters not implemented yet", .{}),
         .binop => |binop| {
             var lhs = try evaluate(binop.left, assignments, allocator);
             defer lhs.deinit(allocator);

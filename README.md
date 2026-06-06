@@ -1,6 +1,6 @@
 # Graphon
 
-A very small graph database.
+A very small graph database. Requires Zig 0.16.
 
 ```gql
 MATCH (db:Database {name: 'graphon'})<-[:Wrote]-(p:Person)

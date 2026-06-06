@@ -13,10 +13,9 @@ const Edge = types.Edge;
 
 const test_helpers = @import("test_helpers.zig");
 
-pub const Error = rocksdb.Error || error{
+pub const Error = rocksdb.Error || Allocator.Error || std.Io.Reader.Error || std.Io.Writer.Error || error{
     CorruptedIndex,
     EdgeDataMismatch,
-    EndOfStream,
     InvalidValueTag,
 };
 
@@ -28,33 +27,32 @@ pub const Error = rocksdb.Error || error{
 pub const Storage = struct {
     db: rocksdb.DB,
     allocator: Allocator = if (builtin.is_test) std.testing.allocator else std.heap.c_allocator,
+    io: std.Io = if (builtin.is_test) std.testing.io else std.Io.Threaded.init(std.heap.c_allocator, .{}),
 
     pub fn txn(self: Storage) Transaction {
-        return .{ .inner = self.db.begin(), .allocator = self.allocator };
+        return .{ .inner = self.db.begin(), .allocator = self.allocator, .io = self.io };
     }
 };
 
 fn decodeNode(id: ElementId, allocator: Allocator, slice: []const u8) Error!Node {
-    var stream = std.io.fixedBufferStream(slice);
-    const reader = stream.reader();
+    var reader = std.Io.Reader.fixed(slice);
 
-    var labels = try types.decodeLabels(allocator, reader);
+    var labels = try types.decodeLabels(allocator, &reader);
     errdefer labels.deinit(allocator);
-    var properties = try types.decodeProperties(allocator, reader);
+    var properties = try types.decodeProperties(allocator, &reader);
     errdefer properties.deinit(allocator);
 
     return Node{ .id = id, .labels = labels, .properties = properties };
 }
 
 fn decodeEdge(id: ElementId, allocator: Allocator, slice: []const u8) Error!Edge {
-    var stream = std.io.fixedBufferStream(slice);
-    const reader = stream.reader();
+    var reader = std.Io.Reader.fixed(slice);
 
-    const endpoints = [2]ElementId{ try ElementId.decode(reader), try ElementId.decode(reader) };
-    const directed = try reader.readByte() == 1;
-    var labels = try types.decodeLabels(allocator, reader);
+    const endpoints = [2]ElementId{ try ElementId.decode(&reader), try ElementId.decode(&reader) };
+    const directed = try reader.takeByte() == 1;
+    var labels = try types.decodeLabels(allocator, &reader);
     errdefer labels.deinit(allocator);
-    var properties = try types.decodeProperties(allocator, reader);
+    var properties = try types.decodeProperties(allocator, &reader);
     errdefer properties.deinit(allocator);
 
     return Edge{
@@ -73,6 +71,7 @@ fn decodeEdge(id: ElementId, allocator: Allocator, slice: []const u8) Error!Edge
 pub const Transaction = struct {
     inner: rocksdb.Transaction,
     allocator: Allocator,
+    io: std.Io,
 
     /// Close the inner transaction object.
     pub fn close(self: Transaction) void {
@@ -99,18 +98,17 @@ pub const Transaction = struct {
 
     /// Put a node into the storage engine.
     pub fn putNode(self: Transaction, node: Node) !void {
-        var list = std.ArrayList(u8).init(self.allocator);
+        var list: std.Io.Writer.Allocating = .init(self.allocator);
         defer list.deinit();
 
-        const writer = list.writer();
-        try types.encodeLabels(node.labels, writer);
-        try types.encodeProperties(node.properties, writer);
-        try self.inner.put(.node, &node.id.toBytes(), list.items);
+        try types.encodeLabels(node.labels, &list.writer);
+        try types.encodeProperties(node.properties, &list.writer);
+        try self.inner.put(.node, &node.id.toBytes(), list.written());
     }
 
     /// Put an edge into the storage engine.
     pub fn putEdge(self: Transaction, edge: Edge) !void {
-        var list = std.ArrayList(u8).init(self.allocator);
+        var list: std.Io.Writer.Allocating = .init(self.allocator);
         defer list.deinit();
 
         // Note: We call get() on each node to trigger transaction conflicts.
@@ -134,13 +132,12 @@ pub const Transaction = struct {
         }
 
         // Add the actual edge into the database.
-        const writer = list.writer();
-        try edge.endpoints[0].encode(writer);
-        try edge.endpoints[1].encode(writer);
-        try writer.writeByte(@intFromBool(edge.directed));
-        try types.encodeLabels(edge.labels, writer);
-        try types.encodeProperties(edge.properties, writer);
-        try self.inner.put(.edge, &edge.id.toBytes(), list.items);
+        try edge.endpoints[0].encode(&list.writer);
+        try edge.endpoints[1].encode(&list.writer);
+        try list.writer.writeByte(@intFromBool(edge.directed));
+        try types.encodeLabels(edge.labels, &list.writer);
+        try types.encodeProperties(edge.properties, &list.writer);
+        try self.inner.put(.edge, &edge.id.toBytes(), list.written());
 
         // Update adjacency lists for the two endpoints.
         if (!already_exists) {
@@ -206,9 +203,9 @@ pub const Transaction = struct {
         max_inout: types.EdgeInOut,
     ) !AdjIterator {
         std.debug.assert(@intFromEnum(min_inout) <= @intFromEnum(max_inout));
-        var bounds: []u8 = try self.allocator.alloc(u8, 26);
-        var lower_bound = bounds[0..13];
-        var upper_bound = bounds[13..26];
+        const bounds: []u8 = try self.allocator.alloc(u8, 26);
+        const lower_bound = bounds[0..13];
+        const upper_bound = bounds[13..26];
         lower_bound[0..12].* = node_id.toBytes();
         lower_bound[12] = @intFromEnum(min_inout);
         upper_bound[0..12].* = node_id.toBytes();
@@ -290,7 +287,7 @@ pub const AdjEntry = struct {
         }
         return .{
             .src_node_id = ElementId.fromBytes(key[0..12].*),
-            .inout = std.meta.intToEnum(types.EdgeInOut, key[12]) catch return Error.CorruptedIndex,
+            .inout = std.enums.fromInt(types.EdgeInOut, key[12]) orelse return Error.CorruptedIndex,
             .edge_id = ElementId.fromBytes(key[13..25].*),
             .dest_node_id = ElementId.fromBytes(value[0..12].*),
         };
@@ -328,8 +325,8 @@ test "put node and edge" {
     const txn = store.txn();
     defer txn.close();
 
-    const n = Node{ .id = ElementId.generate() };
-    const e = Edge{ .id = ElementId.generate(), .endpoints = .{ n.id, n.id }, .directed = false };
+    const n = Node{ .id = ElementId.generate(std.testing.io) };
+    const e = Edge{ .id = ElementId.generate(std.testing.io), .endpoints = .{ n.id, n.id }, .directed = false };
 
     try txn.putNode(n);
     try txn.putEdge(e);
@@ -357,11 +354,11 @@ test "iterate adjacency" {
 
     const store = Storage{ .db = db };
 
-    const n1 = Node{ .id = ElementId.generate() };
-    const n2 = Node{ .id = ElementId.generate() };
-    const n3 = Node{ .id = ElementId.generate() };
-    const e1 = Edge{ .id = ElementId.generate(), .endpoints = .{ n1.id, n2.id }, .directed = false };
-    const e2 = Edge{ .id = ElementId.generate(), .endpoints = .{ n2.id, n3.id }, .directed = false };
+    const n1 = Node{ .id = ElementId.generate(std.testing.io) };
+    const n2 = Node{ .id = ElementId.generate(std.testing.io) };
+    const n3 = Node{ .id = ElementId.generate(std.testing.io) };
+    const e1 = Edge{ .id = ElementId.generate(std.testing.io), .endpoints = .{ n1.id, n2.id }, .directed = false };
+    const e2 = Edge{ .id = ElementId.generate(std.testing.io), .endpoints = .{ n2.id, n3.id }, .directed = false };
 
     {
         const txn = store.txn();

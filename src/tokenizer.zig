@@ -1771,7 +1771,7 @@ pub const Tokenizer = struct {
 
     fn invalidCharacterLength(self: *Tokenizer) ?u3 {
         const c0 = self.buffer[self.index];
-        if (std.ascii.isASCII(c0)) {
+        if (std.ascii.isAscii(c0)) {
             if (c0 == '\r') {
                 if (self.index + 1 < self.buffer.len and self.buffer[self.index + 1] == '\n') {
                     // Carriage returns are *only* allowed just before a linefeed as part of a CRLF pair, otherwise
@@ -1796,16 +1796,16 @@ pub const Tokenizer = struct {
             const bytes = self.buffer[self.index .. self.index + length];
             switch (length) {
                 2 => {
-                    const value = std.unicode.utf8Decode2(bytes) catch return length;
+                    const value = std.unicode.utf8Decode2(bytes[0..2].*) catch return length;
                     if (value == 0x85) return length; // U+0085 (NEL)
                 },
                 3 => {
-                    const value = std.unicode.utf8Decode3(bytes) catch return length;
+                    const value = std.unicode.utf8Decode3(bytes[0..3].*) catch return length;
                     if (value == 0x2028) return length; // U+2028 (LS)
                     if (value == 0x2029) return length; // U+2029 (PS)
                 },
                 4 => {
-                    _ = std.unicode.utf8Decode4(bytes) catch return length;
+                    _ = std.unicode.utf8Decode4(bytes[0..4].*) catch return length;
                 },
                 else => unreachable,
             }
@@ -2002,13 +2002,14 @@ test "illegal unicode codepoints" {
 
 test "comments with literal tab" {
     try testTokenize(
-        \\//foo	bar
-        \\//!foo	bar
-        \\///foo	bar
-        \\//	foo
-        \\///	foo
-        \\///	/foo
-    , &.{});
+        "//foo\tbar\n" ++
+            "//!foo\tbar\n" ++
+            "///foo\tbar\n" ++
+            "//\tfoo\n" ++
+            "///\tfoo\n" ++
+            "///\t/foo",
+        &.{},
+    );
 }
 
 test "pipe and then invalid" {

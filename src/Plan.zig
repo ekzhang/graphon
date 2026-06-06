@@ -10,10 +10,10 @@ const Value = types.Value;
 const Plan = @This();
 
 /// Operators that define the query plan.
-ops: std.ArrayListUnmanaged(Operator) = .{},
+ops: std.ArrayList(Operator) = .empty,
 
 /// Results that will be returned by the query, one per value column.
-results: std.ArrayListUnmanaged(u16) = .{},
+results: std.ArrayList(u16) = .empty,
 
 pub fn deinit(self: *Plan, allocator: Allocator) void {
     for (self.ops.items) |*op| op.deinit(allocator);
@@ -65,7 +65,7 @@ pub fn print(self: Plan, writer: anytype) !void {
             level -= 1;
         }
         try writer.writeByte('\n');
-        try writer.writeByteNTimes(' ', 2 * level);
+        try writer.splatByteAll(' ', 2 * level);
         try op.print(writer);
         if (op.hasSubquery()) {
             level += 1;
@@ -138,12 +138,12 @@ pub const Operator = union(enum) {
     join,
     semi_join,
     anti,
-    project: std.ArrayListUnmanaged(ProjectClause),
+    project: std.ArrayList(ProjectClause),
     // project_endpoints: ProjectEndpoints,
     empty_result,
-    filter: std.ArrayListUnmanaged(FilterClause),
+    filter: std.ArrayList(FilterClause),
     limit: u64,
-    distinct: std.ArrayListUnmanaged(u16), // unimplemented
+    distinct: std.ArrayList(u16), // unimplemented
     skip: u64,
     sort: std.MultiArrayList(SortClause), // unimplemented
     top: u64, // unimplemented
@@ -463,7 +463,7 @@ pub const SortClause = struct {
 
 pub const InsertNode = struct {
     ident: ?u16,
-    labels: std.ArrayListUnmanaged([]u8),
+    labels: std.ArrayList([]u8),
     properties: Properties,
 
     pub fn deinit(self: *InsertNode, allocator: Allocator) void {
@@ -481,7 +481,7 @@ pub const InsertEdge = struct {
     ident_src: u16,
     ident_dest: u16,
     directed: bool,
-    labels: std.ArrayListUnmanaged([]u8),
+    labels: std.ArrayList([]u8),
     properties: Properties,
 
     pub fn deinit(self: *InsertEdge, allocator: Allocator) void {
@@ -566,10 +566,10 @@ const snap = Snap.snap;
 
 /// Check the value of a query plan, for snapshot testing.
 fn check_plan_snapshot(plan: Plan, want: Snap) !void {
-    var buf = std.ArrayList(u8).init(std.testing.allocator);
-    defer buf.deinit();
-    try plan.print(buf.writer());
-    try want.diff(buf.items);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try plan.print(&out.writer);
+    try want.diff(out.written());
 }
 
 test "can create, free and print plan" {

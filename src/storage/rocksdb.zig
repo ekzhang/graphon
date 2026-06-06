@@ -46,7 +46,7 @@ test "slice_starts_with" {
 }
 
 /// Parse a RocksDB error string into a status, logging it. Consumes the string.
-fn parse_rocks_error(err: [*:0]u8) Error {
+fn parse_rocks_error(err: [*c]u8) Error {
     defer c.rocksdb_free(err); // free the memory when done
     log.info("{s}", .{err});
 
@@ -91,11 +91,12 @@ test "parse error from rocksdb_open" {
     const options = c.rocksdb_options_create().?;
     defer c.rocksdb_options_destroy(options);
 
-    var err: ?[*:0]u8 = null;
+    var err: [*c]u8 = null;
     const db = c.rocksdb_open(options, "<~~not@a/valid&file>", &err);
     try std.testing.expectEqual(null, db);
+    try std.testing.expect(err != null);
 
-    const status = parse_rocks_error(err.?);
+    const status = parse_rocks_error(err);
     try std.testing.expectEqual(Error.IOError, status);
 }
 
@@ -169,7 +170,7 @@ pub const DB = struct {
         var cf_options = std.EnumArray(ColumnFamily, *const c.rocksdb_options_t).initFill(options);
         var cf_handles = std.EnumArray(ColumnFamily, *c.rocksdb_column_family_handle_t).initUndefined();
 
-        var err: ?[*:0]u8 = null;
+        var err: [*c]u8 = null;
         const otxn_db = c.rocksdb_optimistictransactiondb_open_column_families(
             options,
             nameZ.ptr,
@@ -179,7 +180,7 @@ pub const DB = struct {
             @ptrCast(&cf_handles.values), // Cast the array type into a ?* pointer.
             &err,
         );
-        if (err) |e| return parse_rocks_error(e);
+        if (err != null) return parse_rocks_error(err);
 
         // Should not be null because otxn_db is only null on error.
         const db = c.rocksdb_optimistictransactiondb_get_base_db(otxn_db);
@@ -207,7 +208,7 @@ pub const DB = struct {
 
     /// Put a key-value pair into the database.
     pub fn put(self: DB, cf: ColumnFamily, key: []const u8, value: []const u8) !void {
-        var err: ?[*:0]u8 = null;
+        var err: [*c]u8 = null;
         c.rocksdb_put_cf(
             self.db,
             self.write_opts,
@@ -218,12 +219,12 @@ pub const DB = struct {
             value.len,
             &err,
         );
-        if (err) |e| return parse_rocks_error(e);
+        if (err != null) return parse_rocks_error(err);
     }
 
     /// Get a value from the database by key.
     pub fn get(self: DB, cf: ColumnFamily, key: []const u8) !?PinnableSlice {
-        var err: ?[*:0]u8 = null;
+        var err: [*c]u8 = null;
         const value = c.rocksdb_get_pinned_cf(
             self.db,
             self.read_opts,
@@ -232,7 +233,7 @@ pub const DB = struct {
             key.len,
             &err,
         );
-        if (err) |e| return parse_rocks_error(e);
+        if (err != null) return parse_rocks_error(err);
         const val = value orelse return null;
         return PinnableSlice{ .rep = val };
     }
@@ -256,14 +257,14 @@ pub const DB = struct {
 
     /// Delete a key from the database.
     pub fn delete(self: DB, cf: ColumnFamily, key: []const u8) !void {
-        var err: ?[*:0]u8 = null;
+        var err: [*c]u8 = null;
         c.rocksdb_delete_cf(self.db, self.write_opts, self.cf_handles.get(cf), key.ptr, key.len, &err);
-        if (err) |e| return parse_rocks_error(e);
+        if (err != null) return parse_rocks_error(err);
     }
 
     /// Delete a range of keys from the database. The range is inclusive-exclusive.
     pub fn deleteRange(self: DB, cf: ColumnFamily, lower_bound: []const u8, upper_bound: []const u8) !void {
-        var err: ?[*:0]u8 = null;
+        var err: [*c]u8 = null;
         c.rocksdb_delete_range_cf(
             self.db,
             self.write_opts,
@@ -274,7 +275,7 @@ pub const DB = struct {
             upper_bound.len,
             &err,
         );
-        if (err) |e| return parse_rocks_error(e);
+        if (err != null) return parse_rocks_error(err);
     }
 
     /// Begin a new optimistic transaction on the database.
@@ -300,7 +301,7 @@ pub const Transaction = struct {
 
     /// See `RocksDB.put()`.
     pub fn put(self: Transaction, cf: ColumnFamily, key: []const u8, value: []const u8) !void {
-        var err: ?[*:0]u8 = null;
+        var err: [*c]u8 = null;
         c.rocksdb_transaction_put_cf(
             self.txn,
             self.cf_handles.get(cf),
@@ -310,7 +311,7 @@ pub const Transaction = struct {
             value.len,
             &err,
         );
-        if (err) |e| return parse_rocks_error(e);
+        if (err != null) return parse_rocks_error(err);
     }
 
     /// See `RocksDB.get()`.
@@ -326,7 +327,7 @@ pub const Transaction = struct {
         defer c.rocksdb_readoptions_destroy(opts);
         c.rocksdb_readoptions_set_snapshot(opts, self.snap); // Use snapshot in transaction.
         c.rocksdb_readoptions_set_async_io(opts, 1);
-        var err: ?[*:0]u8 = null;
+        var err: [*c]u8 = null;
         const value = c.rocksdb_transaction_get_pinned_for_update_cf(
             self.txn,
             opts,
@@ -336,7 +337,7 @@ pub const Transaction = struct {
             @intFromBool(exclusive),
             &err,
         );
-        if (err) |e| return parse_rocks_error(e);
+        if (err != null) return parse_rocks_error(err);
         const val = value orelse return null;
         return PinnableSlice{ .rep = val };
     }
@@ -357,9 +358,9 @@ pub const Transaction = struct {
 
     /// See `RocksDB.delete()`.
     pub fn delete(self: Transaction, cf: ColumnFamily, key: []const u8) !void {
-        var err: ?[*:0]u8 = null;
+        var err: [*c]u8 = null;
         c.rocksdb_transaction_delete_cf(self.txn, self.cf_handles.get(cf), key.ptr, key.len, &err);
-        if (err) |e| return parse_rocks_error(e);
+        if (err != null) return parse_rocks_error(err);
     }
 
     /// Commit the transaction and write all batched keys atomically.
@@ -368,16 +369,16 @@ pub const Transaction = struct {
     /// error returned will be `Busy`. Otherwise, if the memtable history size
     /// is not large enough, it will return `TryAgain`.
     pub fn commit(self: Transaction) !void {
-        var err: ?[*:0]u8 = null;
+        var err: [*c]u8 = null;
         c.rocksdb_transaction_commit(self.txn, &err);
-        if (err) |e| return parse_rocks_error(e);
+        if (err != null) return parse_rocks_error(err);
     }
 
     /// Rollback the transaction and discard all batched writes.
     pub fn rollback(self: Transaction) !void {
-        var err: ?[*:0]u8 = null;
+        var err: [*c]u8 = null;
         c.rocksdb_transaction_rollback(self.txn, &err);
-        if (err) |e| return parse_rocks_error(e);
+        if (err != null) return parse_rocks_error(err);
     }
 
     /// Set the savepoint, allowing it to be rolled back to this point.
@@ -387,9 +388,9 @@ pub const Transaction = struct {
 
     /// Rollback to the last savepoint, discarding all writes since then.
     pub fn rollback_to_savepoint(self: Transaction) !void {
-        var err: ?[*:0]u8 = null;
+        var err: [*c]u8 = null;
         c.rocksdb_transaction_rollback_to_savepoint(self.txn, &err);
-        if (err) |e| return parse_rocks_error(e);
+        if (err != null) return parse_rocks_error(err);
     }
 };
 

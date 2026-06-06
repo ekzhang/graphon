@@ -2,15 +2,16 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const random = std.crypto.random;
 
 /// Unique element ID for a node or edge. Element IDs are random 96-bit integers.
 pub const ElementId = struct {
     value: u96,
 
     /// Generates a new random element ID.
-    pub fn generate() ElementId {
-        return ElementId{ .value = random.int(u96) };
+    pub fn generate(io: std.Io) ElementId {
+        var bytes: [12]u8 = undefined;
+        io.random(bytes[0..]);
+        return ElementId.fromBytes(bytes);
     }
 
     /// Return this element ID as a big-endian byte array.
@@ -52,7 +53,7 @@ pub const ElementId = struct {
 
     pub fn decode(reader: anytype) !ElementId {
         var buf: [12]u8 = undefined;
-        try reader.readNoEof(&buf);
+        try reader.readSliceAll(&buf);
         return ElementId.fromBytes(buf);
     }
 
@@ -64,7 +65,7 @@ pub const ElementId = struct {
 test ElementId {
     const id = ElementId{ .value = 238093323431135580 };
     try std.testing.expectEqualStrings(&id.toString(), "AAAAAANN4J2-gUlc");
-    try std.testing.expect(ElementId.generate().value != ElementId.generate().value);
+    try std.testing.expect(ElementId.generate(std.testing.io).value != ElementId.generate(std.testing.io).value);
 }
 
 /// Edge direction as expressed in a path pattern.
@@ -138,10 +139,10 @@ pub fn encodeBytes(bytes: []const u8, writer: anytype) !void {
 
 /// Decode a length-delimited byte buffer.
 pub fn decodeBytes(allocator: Allocator, reader: anytype) ![]const u8 {
-    const len: usize = @intCast(try reader.readInt(u32, .big));
+    const len: usize = @intCast(try reader.takeInt(u32, .big));
     const buf = try allocator.alloc(u8, len);
     errdefer allocator.free(buf);
-    try reader.readNoEof(buf);
+    try reader.readSliceAll(buf);
     return buf;
 }
 
@@ -153,8 +154,8 @@ pub fn encodeLabels(labels: std.StringArrayHashMapUnmanaged(void), writer: anyty
 }
 
 pub fn decodeLabels(allocator: Allocator, reader: anytype) !std.StringArrayHashMapUnmanaged(void) {
-    const len: usize = @intCast(try reader.readInt(u32, .big));
-    var labels: std.StringArrayHashMapUnmanaged(void) = .{};
+    const len: usize = @intCast(try reader.takeInt(u32, .big));
+    var labels: std.StringArrayHashMapUnmanaged(void) = .empty;
     errdefer freeLabels(allocator, &labels);
     for (0..len) |_| {
         const label = try decodeBytes(allocator, reader);
@@ -180,8 +181,8 @@ pub fn encodeProperties(properties: std.StringArrayHashMapUnmanaged(Value), writ
 }
 
 pub fn decodeProperties(allocator: Allocator, reader: anytype) !std.StringArrayHashMapUnmanaged(Value) {
-    const len: usize = @intCast(try reader.readInt(u32, .big));
-    var properties: std.StringArrayHashMapUnmanaged(Value) = .{};
+    const len: usize = @intCast(try reader.takeInt(u32, .big));
+    var properties: std.StringArrayHashMapUnmanaged(Value) = .empty;
     errdefer freeProperties(allocator, &properties);
     for (0..len) |_| {
         const key = try decodeBytes(allocator, reader);
@@ -254,7 +255,7 @@ pub const Value = union(ValueKind) {
     ///
     /// On failure due to out-of-memory, this function may leave the provided
     /// buffer in an invalid or partially-written state.
-    pub fn encode(self: Value, writer: anytype) Allocator.Error!void {
+    pub fn encode(self: Value, writer: anytype) !void {
         const tag: u8 = @intFromEnum(self);
         try writer.writeByte(tag);
         switch (self) {
@@ -271,21 +272,19 @@ pub const Value = union(ValueKind) {
 
     /// Decode a value encoded by `Value.encode()`.
     pub fn decode(allocator: Allocator, reader: anytype) !Value {
-        const tag_int = try reader.readByte();
-        const tag = std.meta.intToEnum(ValueKind, tag_int) catch {
-            return error.InvalidValueTag;
-        };
+        const tag_int = try reader.takeByte();
+        const tag = std.enums.fromInt(ValueKind, tag_int) orelse return error.InvalidValueTag;
         switch (tag) {
             .string => {
                 const s = try decodeBytes(allocator, reader);
                 return .{ .string = s };
             },
             .int64 => {
-                const n = try reader.readInt(i64, .big);
+                const n = try reader.takeInt(i64, .big);
                 return .{ .int64 = n };
             },
             .float64 => {
-                const bits = try reader.readInt(u64, .big);
+                const bits = try reader.takeInt(u64, .big);
                 return .{ .float64 = @bitCast(bits) };
             },
             .node_ref => {
@@ -301,7 +300,7 @@ pub const Value = union(ValueKind) {
                 return .{ .id = id };
             },
             .bool => {
-                const b = try reader.readByte();
+                const b = try reader.takeByte();
                 return .{ .bool = b != 0 };
             },
             .null => return .null,
@@ -410,8 +409,8 @@ pub const Value = union(ValueKind) {
 /// Reference: ISO/IEC 39075:2024, Section 4.3.5.1.
 pub const Node = struct {
     id: ElementId,
-    labels: std.StringArrayHashMapUnmanaged(void) = .{},
-    properties: std.StringArrayHashMapUnmanaged(Value) = .{},
+    labels: std.StringArrayHashMapUnmanaged(void) = .empty,
+    properties: std.StringArrayHashMapUnmanaged(Value) = .empty,
 
     pub fn deinit(self: *Node, allocator: Allocator) void {
         freeLabels(allocator, &self.labels);
@@ -427,8 +426,8 @@ pub const Edge = struct {
     id: ElementId,
     endpoints: [2]ElementId,
     directed: bool,
-    labels: std.StringArrayHashMapUnmanaged(void) = .{},
-    properties: std.StringArrayHashMapUnmanaged(Value) = .{},
+    labels: std.StringArrayHashMapUnmanaged(void) = .empty,
+    properties: std.StringArrayHashMapUnmanaged(Value) = .empty,
 
     pub fn deinit(self: *Edge, allocator: Allocator) void {
         freeLabels(allocator, &self.labels);

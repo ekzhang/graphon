@@ -10,7 +10,7 @@ const types = @import("../types.zig");
 pub fn runInsertNode(op: Plan.InsertNode, _: *void, exec: *executor.Executor, op_index: u32) !bool {
     if (!try exec.next(op_index)) return false;
 
-    var node = types.Node{ .id = types.ElementId.generate() };
+    var node = types.Node{ .id = types.ElementId.generate(exec.txn.io) };
     defer node.deinit(exec.txn.allocator);
 
     for (op.labels.items) |label| {
@@ -38,7 +38,7 @@ pub fn runInsertEdge(op: Plan.InsertEdge, _: *void, exec: *executor.Executor, op
     };
 
     var edge = types.Edge{
-        .id = types.ElementId.generate(),
+        .id = types.ElementId.generate(exec.txn.io),
         .endpoints = .{ src_id, dest_id },
         .directed = op.directed,
     };
@@ -62,7 +62,7 @@ fn evaluateProperties(
     assignments: []const types.Value,
     allocator: Allocator,
 ) Allocator.Error!std.StringArrayHashMapUnmanaged(types.Value) {
-    var ret: std.StringArrayHashMapUnmanaged(types.Value) = .{};
+    var ret: std.StringArrayHashMapUnmanaged(types.Value) = .empty;
     errdefer types.freeProperties(allocator, &ret);
     for (properties.items(.key), properties.items(.value)) |k, v| {
         const key = try allocator.dupe(u8, k);

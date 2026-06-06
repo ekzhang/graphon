@@ -91,7 +91,7 @@ test "node scan" {
         try std.testing.expect(try exec.run() == null);
     }
 
-    const n = types.Node{ .id = types.ElementId.generate() };
+    const n = types.Node{ .id = types.ElementId.generate(std.testing.io) };
     try txn.putNode(n);
 
     {

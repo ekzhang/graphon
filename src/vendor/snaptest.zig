@@ -128,7 +128,7 @@ pub const Snap = struct {
     ///   - `SNAP_UPDATE` env var.
     fn should_update(snapshot: *const Snap) bool {
         return snapshot.update_this or update_all or
-            std.process.hasEnvVarConstant("SNAP_UPDATE");
+            (builtin.link_libc and std.c.getenv("SNAP_UPDATE") != null);
     }
 
     // Compare the snapshot with a formatted string.
@@ -141,11 +141,11 @@ pub const Snap = struct {
 
     // Compare the snapshot with the json serialization of a `value`.
     pub fn diff_json(snapshot: *const Snap, value: anytype) !void {
-        var got = std.ArrayList(u8).init(std.testing.allocator);
+        var got: std.Io.Writer.Allocating = .init(std.testing.allocator);
         defer got.deinit();
 
-        try std.json.stringify(value, .{}, got.writer());
-        try snapshot.diff(got.items);
+        try std.json.Stringify.value(value, .{}, &got.writer);
+        try snapshot.diff(got.written());
     }
 
     // Compare the snapshot with a given string.
@@ -184,7 +184,7 @@ pub const Snap = struct {
         const allocator = arena.allocator();
 
         const file_text =
-            try std.fs.cwd().readFileAlloc(allocator, snapshot.location.file, 1024 * 1024);
+            try std.Io.Dir.cwd().readFileAlloc(std.testing.io, snapshot.location.file, allocator, .limited(1024 * 1024));
         var file_text_updated = try std.ArrayList(u8).initCapacity(allocator, file_text.len);
 
         const line_zero_based = snapshot.location.line - 1;
@@ -196,16 +196,16 @@ pub const Snap = struct {
 
         const indent = get_indent(snapshot_text);
 
-        try file_text_updated.appendSlice(snapshot_prefix);
+        try file_text_updated.appendSlice(allocator, snapshot_prefix);
         {
-            var lines = std.mem.split(u8, got, "\n");
+            var lines = std.mem.splitScalar(u8, got, '\n');
             while (lines.next()) |line| {
-                try file_text_updated.writer().print("{s}\\\\{s}\n", .{ indent, line });
+                try file_text_updated.print(allocator, "{s}\\\\{s}\n", .{ indent, line });
             }
         }
-        try file_text_updated.appendSlice(snapshot_suffix);
+        try file_text_updated.appendSlice(allocator, snapshot_suffix);
 
-        try std.fs.cwd().writeFile(.{ .sub_path = snapshot.location.file, .data = file_text_updated.items });
+        try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = snapshot.location.file, .data = file_text_updated.items });
 
         std.debug.print("Updated {s}\n", .{snapshot.location.file});
         return error.SnapUpdated;
@@ -294,7 +294,7 @@ fn snap_range(text: []const u8, src_line: u32) Range {
     var offset: usize = 0;
     var line_number: u32 = 0;
 
-    var lines = std.mem.split(u8, text, "\n");
+    var lines = std.mem.splitScalar(u8, text, '\n');
     const snap_start = while (lines.next()) |line| : (line_number += 1) {
         if (line_number == src_line) {
             assert(std.mem.indexOf(u8, line, "@src()") != null);
@@ -306,7 +306,7 @@ fn snap_range(text: []const u8, src_line: u32) Range {
         offset += line.len + 1; // 1 for \n
     } else unreachable;
 
-    lines = std.mem.split(u8, text[snap_start..], "\n");
+    lines = std.mem.splitScalar(u8, text[snap_start..], '\n');
     const snap_end = while (lines.next()) |line| {
         if (!is_multiline_string(line)) {
             break offset;
