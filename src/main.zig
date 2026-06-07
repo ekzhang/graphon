@@ -107,7 +107,21 @@ fn executeLocal(allocator: std.mem.Allocator, io: std.Io, db_path: []const u8, s
     const db = try rocksdb.DB.open(db_path);
     defer db.close();
     const store = storage.Storage{ .db = db, .allocator = allocator, .io = io };
-    return try query.execute(allocator, store, source);
+    return try executeQuery(allocator, store, source);
+}
+
+fn executeQuery(allocator: std.mem.Allocator, store: storage.Storage, source: [:0]const u8) !query.ResultSet {
+    var prepared = try query.prepare(allocator, source);
+    defer prepared.deinit(allocator);
+
+    const txn = store.txn();
+    defer txn.close();
+    errdefer txn.rollback() catch {};
+
+    var result = try query.execute(allocator, txn, &prepared);
+    errdefer result.deinit(allocator);
+    try txn.commit();
+    return result;
 }
 
 fn localShell(allocator: std.mem.Allocator, io: std.Io, db_path: []const u8) !void {
@@ -203,7 +217,7 @@ fn handleRequest(allocator: std.mem.Allocator, store: storage.Storage, request: 
     const gql = try allocator.dupeZ(u8, raw_query);
     defer allocator.free(gql);
 
-    var result = query.execute(allocator, store, gql) catch |err| {
+    var result = executeQuery(allocator, store, gql) catch |err| {
         var body = std.Io.Writer.Allocating.init(allocator);
         defer body.deinit();
         try body.writer.print("{{\"error\":\"{s}\"}}", .{@errorName(err)});

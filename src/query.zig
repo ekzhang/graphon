@@ -17,7 +17,7 @@ const planner = @import("query/planner.zig");
 const runtime = @import("query/runtime.zig");
 const storage = @import("storage.zig");
 
-pub const Error = planner.Error || runtime.Error || error{InvalidRequest};
+pub const Error = planner.Error || runtime.Error;
 
 pub const ResultSet = runtime.ResultSet;
 pub const Row = runtime.Row;
@@ -33,73 +33,39 @@ pub const CompiledStatement = planner.CompiledStatement;
 pub const CompiledResult = planner.CompiledResult;
 pub const ResultColumn = planner.ResultColumn;
 
-pub fn compile(gpa: Allocator, source: [:0]const u8) Error!CompiledProgram {
-    return try planner.compile(gpa, source);
-}
-
-/// Owns a compiled query program and transaction while statement results are
-/// pulled. A cursor returned by `nextStatement` borrows both, so callers should
-/// finish and deinit each cursor before advancing or committing the execution.
+/// Parse and lower a query source into a prepared program.
 ///
 /// Allocator split:
 /// * `gpa` owns query-level data: parsed/compiled program state and any rows or
 ///   result objects that escape execution.
-/// * `store.allocator`, through the transaction, owns storage-decoded graph
-///   objects and executor scratch state while a statement is being pulled.
-pub const Execution = struct {
-    gpa: Allocator,
-    compiled: CompiledProgram,
-    txn: storage.Transaction,
-    next_statement: usize = 0,
-    committed: bool = false,
+/// * `txn.allocator`, when executing, owns storage-decoded graph objects and
+///   executor scratch state while a statement is being pulled.
+pub fn prepare(gpa: Allocator, source: [:0]const u8) Error!CompiledProgram {
+    return try planner.compile(gpa, source);
+}
 
-    pub fn init(gpa: Allocator, store: storage.Storage, source: [:0]const u8) Error!Execution {
-        var compiled = try compile(gpa, source);
-        errdefer compiled.deinit(gpa);
-        return .{
-            .gpa = gpa,
-            .compiled = compiled,
-            .txn = store.txn(),
-        };
-    }
-
-    pub fn deinit(self: *Execution) void {
-        self.txn.close();
-        self.compiled.deinit(self.gpa);
-        self.* = undefined;
-    }
-
-    pub fn nextStatement(self: *Execution) Error!?StatementCursor {
-        if (self.next_statement >= self.compiled.statements.len) return null;
-        const statement = &self.compiled.statements[self.next_statement];
-        var cursor = try StatementCursor.init(self.gpa, self.txn, statement);
-        errdefer cursor.deinit();
-        self.next_statement += 1;
-        return cursor;
-    }
-
-    pub fn commit(self: *Execution) Error!void {
-        if (self.committed) return;
-        try self.txn.commit();
-        self.committed = true;
-    }
-};
-
-pub fn execute(gpa: Allocator, store: storage.Storage, source: [:0]const u8) Error!ResultSet {
-    var execution = try Execution.init(gpa, store, source);
-    defer execution.deinit();
-
+/// Execute a prepared program inside a caller-owned transaction.
+///
+/// The caller owns transaction lifetime and must commit or roll back after this
+/// returns. For streaming use cases, call `StatementCursor.init` directly for
+/// each `program.statements` entry instead of collecting a full `ResultSet`.
+pub fn execute(gpa: Allocator, txn: storage.Transaction, program: *const CompiledProgram) Error!ResultSet {
     var result = ResultSet{ .rows_affected = 0 };
     errdefer result.deinit(gpa);
 
-    while (try execution.nextStatement()) |cursor_value| {
-        var cursor = cursor_value;
-        defer cursor.deinit();
-        const next_result = try cursor.collect();
+    for (program.statements) |*statement| {
+        var cursor = try StatementCursor.init(gpa, txn, statement);
+        const next_result = blk: {
+            defer cursor.deinit();
+            break :blk try cursor.collect();
+        };
         result.deinit(gpa);
         result = next_result;
     }
 
-    try execution.commit();
     return result;
+}
+
+comptime { // Trigger tests to run for this module.
+    _ = @import("query_test.zig");
 }

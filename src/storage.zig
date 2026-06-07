@@ -82,6 +82,10 @@ pub const Transaction = struct {
         try self.inner.commit();
     }
 
+    pub fn rollback(self: Transaction) !void {
+        try self.inner.rollback();
+    }
+
     /// Get a node from the storage engine. Returns `null` if not found.
     pub fn getNode(self: Transaction, id: ElementId) !?Node {
         const value = try self.inner.get(.node, &id.toBytes(), false) orelse return null;
