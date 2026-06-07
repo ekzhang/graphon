@@ -8,12 +8,13 @@ const Allocator = std.mem.Allocator;
 
 const Parse = @import("Parse.zig");
 const Plan = @import("Plan.zig");
-const Token = @import("tokenizer.zig").Token;
 const types = @import("types.zig");
 const EdgeDirection = types.EdgeDirection;
 const Value = types.Value;
 
 pub const ByteOffset = u32;
+
+pub const Token = @import("tokenizer.zig").Token;
 
 /// Compact list of tokens after lexical analysis, with offsets into source.
 pub const TokenList = std.MultiArrayList(struct {

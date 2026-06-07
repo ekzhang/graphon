@@ -9,7 +9,6 @@ const Allocator = std.mem.Allocator;
 const Ast = @import("Ast.zig");
 const Plan = @import("Plan.zig");
 const tokenizer = @import("tokenizer.zig");
-const Token = tokenizer.Token;
 const EdgeDirection = @import("types.zig").EdgeDirection;
 
 const Parse = @This();
@@ -455,15 +454,15 @@ fn isName(p: *Parse) bool {
     return isNameToken(p.peek());
 }
 
-fn at(p: *Parse, tag: Token.Tag) bool {
+fn at(p: *Parse, tag: Ast.Token.Tag) bool {
     return p.peek() == tag;
 }
 
-fn atKeywordLike(p: *Parse, tag: Token.Tag) bool {
+fn atKeywordLike(p: *Parse, tag: Ast.Token.Tag) bool {
     return p.peek() == tag;
 }
 
-fn eat(p: *Parse, tag: Token.Tag) bool {
+fn eat(p: *Parse, tag: Ast.Token.Tag) bool {
     if (p.peek() == tag) {
         p.tok_i += 1;
         return true;
@@ -471,7 +470,7 @@ fn eat(p: *Parse, tag: Token.Tag) bool {
     return false;
 }
 
-fn expect(p: *Parse, tag: Token.Tag) Error!void {
+fn expect(p: *Parse, tag: Ast.Token.Tag) Error!void {
     if (!p.eat(tag)) return error.ParseError;
 }
 
@@ -481,7 +480,7 @@ fn expectName(p: *Parse) Error![]const u8 {
     return p.slice(tok);
 }
 
-fn peek(p: *Parse) Token.Tag {
+fn peek(p: *Parse) Ast.Token.Tag {
     return p.tokenTag(p.tok_i);
 }
 
@@ -491,7 +490,7 @@ fn next(p: *Parse) u32 {
     return tok;
 }
 
-fn tokenTag(p: *Parse, tok: u32) Token.Tag {
+fn tokenTag(p: *Parse, tok: u32) Ast.Token.Tag {
     return p.tokens.items(.tag)[@intCast(tok)];
 }
 
@@ -509,7 +508,7 @@ fn slice(p: *Parse, tok: u32) []const u8 {
     return p.source[token.loc.start..token.loc.end];
 }
 
-fn binaryInfo(tag: Token.Tag) ?struct { op: Plan.Binop, prec: u8 } {
+fn binaryInfo(tag: Ast.Token.Tag) ?struct { op: Plan.Binop, prec: u8 } {
     return switch (tag) {
         .keyword_or => .{ .op = .or_, .prec = 1 },
         .keyword_and => .{ .op = .and_, .prec = 2 },
@@ -526,7 +525,7 @@ fn binaryInfo(tag: Token.Tag) ?struct { op: Plan.Binop, prec: u8 } {
     };
 }
 
-fn isNameToken(tag: Token.Tag) bool {
+fn isNameToken(tag: Ast.Token.Tag) bool {
     if (tag == .identifier) return true;
     return std.mem.startsWith(u8, @tagName(tag), "keyword_");
 }
