@@ -48,8 +48,9 @@ pub fn execute(allocator: Allocator, io: std.Io, store: storage.Storage, source:
     errdefer result.deinit(allocator);
 
     for (compiled.statements) |*statement| {
+        const next_result = try runtime.executeCompiledStatement(allocator, txn, statement.*);
         result.deinit(allocator);
-        result = try runtime.executeCompiledStatement(allocator, txn, statement.*);
+        result = next_result;
     }
 
     try txn.commit();

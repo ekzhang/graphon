@@ -206,13 +206,14 @@ fn mutationResult(rows_affected: usize) ResultSet {
 }
 
 fn consumePlanRows(allocator: Allocator, txn: storage.Transaction, plan: *const Plan) Error!usize {
+    _ = allocator;
     var exec = try executor.Executor.init(plan, txn);
     defer exec.deinit();
 
     var rows: usize = 0;
     while (try exec.run()) |result_value| {
         var result = result_value;
-        result.deinit(allocator);
+        result.deinit(txn.allocator);
         rows += 1;
     }
 
@@ -232,7 +233,7 @@ fn executeCompiledRows(
     errdefer deinitRowList(&rows, allocator);
     while (try exec.run()) |result_value| {
         var result = result_value;
-        defer result.deinit(allocator);
+        defer result.deinit(txn.allocator);
         try rows.append(allocator, try rowFromCompiledResult(allocator, txn, result, columns));
     }
 
@@ -271,12 +272,12 @@ fn resultValueFromCompiledValue(
         switch (value) {
             .node_ref => |id| {
                 var node = try txn.getNode(id) orelse return .{ .scalar = .null };
-                defer node.deinit(allocator);
+                defer node.deinit(txn.allocator);
                 return .{ .node = try nodeObjectFromNode(allocator, node) };
             },
             .edge_ref => |id| {
                 var edge = try txn.getEdge(id) orelse return .{ .scalar = .null };
-                defer edge.deinit(allocator);
+                defer edge.deinit(txn.allocator);
                 return .{ .edge = try edgeObjectFromEdge(allocator, edge) };
             },
             else => {},

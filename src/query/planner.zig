@@ -217,7 +217,7 @@ fn appendDelete(planner: *Planner, del: Ast.DeleteAction) Error!usize {
     errdefer idents.deinit(planner.allocator);
 
     for (del.variables) |name| {
-        const binding = planner.bindings.get(name) orelse continue;
+        const binding = planner.bindings.get(name) orelse return error.UnknownIdentifier;
         try idents.append(planner.allocator, binding.ident);
     }
 
@@ -354,7 +354,10 @@ fn appendReturnProjection(planner: *Planner, ret: Ast.ReturnClause) Error!void {
         }
 
         const ident = planner.allocIdent();
-        try project.append(planner.allocator, .{ .ident = ident, .exp = try planExpr(planner, item.expr) });
+        var exp = try planExpr(planner, item.expr);
+        errdefer exp.deinit(planner.allocator);
+        try project.append(planner.allocator, .{ .ident = ident, .exp = exp });
+        exp = .{ .ident = 0 };
         try planner.plan.results.append(planner.allocator, ident);
     }
 
@@ -387,7 +390,10 @@ fn appendOrderBy(planner: *Planner, ret: Ast.ReturnClause) Error!void {
 
     for (ret.order_by) |item| {
         const ident = planner.allocIdent();
-        try project.append(planner.allocator, .{ .ident = ident, .exp = try planExpr(planner, item.expr) });
+        var exp = try planExpr(planner, item.expr);
+        errdefer exp.deinit(planner.allocator);
+        try project.append(planner.allocator, .{ .ident = ident, .exp = exp });
+        exp = .{ .ident = 0 };
         try sort.append(planner.allocator, .{ .ident = ident, .desc = item.desc });
     }
 
@@ -477,6 +483,12 @@ fn appendPropertyFilter(planner: *Planner, ident: u16, property: Ast.Property) E
     errdefer right.deinit(planner.allocator);
     const binop = try planner.allocator.create(Plan.BinopExp);
     binop.* = .{ .op = .eql, .left = left, .right = right };
+    errdefer {
+        var exp = Plan.Exp{ .binop = binop };
+        exp.deinit(planner.allocator);
+    }
+    left = .{ .ident = 0 };
+    right = .{ .ident = 0 };
     try appendFilter(planner, .{ .bool_exp = .{ .binop = binop } });
 }
 
@@ -486,7 +498,10 @@ fn appendFilter(planner: *Planner, clause: Plan.FilterClause) Error!void {
         for (clauses.items) |*item| item.deinit(planner.allocator);
         clauses.deinit(planner.allocator);
     }
-    try clauses.append(planner.allocator, clause);
+    var owned_clause = clause;
+    errdefer owned_clause.deinit(planner.allocator);
+    try clauses.append(planner.allocator, owned_clause);
+    owned_clause = .{ .bool_exp = .{ .ident = 0 } };
     try planner.plan.ops.append(planner.allocator, .{ .filter = clauses });
 }
 
@@ -500,16 +515,27 @@ fn planExpr(planner: *Planner, expr: Ast.Expr) Error!Plan.Exp {
         },
         .unary => |unary| blk: {
             const planned = try planner.allocator.create(Plan.UnaryExp);
-            planned.* = .{ .op = unary.op, .operand = try planExpr(planner, unary.operand) };
+            errdefer planner.allocator.destroy(planned);
+            var operand = try planExpr(planner, unary.operand);
+            errdefer operand.deinit(planner.allocator);
+            planned.* = .{ .op = unary.op, .operand = operand };
+            operand = .{ .ident = 0 };
             break :blk .{ .unary = planned };
         },
         .binary => |bin| blk: {
             const planned = try planner.allocator.create(Plan.BinopExp);
+            errdefer planner.allocator.destroy(planned);
+            var left = try planExpr(planner, bin.left);
+            errdefer left.deinit(planner.allocator);
+            var right = try planExpr(planner, bin.right);
+            errdefer right.deinit(planner.allocator);
             planned.* = .{
                 .op = bin.op,
-                .left = try planExpr(planner, bin.left),
-                .right = try planExpr(planner, bin.right),
+                .left = left,
+                .right = right,
             };
+            left = .{ .ident = 0 };
+            right = .{ .ident = 0 };
             break :blk .{ .binop = planned };
         },
     };
