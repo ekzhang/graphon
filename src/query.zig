@@ -17,6 +17,7 @@ const Token = tokenizer.Token;
 const storage = @import("storage.zig");
 const types = @import("types.zig");
 const ElementId = types.ElementId;
+const EdgeDirection = types.EdgeDirection;
 const Value = types.Value;
 const Plan = @import("Plan.zig");
 const executor = @import("executor.zig");
@@ -294,15 +295,21 @@ pub fn execute(allocator: Allocator, io: std.Io, store: storage.Storage, source:
 }
 
 fn compileStatement(allocator: Allocator, statement: Statement) Error!CompiledStatement {
+    var planner = Planner{ .allocator = allocator };
+    defer planner.deinit();
+
     switch (statement) {
-        .return_only => |ret| return try compileReturnPlan(allocator, ret),
-        .insert => |patterns| return try compileInsertPlan(allocator, patterns),
-        .match_query => |mq| return switch (mq.action) {
-            .ret => try compileMatchReturnPlan(allocator, mq),
-            .insert => try compileMatchInsertPlan(allocator, mq),
-            .set => try compileMatchSetPlan(allocator, mq),
-            .delete => try compileMatchDeletePlan(allocator, mq),
-            .finish => try compileMatchFinishPlan(allocator, mq),
+        .return_only => |ret| return try appendReturnResult(allocator, &planner, ret),
+        .insert => |patterns| return appendMutationResult(&planner, try appendInsertPatterns(&planner, patterns)),
+        .match_query => |mq| {
+            try appendMatchQuery(&planner, mq);
+            return switch (mq.action) {
+                .ret => |ret| try appendReturnResult(allocator, &planner, ret),
+                .insert => |patterns| appendMutationResult(&planner, try appendInsertPatterns(&planner, patterns)),
+                .set => |sets| appendMutationResult(&planner, try appendUpdate(&planner, sets)),
+                .delete => |del| appendMutationResult(&planner, try appendDelete(&planner, del)),
+                .finish => appendMutationResult(&planner, 1),
+            };
         },
     }
 }
@@ -392,11 +399,9 @@ const ReturnClause = struct {
     }
 };
 
-const SortDirection = enum { asc, desc };
-
 const SortItem = struct {
     expr: Expr,
-    direction: SortDirection = .asc,
+    desc: bool = false,
 
     fn deinit(self: *SortItem, allocator: Allocator) void {
         self.expr.deinit(allocator);
@@ -468,15 +473,13 @@ const EdgePattern = struct {
     variable: ?[]const u8 = null,
     label: ?[]const u8 = null,
     properties: []Property = &.{},
-    direction: Direction,
+    direction: EdgeDirection,
 
     fn deinit(self: *EdgePattern, allocator: Allocator) void {
         deinitProperties(self.properties, allocator);
         self.* = undefined;
     }
 };
-
-const Direction = enum { right, left, undirected, any };
 
 const Property = struct {
     key: []const u8,
@@ -513,7 +516,7 @@ const Expr = union(enum) {
 };
 
 const UnaryExpr = struct {
-    op: UnaryOp,
+    op: Plan.UnaryOp,
     operand: Expr,
 
     fn deinit(self: *UnaryExpr, allocator: Allocator) void {
@@ -522,10 +525,8 @@ const UnaryExpr = struct {
     }
 };
 
-const UnaryOp = enum { not };
-
 const BinaryExpr = struct {
-    op: BinaryOp,
+    op: Plan.Binop,
     left: Expr,
     right: Expr,
 
@@ -535,8 +536,6 @@ const BinaryExpr = struct {
         self.* = undefined;
     }
 };
-
-const BinaryOp = enum { add, sub, mul, eql, neq, lt, lte, gt, gte, and_, or_ };
 
 fn deinitPatterns(patterns: []PathPattern, allocator: Allocator) void {
     for (patterns) |*pattern| pattern.deinit(allocator);
@@ -596,88 +595,11 @@ const Planner = struct {
     }
 };
 
-fn compileReturnPlan(allocator: Allocator, ret: ReturnClause) Error!CompiledStatement {
-    var planner = Planner{ .allocator = allocator };
-    defer planner.deinit();
-    try appendReturnProjection(&planner, ret);
-    try appendOrderBy(&planner, ret);
-    try appendSkipLimit(&planner, ret);
-    return try compiledRows(allocator, &planner, ret);
-}
+fn appendReturnResult(allocator: Allocator, planner: *Planner, ret: ReturnClause) Error!CompiledStatement {
+    try appendReturnProjection(planner, ret);
+    try appendOrderBy(planner, ret);
+    try appendSkipLimit(planner, ret);
 
-fn compileMatchReturnPlan(allocator: Allocator, mq: MatchQuery) Error!CompiledStatement {
-    if (mq.action != .ret) return error.Unsupported;
-
-    var planner = Planner{ .allocator = allocator };
-    defer planner.deinit();
-    try appendMatchQuery(&planner, mq);
-    const ret = mq.action.ret;
-    try appendReturnProjection(&planner, ret);
-    try appendOrderBy(&planner, ret);
-    try appendSkipLimit(&planner, ret);
-    return try compiledRows(allocator, &planner, ret);
-}
-
-fn compileInsertPlan(allocator: Allocator, patterns: []PathPattern) Error!CompiledStatement {
-    var planner = Planner{ .allocator = allocator };
-    defer planner.deinit();
-
-    var inserted_per_row: usize = 0;
-    for (patterns) |pattern| {
-        inserted_per_row += try appendInsertPath(&planner, pattern);
-    }
-
-    return compiledMutation(&planner, inserted_per_row);
-}
-
-fn compileMatchInsertPlan(allocator: Allocator, mq: MatchQuery) Error!CompiledStatement {
-    if (mq.action != .insert) return error.Unsupported;
-
-    var planner = Planner{ .allocator = allocator };
-    defer planner.deinit();
-    try appendMatchQuery(&planner, mq);
-
-    var inserted_per_row: usize = 0;
-    for (mq.action.insert) |pattern| {
-        inserted_per_row += try appendInsertPath(&planner, pattern);
-    }
-
-    return compiledMutation(&planner, inserted_per_row);
-}
-
-fn compileMatchSetPlan(allocator: Allocator, mq: MatchQuery) Error!CompiledStatement {
-    if (mq.action != .set) return error.Unsupported;
-
-    var planner = Planner{ .allocator = allocator };
-    defer planner.deinit();
-    try appendMatchQuery(&planner, mq);
-    const updates_per_row = try appendUpdate(&planner, mq.action.set);
-
-    return compiledMutation(&planner, updates_per_row);
-}
-
-fn compileMatchDeletePlan(allocator: Allocator, mq: MatchQuery) Error!CompiledStatement {
-    if (mq.action != .delete) return error.Unsupported;
-
-    var planner = Planner{ .allocator = allocator };
-    defer planner.deinit();
-    try appendMatchQuery(&planner, mq);
-    const deletes_per_row = try appendDelete(&planner, mq.action.delete);
-
-    return compiledMutation(&planner, deletes_per_row);
-}
-
-fn compileMatchFinishPlan(allocator: Allocator, mq: MatchQuery) Error!CompiledStatement {
-    if (mq.action != .finish) return error.Unsupported;
-
-    var planner = Planner{ .allocator = allocator };
-    defer planner.deinit();
-    try appendMatchQuery(&planner, mq);
-
-    return compiledMutation(&planner, 1);
-}
-
-fn compiledRows(allocator: Allocator, planner: *Planner, ret: ReturnClause) Error!CompiledStatement {
     const columns = try resultColumns(allocator, ret);
     errdefer deinitResultColumns(allocator, columns);
     return .{
@@ -686,11 +608,19 @@ fn compiledRows(allocator: Allocator, planner: *Planner, ret: ReturnClause) Erro
     };
 }
 
-fn compiledMutation(planner: *Planner, affected_per_row: usize) CompiledStatement {
+fn appendMutationResult(planner: *Planner, affected_per_row: usize) CompiledStatement {
     return .{
         .plan = takePlan(planner),
         .result = .{ .mutation = affected_per_row },
     };
+}
+
+fn appendInsertPatterns(planner: *Planner, patterns: []PathPattern) Error!usize {
+    var inserted_per_row: usize = 0;
+    for (patterns) |pattern| {
+        inserted_per_row += try appendInsertPath(planner, pattern);
+    }
+    return inserted_per_row;
 }
 
 fn takePlan(planner: *Planner) Plan {
@@ -931,7 +861,7 @@ fn appendOrderBy(planner: *Planner, ret: ReturnClause) Error!void {
     for (ret.order_by) |item| {
         const ident = planner.allocIdent();
         try project.append(planner.allocator, .{ .ident = ident, .exp = try planExpr(planner, item.expr) });
-        try sort.append(planner.allocator, .{ .ident = ident, .desc = item.direction == .desc });
+        try sort.append(planner.allocator, .{ .ident = ident, .desc = item.desc });
     }
 
     try planner.plan.ops.append(planner.allocator, .{ .project = project });
@@ -987,7 +917,7 @@ fn appendPathSegment(planner: *Planner, current: u16, segment: PathSegment) Erro
         .ident_src = current,
         .ident_edge = edge_ident,
         .ident_dest = dest_ident,
-        .direction = planDirection(segment.edge.direction),
+        .direction = segment.edge.direction,
         .edge_label = if (segment.edge.label) |label| try planner.allocator.dupe(u8, label) else null,
     } });
 
@@ -1043,45 +973,18 @@ fn planExpr(planner: *Planner, expr: Expr) Error!Plan.Exp {
         },
         .unary => |unary| blk: {
             const planned = try planner.allocator.create(Plan.UnaryExp);
-            planned.* = .{ .op = switch (unary.op) {
-                .not => .not,
-            }, .operand = try planExpr(planner, unary.operand) };
+            planned.* = .{ .op = unary.op, .operand = try planExpr(planner, unary.operand) };
             break :blk .{ .unary = planned };
         },
         .binary => |bin| blk: {
             const planned = try planner.allocator.create(Plan.BinopExp);
             planned.* = .{
-                .op = planBinop(bin.op),
+                .op = bin.op,
                 .left = try planExpr(planner, bin.left),
                 .right = try planExpr(planner, bin.right),
             };
             break :blk .{ .binop = planned };
         },
-    };
-}
-
-fn planBinop(op: BinaryOp) Plan.Binop {
-    return switch (op) {
-        .add => .add,
-        .sub => .sub,
-        .mul => .mul,
-        .eql => .eql,
-        .neq => .neq,
-        .lt => .lt,
-        .lte => .lte,
-        .gt => .gt,
-        .gte => .gte,
-        .and_ => .and_,
-        .or_ => .or_,
-    };
-}
-
-fn planDirection(direction: Direction) types.EdgeDirection {
-    return switch (direction) {
-        .right => .right,
-        .left => .left,
-        .undirected => .undirected,
-        .any => .any,
     };
 }
 
@@ -1291,13 +1194,13 @@ const Parser = struct {
         while (!p.at(.keyword_skip) and !p.at(.keyword_limit) and !p.at(.semicolon) and !p.at(.eof)) {
             var expr = try p.parseExpr(0);
             errdefer expr.deinit(p.allocator);
-            const direction: SortDirection = if (p.eat(.keyword_desc) or p.eat(.keyword_descending))
-                .desc
+            const desc = if (p.eat(.keyword_desc) or p.eat(.keyword_descending))
+                true
             else if (p.eat(.keyword_asc) or p.eat(.keyword_ascending))
-                .asc
+                false
             else
-                .asc;
-            try items.append(p.allocator, .{ .expr = expr, .direction = direction });
+                false;
+            try items.append(p.allocator, .{ .expr = expr, .desc = desc });
             if (!p.eat(.comma)) break;
         }
         if (items.items.len == 0) return error.ParseError;
@@ -1388,7 +1291,7 @@ const Parser = struct {
     }
 
     fn parseEdgePattern(p: *Parser) Error!EdgePattern {
-        var direction: Direction = .undirected;
+        var direction: EdgeDirection = .undirected;
         var bracketed = true;
 
         switch (p.peek()) {
@@ -1565,7 +1468,7 @@ const Parser = struct {
         return try out.toOwnedSlice(p.allocator);
     }
 
-    fn binaryInfo(tag: Token.Tag) ?struct { op: BinaryOp, prec: u8 } {
+    fn binaryInfo(tag: Token.Tag) ?struct { op: Plan.Binop, prec: u8 } {
         return switch (tag) {
             .keyword_or => .{ .op = .or_, .prec = 1 },
             .keyword_and => .{ .op = .and_, .prec = 2 },
