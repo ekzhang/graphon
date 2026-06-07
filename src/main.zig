@@ -79,7 +79,8 @@ pub fn main(init: std.process.Init) !void {
             defer result.deinit(allocator);
             var stdout_buffer: [4096]u8 = undefined;
             var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buffer);
-            try result.writeJson(&stdout_writer.interface);
+            var json: std.json.Stringify = .{ .writer = &stdout_writer.interface, .options = .{} };
+            try result.writeJson(&json);
             try stdout_writer.interface.writeByte('\n');
             try stdout_writer.interface.flush();
         },
@@ -132,7 +133,8 @@ fn localShell(allocator: std.mem.Allocator, io: std.Io, db_path: []const u8) !vo
             continue;
         };
         defer result.deinit(allocator);
-        try result.writeJson(stdout);
+        var json: std.json.Stringify = .{ .writer = stdout, .options = .{} };
+        try result.writeJson(&json);
         try stdout.writeByte('\n');
     }
 }
@@ -216,7 +218,8 @@ fn handleRequest(allocator: std.mem.Allocator, store: storage.Storage, request: 
 
     var body = std.Io.Writer.Allocating.init(allocator);
     defer body.deinit();
-    try result.writeJson(&body.writer);
+    var json: std.json.Stringify = .{ .writer = &body.writer, .options = .{} };
+    try result.writeJson(&json);
     try request.respond(body.written(), .{ .extra_headers = &json_headers });
 }
 

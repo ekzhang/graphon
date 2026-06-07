@@ -123,7 +123,8 @@ fn checkQueryPlanSnapshot(source: [:0]const u8, want: Snap) !void {
 fn jsonForTest(result: ResultSet) ![]u8 {
     var buf = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer buf.deinit();
-    try result.writeJson(&buf.writer);
+    var json: std.json.Stringify = .{ .writer = &buf.writer, .options = .{} };
+    try result.writeJson(&json);
     return try buf.toOwnedSlice();
 }
 
@@ -205,7 +206,7 @@ test "return arithmetic" {
 
     const json = try jsonForTest(result);
     defer std.testing.allocator.free(json);
-    try std.testing.expectEqualStrings("300", json);
+    try std.testing.expectEqualStrings("[{\"expr\":300}]", json);
 }
 
 test "return limit zero" {

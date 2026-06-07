@@ -26,9 +26,7 @@ pub const ResultSet = struct {
         self.* = undefined;
     }
 
-    pub fn writeJson(self: ResultSet, writer: *std.Io.Writer) !void {
-        var json: std.json.Stringify = .{ .writer = writer, .options = .{} };
-
+    pub fn writeJson(self: ResultSet, json: *std.json.Stringify) !void {
         if (self.rows_affected) |n| {
             try json.beginObject();
             try json.objectField("ok");
@@ -39,18 +37,12 @@ pub const ResultSet = struct {
             return;
         }
 
-        // Keep README examples nice: `RETURN 55` over HTTP responds with `55`.
-        if (self.columns.len == 1 and self.rows.len == 1) {
-            try writeJsonValue(&json, self.rows[0].values[0]);
-            return;
-        }
-
         try json.beginArray();
         for (self.rows) |row| {
             try json.beginObject();
             for (self.columns, 0..) |column, col_i| {
                 try json.objectField(column);
-                try writeJsonValue(&json, row.values[col_i]);
+                try row.values[col_i].writeJson(json);
             }
             try json.endObject();
         }
@@ -81,6 +73,14 @@ pub const ResultValue = union(enum) {
         }
         self.* = undefined;
     }
+
+    pub fn writeJson(self: ResultValue, json: *std.json.Stringify) !void {
+        switch (self) {
+            .scalar => |scalar| try writeJsonScalar(json, scalar),
+            .node => |node| try node.writeJson(json),
+            .edge => |edge| try edge.writeJson(json),
+        }
+    }
 };
 
 pub const NodeObject = struct {
@@ -94,6 +94,18 @@ pub const NodeObject = struct {
         for (self.properties) |*property| property.deinit(allocator);
         allocator.free(self.properties);
         self.* = undefined;
+    }
+
+    pub fn writeJson(self: NodeObject, json: *std.json.Stringify) !void {
+        try json.beginObject();
+        try json.objectField("id");
+        const id = self.id.toString();
+        try json.write(id[0..]);
+        try json.objectField("labels");
+        try json.write(self.labels);
+        try json.objectField("properties");
+        try writeJsonProperties(json, self.properties);
+        try json.endObject();
     }
 };
 
@@ -111,6 +123,26 @@ pub const EdgeObject = struct {
         allocator.free(self.properties);
         self.* = undefined;
     }
+
+    pub fn writeJson(self: EdgeObject, json: *std.json.Stringify) !void {
+        try json.beginObject();
+        try json.objectField("id");
+        const id = self.id.toString();
+        try json.write(id[0..]);
+        try json.objectField("start");
+        const start = self.endpoints[0].toString();
+        try json.write(start[0..]);
+        try json.objectField("end");
+        const end = self.endpoints[1].toString();
+        try json.write(end[0..]);
+        try json.objectField("directed");
+        try json.write(self.directed);
+        try json.objectField("labels");
+        try json.write(self.labels);
+        try json.objectField("properties");
+        try writeJsonProperties(json, self.properties);
+        try json.endObject();
+    }
 };
 
 pub const ResultProperty = struct {
@@ -121,6 +153,11 @@ pub const ResultProperty = struct {
         allocator.free(self.key);
         self.value.deinit(allocator);
         self.* = undefined;
+    }
+
+    fn writeJsonField(self: ResultProperty, json: *std.json.Stringify) !void {
+        try json.objectField(self.key);
+        try writeJsonScalar(json, self.value);
     }
 };
 
@@ -259,14 +296,6 @@ pub const StatementCursor = struct {
     }
 };
 
-fn writeJsonValue(json: *std.json.Stringify, value: ResultValue) !void {
-    switch (value) {
-        .scalar => |scalar| try writeJsonScalar(json, scalar),
-        .node => |node| try writeJsonNode(json, node),
-        .edge => |edge| try writeJsonEdge(json, edge),
-    }
-}
-
 fn writeJsonScalar(json: *std.json.Stringify, value: Value) !void {
     switch (value) {
         .string => |s| try json.write(s),
@@ -281,44 +310,9 @@ fn writeJsonScalar(json: *std.json.Stringify, value: Value) !void {
     }
 }
 
-fn writeJsonNode(json: *std.json.Stringify, node: NodeObject) !void {
-    try json.beginObject();
-    try json.objectField("id");
-    const id = node.id.toString();
-    try json.write(id[0..]);
-    try json.objectField("labels");
-    try json.write(node.labels);
-    try json.objectField("properties");
-    try writeJsonProperties(json, node.properties);
-    try json.endObject();
-}
-
-fn writeJsonEdge(json: *std.json.Stringify, edge: EdgeObject) !void {
-    try json.beginObject();
-    try json.objectField("id");
-    const id = edge.id.toString();
-    try json.write(id[0..]);
-    try json.objectField("start");
-    const start = edge.endpoints[0].toString();
-    try json.write(start[0..]);
-    try json.objectField("end");
-    const end = edge.endpoints[1].toString();
-    try json.write(end[0..]);
-    try json.objectField("directed");
-    try json.write(edge.directed);
-    try json.objectField("labels");
-    try json.write(edge.labels);
-    try json.objectField("properties");
-    try writeJsonProperties(json, edge.properties);
-    try json.endObject();
-}
-
 fn writeJsonProperties(json: *std.json.Stringify, properties: []const ResultProperty) !void {
     try json.beginObject();
-    for (properties) |property| {
-        try json.objectField(property.key);
-        try writeJsonScalar(json, property.value);
-    }
+    for (properties) |property| try property.writeJsonField(json);
     try json.endObject();
 }
 
