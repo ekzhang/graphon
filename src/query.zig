@@ -245,6 +245,16 @@ fn executeStatement(allocator: Allocator, io: std.Io, txn: storage.Transaction, 
                     }
                 }
             }
+            if (mq.action == .insert) {
+                if (executeMatchInsertPlan(allocator, txn, mq)) |result| {
+                    return result;
+                } else |err| {
+                    switch (err) {
+                        error.Unsupported => {},
+                        else => |e| return e,
+                    }
+                }
+            }
 
             var rows = std.ArrayList(Binding).empty;
             errdefer deinitBindings(&rows, allocator);
@@ -592,14 +602,10 @@ fn executeReturnPlan(allocator: Allocator, txn: storage.Transaction, ret: Return
 
 fn executeMatchReturnPlan(allocator: Allocator, txn: storage.Transaction, mq: MatchQuery) Error!ResultSet {
     if (mq.action != .ret) return error.Unsupported;
-    if (mq.patterns.len != 1) return error.Unsupported;
 
     var planner = Planner{ .allocator = allocator };
     defer planner.deinit();
-    try appendPathPattern(&planner, mq.patterns[0]);
-    if (mq.where) |where| {
-        try appendFilter(&planner, .{ .bool_exp = try planExpr(&planner, where) });
-    }
+    try appendMatchQuery(&planner, mq);
     const ret = mq.action.ret;
     try appendReturnProjection(&planner, ret);
     try appendOrderBy(&planner, ret);
@@ -616,7 +622,28 @@ fn executeInsertPlan(allocator: Allocator, txn: storage.Transaction, patterns: [
         inserted_per_row += try appendInsertPath(&planner, pattern);
     }
 
-    var exec = try executor.Executor.init(&planner.plan, txn);
+    const rows = try consumePlanRows(allocator, txn, &planner.plan);
+    return mutationResult(rows * inserted_per_row);
+}
+
+fn executeMatchInsertPlan(allocator: Allocator, txn: storage.Transaction, mq: MatchQuery) Error!ResultSet {
+    if (mq.action != .insert) return error.Unsupported;
+
+    var planner = Planner{ .allocator = allocator };
+    defer planner.deinit();
+    try appendMatchQuery(&planner, mq);
+
+    var inserted_per_row: usize = 0;
+    for (mq.action.insert) |pattern| {
+        inserted_per_row += try appendInsertPath(&planner, pattern);
+    }
+
+    const rows = try consumePlanRows(allocator, txn, &planner.plan);
+    return mutationResult(rows * inserted_per_row);
+}
+
+fn consumePlanRows(allocator: Allocator, txn: storage.Transaction, plan: *const Plan) Error!usize {
+    var exec = try executor.Executor.init(plan, txn);
     defer exec.deinit();
 
     var rows: usize = 0;
@@ -626,7 +653,16 @@ fn executeInsertPlan(allocator: Allocator, txn: storage.Transaction, patterns: [
         rows += 1;
     }
 
-    return mutationResult(rows * inserted_per_row);
+    return rows;
+}
+
+fn appendMatchQuery(planner: *Planner, mq: MatchQuery) Error!void {
+    for (mq.patterns) |pattern| {
+        try appendPathPattern(planner, pattern);
+    }
+    if (mq.where) |where| {
+        try appendFilter(planner, .{ .bool_exp = try planExpr(planner, where) });
+    }
 }
 
 fn appendInsertPath(planner: *Planner, pattern: PathPattern) Error!usize {
