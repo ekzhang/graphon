@@ -229,14 +229,16 @@ pub fn execute(allocator: Allocator, io: std.Io, store: storage.Storage, source:
 
 fn executeStatement(allocator: Allocator, io: std.Io, txn: storage.Transaction, statement: Statement) Error!ResultSet {
     switch (statement) {
-        .return_only => |items| {
+        .return_only => |ret| {
             var rows = std.ArrayList(Row).empty;
             errdefer deinitRowList(&rows, allocator);
             var binding = Binding{};
             defer binding.deinit(allocator);
-            try appendReturnRow(allocator, txn, &rows, binding, items);
+            if (ret.limit == null or ret.limit.? > 0) {
+                try appendReturnRow(allocator, txn, &rows, binding, ret.items);
+            }
             return .{
-                .columns = try columnNames(allocator, items),
+                .columns = try columnNames(allocator, ret.items),
                 .rows = try rows.toOwnedSlice(allocator),
                 .rows_affected = null,
             };
@@ -259,15 +261,18 @@ fn executeStatement(allocator: Allocator, io: std.Io, txn: storage.Transaction, 
             }
 
             switch (mq.action) {
-                .ret => |items| {
+                .ret => |ret| {
                     var out_rows = std.ArrayList(Row).empty;
                     errdefer deinitRowList(&out_rows, allocator);
                     for (rows.items) |binding| {
-                        try appendReturnRow(allocator, txn, &out_rows, binding, items);
+                        if (ret.limit) |limit| {
+                            if (out_rows.items.len >= limit) break;
+                        }
+                        try appendReturnRow(allocator, txn, &out_rows, binding, ret.items);
                     }
                     deinitBindings(&rows, allocator);
                     return .{
-                        .columns = try columnNames(allocator, items),
+                        .columns = try columnNames(allocator, ret.items),
                         .rows = try out_rows.toOwnedSlice(allocator),
                         .rows_affected = null,
                     };
@@ -309,13 +314,13 @@ fn mutationResult(rows_affected: usize) ResultSet {
 // ------------------------------- AST --------------------------------------
 
 const Statement = union(enum) {
-    return_only: []ReturnItem,
+    return_only: ReturnClause,
     insert: []PathPattern,
     match_query: MatchQuery,
 
     fn deinit(self: *Statement, allocator: Allocator) void {
         switch (self.*) {
-            .return_only => |items| deinitReturnItems(items, allocator),
+            .return_only => |*ret| ret.deinit(allocator),
             .insert => |patterns| deinitPatterns(patterns, allocator),
             .match_query => |*mq| mq.deinit(allocator),
         }
@@ -335,7 +340,7 @@ const MatchQuery = struct {
 };
 
 const MatchAction = union(enum) {
-    ret: []ReturnItem,
+    ret: ReturnClause,
     insert: []PathPattern,
     delete: DeleteAction,
     set: []SetClause,
@@ -343,7 +348,7 @@ const MatchAction = union(enum) {
 
     fn deinit(self: *MatchAction, allocator: Allocator) void {
         switch (self.*) {
-            .ret => |items| deinitReturnItems(items, allocator),
+            .ret => |*ret| ret.deinit(allocator),
             .insert => |patterns| deinitPatterns(patterns, allocator),
             .delete => |del| allocator.free(del.variables),
             .set => |sets| {
@@ -352,6 +357,16 @@ const MatchAction = union(enum) {
             },
             .finish => {},
         }
+        self.* = undefined;
+    }
+};
+
+const ReturnClause = struct {
+    items: []ReturnItem,
+    limit: ?usize = null,
+
+    fn deinit(self: *ReturnClause, allocator: Allocator) void {
+        deinitReturnItems(self.items, allocator);
         self.* = undefined;
     }
 };
@@ -540,7 +555,7 @@ const Parser = struct {
 
     fn parseStatement(p: *Parser) Error!Statement {
         if (p.eat(.keyword_return)) {
-            return .{ .return_only = try p.parseReturnItems() };
+            return .{ .return_only = try p.parseReturnClause() };
         }
         if (p.eat(.keyword_insert)) {
             return .{ .insert = try p.parsePatternListUntilAction() };
@@ -555,7 +570,7 @@ const Parser = struct {
     }
 
     fn parseMatchAction(p: *Parser) Error!MatchAction {
-        if (p.eat(.keyword_return)) return .{ .ret = try p.parseReturnItems() };
+        if (p.eat(.keyword_return)) return .{ .ret = try p.parseReturnClause() };
         if (p.eat(.keyword_insert)) return .{ .insert = try p.parsePatternListUntilAction() };
         if (p.eat(.keyword_finish)) return .finish;
         if (p.eat(.keyword_set)) return .{ .set = try p.parseSetClauses() };
@@ -592,13 +607,20 @@ const Parser = struct {
         return try clauses.toOwnedSlice(p.allocator);
     }
 
+    fn parseReturnClause(p: *Parser) Error!ReturnClause {
+        const items = try p.parseReturnItems();
+        errdefer deinitReturnItems(items, p.allocator);
+        const limit = if (p.eat(.keyword_limit)) try p.parseLimit() else null;
+        return .{ .items = items, .limit = limit };
+    }
+
     fn parseReturnItems(p: *Parser) Error![]ReturnItem {
         var items = std.ArrayList(ReturnItem).empty;
         errdefer {
             for (items.items) |*item| item.deinit(p.allocator);
             items.deinit(p.allocator);
         }
-        while (!p.at(.semicolon) and !p.at(.eof)) {
+        while (!p.at(.keyword_limit) and !p.at(.semicolon) and !p.at(.eof)) {
             var expr = try p.parseExpr(0);
             errdefer expr.deinit(p.allocator);
             const alias = if (p.eat(.keyword_as)) try p.expectName() else null;
@@ -607,6 +629,14 @@ const Parser = struct {
         }
         if (items.items.len == 0) return error.ParseError;
         return try items.toOwnedSlice(p.allocator);
+    }
+
+    fn parseLimit(p: *Parser) Error!usize {
+        const tok = p.next();
+        if (tok.tag != .number_literal) return error.ParseError;
+        const s = p.slice(tok);
+        if (std.mem.indexOfScalar(u8, s, '.') != null) return error.ParseError;
+        return std.fmt.parseInt(usize, s, 10) catch return error.ParseError;
     }
 
     fn parsePatternListUntilAction(p: *Parser) Error![]PathPattern {
@@ -1465,6 +1495,19 @@ test "return arithmetic" {
     try std.testing.expectEqualStrings("300", json);
 }
 
+test "return limit zero" {
+    var tmp = @import("test_helpers.zig").tmp();
+    defer tmp.cleanup();
+    const store = try tmp.store("test.db");
+    defer store.db.close();
+
+    var result = try execForTest(store, "RETURN 100 * 3 LIMIT 0");
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 0), result.rows.len);
+    try std.testing.expectEqual(@as(usize, 1), result.columns.len);
+    try std.testing.expectEqualStrings("expr", result.columns[0]);
+}
+
 test "insert match return and detach delete" {
     var tmp = @import("test_helpers.zig").tmp();
     defer tmp.cleanup();
@@ -1502,6 +1545,26 @@ test "insert match return and detach delete" {
         var result = try execForTest(store, "MATCH (a:User {name: 'Eric'})->[:Likes]->(f:Food) RETURN f.name, f.calories");
         defer result.deinit(std.testing.allocator);
         try std.testing.expectEqual(@as(usize, 0), result.rows.len);
+    }
+}
+
+test "match return limit" {
+    var tmp = @import("test_helpers.zig").tmp();
+    defer tmp.cleanup();
+    const store = try tmp.store("test.db");
+    defer store.db.close();
+
+    {
+        var result = try execForTest(store, "INSERT (:Person {name: 'Ada'}), (:Person {name: 'Bert'}), (:Person {name: 'Cara'})");
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(?usize, 3), result.rows_affected);
+    }
+    {
+        var result = try execForTest(store, "MATCH (p:Person) RETURN p.name LIMIT 2");
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 2), result.rows.len);
+        try std.testing.expectEqual(@as(usize, 1), result.columns.len);
+        try std.testing.expectEqualStrings("p.name", result.columns[0]);
     }
 }
 
