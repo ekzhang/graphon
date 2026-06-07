@@ -3,6 +3,7 @@ const Allocator = std.mem.Allocator;
 
 const executor = @import("../executor.zig");
 const Plan = @import("../Plan.zig");
+const Value = @import("../types.zig").Value;
 
 pub fn runNodeById(op: Plan.LookupId, _: *void, exec: *executor.Executor, op_index: u32) !bool {
     if (!try exec.next(op_index)) return false;
@@ -116,4 +117,79 @@ pub fn runSkip(op: u64, state: *bool, exec: *executor.Executor, op_index: u32) !
         }
     }
     return try exec.next(op_index);
+}
+
+pub const SortState = struct {
+    rows: std.ArrayList(SortRow) = .empty,
+    index: usize = 0,
+    loaded: bool = false,
+
+    pub fn deinit(self: *SortState, allocator: Allocator) void {
+        for (self.rows.items) |*row| row.deinit(allocator);
+        self.rows.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+const SortRow = struct {
+    assignments: []Value,
+
+    fn deinit(self: *SortRow, allocator: Allocator) void {
+        for (self.assignments) |*value| value.deinit(allocator);
+        allocator.free(self.assignments);
+        self.* = undefined;
+    }
+};
+
+const SortContext = struct {
+    clauses: std.MultiArrayList(Plan.SortClause).Slice,
+};
+
+pub fn runSort(op: std.MultiArrayList(Plan.SortClause), state: *SortState, exec: *executor.Executor, op_index: u32) !bool {
+    if (!state.loaded) {
+        while (try exec.next(op_index)) {
+            try state.rows.append(exec.txn.allocator, .{ .assignments = try cloneAssignments(exec.txn.allocator, exec.assignments) });
+        }
+        state.loaded = true;
+        std.mem.sort(SortRow, state.rows.items, SortContext{ .clauses = op.slice() }, sortRowLessThan);
+    }
+
+    if (state.index >= state.rows.items.len) return false;
+    const row = state.rows.items[state.index];
+    state.index += 1;
+    for (exec.assignments, row.assignments) |*dest, source| {
+        dest.deinit(exec.txn.allocator);
+        dest.* = try source.dupe(exec.txn.allocator);
+    }
+    return true;
+}
+
+fn cloneAssignments(allocator: Allocator, assignments: []const Value) Allocator.Error![]Value {
+    const out = try allocator.alloc(Value, assignments.len);
+    errdefer allocator.free(out);
+    for (out) |*value| value.* = .null;
+    errdefer for (out) |*value| value.deinit(allocator);
+
+    for (assignments, 0..) |value, i| {
+        out[i].deinit(allocator);
+        out[i] = try value.dupe(allocator);
+    }
+    return out;
+}
+
+fn sortRowLessThan(ctx: SortContext, left: SortRow, right: SortRow) bool {
+    for (0..ctx.clauses.len) |i| {
+        const clause = ctx.clauses.get(i);
+        const order = compareSortValues(left.assignments[clause.ident], right.assignments[clause.ident]);
+        if (order == .eq) continue;
+        return if (clause.desc) order == .gt else order == .lt;
+    }
+    return false;
+}
+
+fn compareSortValues(left: Value, right: Value) std.math.Order {
+    if (executor.compareValues(left, right)) |order| return order;
+    if (left == .null and right != .null) return .gt;
+    if (left != .null and right == .null) return .lt;
+    return .eq;
 }

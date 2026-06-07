@@ -34,6 +34,7 @@ const operator_impls = blk: {
         .{ Plan.Operator.filter, void, null, simple_ops.runFilter },
         .{ Plan.Operator.limit, u64, null, simple_ops.runLimit },
         .{ Plan.Operator.skip, bool, null, simple_ops.runSkip },
+        .{ Plan.Operator.sort, simple_ops.SortState, simple_ops.SortState.deinit, simple_ops.runSort },
         .{ Plan.Operator.union_all, bool, null, join_ops.runUnionAll },
         .{ Plan.Operator.insert_node, void, null, modify_ops.runInsertNode },
         .{ Plan.Operator.insert_edge, void, null, modify_ops.runInsertEdge },
@@ -343,7 +344,7 @@ fn multiplyValues(left: Value, right: Value) Value {
     };
 }
 
-fn compareValues(left: Value, right: Value) ?std.math.Order {
+pub fn compareValues(left: Value, right: Value) ?std.math.Order {
     return switch (left) {
         .int64 => |a| switch (right) {
             .int64 => |b| orderInt(a, b),

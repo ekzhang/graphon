@@ -145,7 +145,7 @@ pub const Operator = union(enum) {
     limit: u64,
     distinct: std.ArrayList(u16), // unimplemented
     skip: u64,
-    sort: std.MultiArrayList(SortClause), // unimplemented
+    sort: std.MultiArrayList(SortClause),
     top: u64, // unimplemented
     union_all,
     // update,

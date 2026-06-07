@@ -366,11 +366,25 @@ const MatchAction = union(enum) {
 
 const ReturnClause = struct {
     items: []ReturnItem,
+    order_by: []SortItem = &.{},
     skip: usize = 0,
     limit: ?usize = null,
 
     fn deinit(self: *ReturnClause, allocator: Allocator) void {
         deinitReturnItems(self.items, allocator);
+        deinitSortItems(self.order_by, allocator);
+        self.* = undefined;
+    }
+};
+
+const SortDirection = enum { asc, desc };
+
+const SortItem = struct {
+    expr: Expr,
+    direction: SortDirection = .asc,
+
+    fn deinit(self: *SortItem, allocator: Allocator) void {
+        self.expr.deinit(allocator);
         self.* = undefined;
     }
 };
@@ -519,6 +533,11 @@ fn deinitReturnItems(items: []ReturnItem, allocator: Allocator) void {
     allocator.free(items);
 }
 
+fn deinitSortItems(items: []SortItem, allocator: Allocator) void {
+    for (items) |*item| item.deinit(allocator);
+    if (items.len > 0) allocator.free(items);
+}
+
 fn deinitProperties(properties: []Property, allocator: Allocator) void {
     for (properties) |*property| property.deinit(allocator);
     allocator.free(properties);
@@ -566,7 +585,8 @@ fn executeReturnPlan(allocator: Allocator, txn: storage.Transaction, ret: Return
     var planner = Planner{ .allocator = allocator };
     defer planner.deinit();
     try appendReturnProjection(&planner, ret);
-    appendSkipLimit(&planner, ret) catch |err| return err;
+    try appendOrderBy(&planner, ret);
+    try appendSkipLimit(&planner, ret);
     return try executePlannedResult(allocator, txn, &planner.plan, ret.items);
 }
 
@@ -582,6 +602,7 @@ fn executeMatchReturnPlan(allocator: Allocator, txn: storage.Transaction, mq: Ma
     }
     const ret = mq.action.ret;
     try appendReturnProjection(&planner, ret);
+    try appendOrderBy(&planner, ret);
     try appendSkipLimit(&planner, ret);
     return try executePlannedResult(allocator, txn, &planner.plan, ret.items);
 }
@@ -739,6 +760,29 @@ fn appendSkipLimit(planner: *Planner, ret: ReturnClause) Error!void {
     if (ret.limit) |limit| {
         try planner.plan.ops.append(planner.allocator, .{ .limit = @intCast(limit) });
     }
+}
+
+fn appendOrderBy(planner: *Planner, ret: ReturnClause) Error!void {
+    if (ret.order_by.len == 0) return;
+
+    var project = std.ArrayList(Plan.ProjectClause).empty;
+    errdefer {
+        for (project.items) |*clause| clause.deinit(planner.allocator);
+        project.deinit(planner.allocator);
+    }
+    var sort: std.MultiArrayList(Plan.SortClause) = .{};
+    errdefer sort.deinit(planner.allocator);
+
+    for (ret.order_by) |item| {
+        const ident = planner.allocIdent();
+        try project.append(planner.allocator, .{ .ident = ident, .exp = try planExpr(planner, item.expr) });
+        try sort.append(planner.allocator, .{ .ident = ident, .desc = item.direction == .desc });
+    }
+
+    try planner.plan.ops.append(planner.allocator, .{ .project = project });
+    project = .empty;
+    try planner.plan.ops.append(planner.allocator, .{ .sort = sort });
+    sort = .{};
 }
 
 fn appendPathPattern(planner: *Planner, pattern: PathPattern) Error!void {
@@ -1063,8 +1107,12 @@ const Parser = struct {
 
     fn parseReturnClause(p: *Parser) Error!ReturnClause {
         const items = try p.parseReturnItems();
-        errdefer deinitReturnItems(items, p.allocator);
         var ret = ReturnClause{ .items = items };
+        errdefer ret.deinit(p.allocator);
+        if (p.eat(.keyword_order)) {
+            try p.expect(.keyword_by);
+            ret.order_by = try p.parseSortItems();
+        }
         while (true) {
             if (p.eat(.keyword_skip)) {
                 ret.skip = try p.parseCount();
@@ -1074,7 +1122,31 @@ const Parser = struct {
                 break;
             }
         }
-        return ret;
+        const out = ret;
+        ret = .{ .items = &.{} };
+        return out;
+    }
+
+    fn parseSortItems(p: *Parser) Error![]SortItem {
+        var items = std.ArrayList(SortItem).empty;
+        errdefer {
+            for (items.items) |*item| item.deinit(p.allocator);
+            items.deinit(p.allocator);
+        }
+        while (!p.at(.keyword_skip) and !p.at(.keyword_limit) and !p.at(.semicolon) and !p.at(.eof)) {
+            var expr = try p.parseExpr(0);
+            errdefer expr.deinit(p.allocator);
+            const direction: SortDirection = if (p.eat(.keyword_desc) or p.eat(.keyword_descending))
+                .desc
+            else if (p.eat(.keyword_asc) or p.eat(.keyword_ascending))
+                .asc
+            else
+                .asc;
+            try items.append(p.allocator, .{ .expr = expr, .direction = direction });
+            if (!p.eat(.comma)) break;
+        }
+        if (items.items.len == 0) return error.ParseError;
+        return try items.toOwnedSlice(p.allocator);
     }
 
     fn parseReturnItems(p: *Parser) Error![]ReturnItem {
@@ -1083,7 +1155,7 @@ const Parser = struct {
             for (items.items) |*item| item.deinit(p.allocator);
             items.deinit(p.allocator);
         }
-        while (!p.at(.keyword_skip) and !p.at(.keyword_limit) and !p.at(.semicolon) and !p.at(.eof)) {
+        while (!p.at(.keyword_order) and !p.at(.keyword_skip) and !p.at(.keyword_limit) and !p.at(.semicolon) and !p.at(.eof)) {
             var expr = try p.parseExpr(0);
             errdefer expr.deinit(p.allocator);
             const alias = if (p.eat(.keyword_as)) try p.expectName() else null;
@@ -2171,6 +2243,37 @@ test "match return skip and limit" {
         try std.testing.expectEqual(@as(usize, 1), result.rows.len);
         try std.testing.expectEqual(@as(usize, 1), result.columns.len);
         try std.testing.expectEqualStrings("p.name", result.columns[0]);
+    }
+}
+
+test "match return order by" {
+    var tmp = @import("test_helpers.zig").tmp();
+    defer tmp.cleanup();
+    const store = try tmp.store("test.db");
+    defer store.db.close();
+
+    {
+        var result = try execForTest(store,
+            \\INSERT (:Person {name: 'Ada', age: 30}),
+            \\       (:Person {name: 'Bert', age: 41}),
+            \\       (:Person {name: 'Cara', age: 42})
+        );
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(?usize, 3), result.rows_affected);
+    }
+    {
+        var result = try execForTest(store, "MATCH (p:Person) RETURN p.name ORDER BY p.age");
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 3), result.rows.len);
+        try std.testing.expectEqualStrings("Ada", result.rows[0].values[0].scalar.string);
+        try std.testing.expectEqualStrings("Bert", result.rows[1].values[0].scalar.string);
+        try std.testing.expectEqualStrings("Cara", result.rows[2].values[0].scalar.string);
+    }
+    {
+        var result = try execForTest(store, "MATCH (p:Person) RETURN p.name ORDER BY p.age DESC SKIP 1 LIMIT 1");
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 1), result.rows.len);
+        try std.testing.expectEqualStrings("Bert", result.rows[0].values[0].scalar.string);
     }
 }
 
