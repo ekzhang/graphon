@@ -36,8 +36,10 @@ const operator_impls = blk: {
         .{ Plan.Operator.skip, bool, null, simple_ops.runSkip },
         .{ Plan.Operator.sort, simple_ops.SortState, simple_ops.SortState.deinit, simple_ops.runSort },
         .{ Plan.Operator.union_all, bool, null, join_ops.runUnionAll },
+        .{ Plan.Operator.update, void, null, modify_ops.runUpdate },
         .{ Plan.Operator.insert_node, void, null, modify_ops.runInsertNode },
         .{ Plan.Operator.insert_edge, void, null, modify_ops.runInsertEdge },
+        .{ Plan.Operator.delete, void, null, modify_ops.runDelete },
     };
 
     var impls: std.EnumMap(std.meta.Tag(Plan.Operator), OperatorImpl) = .{};

@@ -5,6 +5,7 @@ const Allocator = std.mem.Allocator;
 
 const executor = @import("../executor.zig");
 const Plan = @import("../Plan.zig");
+const rocksdb = @import("../storage/rocksdb.zig");
 const types = @import("../types.zig");
 
 pub fn runInsertNode(op: Plan.InsertNode, _: *void, exec: *executor.Executor, op_index: u32) !bool {
@@ -54,6 +55,88 @@ pub fn runInsertEdge(op: Plan.InsertEdge, _: *void, exec: *executor.Executor, op
         exec.assignments[ident] = .{ .edge_ref = edge.id };
     }
     return true;
+}
+
+pub fn runUpdate(op: Plan.Update, _: *void, exec: *executor.Executor, op_index: u32) !bool {
+    if (!try exec.next(op_index)) return false;
+
+    for (op.items.items) |item| {
+        var value = try executor.evaluate(item.value, exec.assignments, exec.txn);
+        errdefer value.deinit(exec.txn.allocator);
+        switch (exec.assignments[item.ident]) {
+            .node_ref => |node_id| {
+                var node = try exec.txn.getNode(node_id) orelse continue;
+                defer node.deinit(exec.txn.allocator);
+                try putProperty(exec.txn.allocator, &node.properties, item.key, value);
+                value = .null;
+                try exec.txn.putNode(node);
+            },
+            .edge_ref => |edge_id| {
+                var edge = try exec.txn.getEdge(edge_id) orelse continue;
+                defer edge.deinit(exec.txn.allocator);
+                try putProperty(exec.txn.allocator, &edge.properties, item.key, value);
+                value = .null;
+                try exec.txn.putEdge(edge);
+            },
+            else => return executor.Error.WrongType,
+        }
+    }
+
+    return true;
+}
+
+pub fn runDelete(op: Plan.Delete, _: *void, exec: *executor.Executor, op_index: u32) !bool {
+    if (!try exec.next(op_index)) return false;
+
+    for (op.idents.items) |ident| {
+        switch (exec.assignments[ident]) {
+            .edge_ref => |edge_id| {
+                exec.txn.deleteEdge(edge_id) catch |err| switch (err) {
+                    rocksdb.Error.NotFound => {},
+                    else => |e| return e,
+                };
+            },
+            .node_ref => |node_id| {
+                if (op.detach) try deleteAttachedEdges(exec, node_id);
+                exec.txn.deleteNode(node_id) catch |err| switch (err) {
+                    rocksdb.Error.NotFound => {},
+                    else => |e| return e,
+                };
+            },
+            else => return executor.Error.WrongType,
+        }
+    }
+
+    return true;
+}
+
+fn putProperty(
+    allocator: Allocator,
+    properties: *std.StringArrayHashMapUnmanaged(types.Value),
+    key: []const u8,
+    value: types.Value,
+) Allocator.Error!void {
+    if (properties.getIndex(key)) |idx| {
+        properties.values()[idx].deinit(allocator);
+        properties.values()[idx] = value;
+    } else {
+        try properties.put(allocator, try allocator.dupe(u8, key), value);
+    }
+}
+
+fn deleteAttachedEdges(exec: *executor.Executor, node_id: types.ElementId) executor.Error!void {
+    var ids = std.ArrayList(types.ElementId).empty;
+    defer ids.deinit(exec.txn.allocator);
+    var it = try exec.txn.iterateAdj(node_id, .out, .in);
+    defer it.close();
+    while (try it.next()) |entry| try ids.append(exec.txn.allocator, entry.edge_id);
+
+    for (ids.items) |edge_id| {
+        exec.txn.deleteEdge(edge_id) catch |err| switch (err) {
+            rocksdb.Error.NotFound => {},
+            else => |e| return e,
+        };
+    }
 }
 
 /// Evaluate property expressions in a query plan.

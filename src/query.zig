@@ -255,6 +255,36 @@ fn executeStatement(allocator: Allocator, io: std.Io, txn: storage.Transaction, 
                     }
                 }
             }
+            if (mq.action == .set) {
+                if (executeMatchSetPlan(allocator, txn, mq)) |result| {
+                    return result;
+                } else |err| {
+                    switch (err) {
+                        error.Unsupported => {},
+                        else => |e| return e,
+                    }
+                }
+            }
+            if (mq.action == .delete) {
+                if (executeMatchDeletePlan(allocator, txn, mq)) |result| {
+                    return result;
+                } else |err| {
+                    switch (err) {
+                        error.Unsupported => {},
+                        else => |e| return e,
+                    }
+                }
+            }
+            if (mq.action == .finish) {
+                if (executeMatchFinishPlan(allocator, txn, mq)) |result| {
+                    return result;
+                } else |err| {
+                    switch (err) {
+                        error.Unsupported => {},
+                        else => |e| return e,
+                    }
+                }
+            }
 
             var rows = std.ArrayList(Binding).empty;
             errdefer deinitBindings(&rows, allocator);
@@ -642,6 +672,41 @@ fn executeMatchInsertPlan(allocator: Allocator, txn: storage.Transaction, mq: Ma
     return mutationResult(rows * inserted_per_row);
 }
 
+fn executeMatchSetPlan(allocator: Allocator, txn: storage.Transaction, mq: MatchQuery) Error!ResultSet {
+    if (mq.action != .set) return error.Unsupported;
+
+    var planner = Planner{ .allocator = allocator };
+    defer planner.deinit();
+    try appendMatchQuery(&planner, mq);
+    const updates_per_row = try appendUpdate(&planner, mq.action.set);
+
+    const rows = try consumePlanRows(allocator, txn, &planner.plan);
+    return mutationResult(rows * updates_per_row);
+}
+
+fn executeMatchDeletePlan(allocator: Allocator, txn: storage.Transaction, mq: MatchQuery) Error!ResultSet {
+    if (mq.action != .delete) return error.Unsupported;
+
+    var planner = Planner{ .allocator = allocator };
+    defer planner.deinit();
+    try appendMatchQuery(&planner, mq);
+    const deletes_per_row = try appendDelete(&planner, mq.action.delete);
+
+    const rows = try consumePlanRows(allocator, txn, &planner.plan);
+    return mutationResult(rows * deletes_per_row);
+}
+
+fn executeMatchFinishPlan(allocator: Allocator, txn: storage.Transaction, mq: MatchQuery) Error!ResultSet {
+    if (mq.action != .finish) return error.Unsupported;
+
+    var planner = Planner{ .allocator = allocator };
+    defer planner.deinit();
+    try appendMatchQuery(&planner, mq);
+
+    const rows = try consumePlanRows(allocator, txn, &planner.plan);
+    return mutationResult(rows);
+}
+
 fn consumePlanRows(allocator: Allocator, txn: storage.Transaction, plan: *const Plan) Error!usize {
     var exec = try executor.Executor.init(plan, txn);
     defer exec.deinit();
@@ -654,6 +719,47 @@ fn consumePlanRows(allocator: Allocator, txn: storage.Transaction, plan: *const 
     }
 
     return rows;
+}
+
+fn appendUpdate(planner: *Planner, sets: []const SetClause) Error!usize {
+    var items = std.ArrayList(Plan.UpdateClause).empty;
+    errdefer {
+        for (items.items) |*item| item.deinit(planner.allocator);
+        items.deinit(planner.allocator);
+    }
+
+    for (sets) |set| {
+        const binding = planner.bindings.get(set.variable) orelse return error.UnknownIdentifier;
+        const key = try planner.allocator.dupe(u8, set.property);
+        errdefer planner.allocator.free(key);
+        var value = try planExpr(planner, set.value);
+        errdefer value.deinit(planner.allocator);
+        try items.append(planner.allocator, .{ .ident = binding.ident, .key = key, .value = value });
+    }
+
+    try planner.plan.ops.append(planner.allocator, .{ .update = .{ .items = items } });
+    items = .empty;
+    return sets.len;
+}
+
+fn appendDelete(planner: *Planner, del: DeleteAction) Error!usize {
+    var idents = std.ArrayList(u16).empty;
+    errdefer idents.deinit(planner.allocator);
+
+    for (del.variables) |name| {
+        const binding = planner.bindings.get(name) orelse continue;
+        try idents.append(planner.allocator, binding.ident);
+    }
+
+    const count = idents.items.len;
+    if (count > 0) {
+        try planner.plan.ops.append(planner.allocator, .{ .delete = .{
+            .detach = del.detach,
+            .idents = idents,
+        } });
+        idents = .empty;
+    }
+    return count;
 }
 
 fn appendMatchQuery(planner: *Planner, mq: MatchQuery) Error!void {
@@ -2340,6 +2446,24 @@ test "match where filters with comparisons and boolean operators" {
         try std.testing.expectEqual(@as(usize, 2), result.rows.len);
         try std.testing.expect(resultContainsString(result, 0, "Ada"));
         try std.testing.expect(resultContainsString(result, 0, "Bert"));
+    }
+}
+
+test "match finish counts matched rows" {
+    var tmp = @import("test_helpers.zig").tmp();
+    defer tmp.cleanup();
+    const store = try tmp.store("test.db");
+    defer store.db.close();
+
+    {
+        var result = try execForTest(store, "INSERT (:Person {name: 'Ada'}), (:Person {name: 'Bert'})");
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(?usize, 2), result.rows_affected);
+    }
+    {
+        var result = try execForTest(store, "MATCH (p:Person) FINISH");
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(?usize, 2), result.rows_affected);
     }
 }
 

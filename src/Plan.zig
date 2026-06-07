@@ -97,6 +97,12 @@ pub fn idents(self: Plan) u16 {
             },
             .insert_node => |n| idents_chk(&ret, .{n.ident}),
             .insert_edge => |n| idents_chk(&ret, .{n.ident}),
+            .update => |n| {
+                for (n.items.items) |c| idents_chk(&ret, .{c.ident});
+            },
+            .delete => |n| {
+                for (n.idents.items) |ident| idents_chk(&ret, .{ident});
+            },
             else => {},
         }
     }
@@ -148,10 +154,10 @@ pub const Operator = union(enum) {
     sort: std.MultiArrayList(SortClause),
     top: u64, // unimplemented
     union_all,
-    // update,
+    update: Update,
     insert_node: InsertNode,
     insert_edge: InsertEdge,
-    // delete,
+    delete: Delete,
     // aggregate,
     // group_aggregate,
 
@@ -183,8 +189,10 @@ pub const Operator = union(enum) {
             .sort => |*n| n.deinit(allocator),
             .top => {},
             .union_all => {},
+            .update => |*n| n.deinit(allocator),
             .insert_node => |*n| n.deinit(allocator),
             .insert_edge => |*n| n.deinit(allocator),
+            .delete => |*n| n.deinit(allocator),
         }
         self.* = undefined;
     }
@@ -212,8 +220,10 @@ pub const Operator = union(enum) {
             .sort => "Sort",
             .top => "Top",
             .union_all => "UnionAll",
+            .update => "Update",
             .insert_node => "InsertNode",
             .insert_edge => "InsertEdge",
+            .delete => "Delete",
         };
         try writer.writeAll(node_name);
         switch (self) {
@@ -304,6 +314,19 @@ pub const Operator = union(enum) {
                 try writer.print(" {}", .{n});
             },
             .union_all => {},
+            .update => |n| {
+                var first = true;
+                for (n.items.items) |c| {
+                    if (first) {
+                        try writer.writeByte(' ');
+                    } else {
+                        try writer.writeAll(", ");
+                    }
+                    try writer.print("%{}.{s} = ", .{ c.ident, c.key });
+                    try c.value.print(writer);
+                    first = false;
+                }
+            },
             .insert_node => |n| {
                 try writer.writeAll(" (");
                 if (n.ident) |i| {
@@ -325,6 +348,12 @@ pub const Operator = union(enum) {
                 try print_properties(writer, n.properties);
                 try writer.writeAll(direction.rightPart());
                 try print_node_spec(writer, n.ident_dest, null);
+            },
+            .delete => |n| {
+                try writer.print(" {s}", .{if (n.detach) "Detach" else "NoDetach"});
+                for (n.idents.items) |ident| {
+                    try writer.print(" %{}", .{ident});
+                }
             },
         }
     }
@@ -491,6 +520,37 @@ pub const InsertEdge = struct {
         for (self.properties.items(.key)) |k| allocator.free(k);
         for (self.properties.items(.value)) |*v| v.deinit(allocator);
         self.properties.deinit(allocator);
+    }
+};
+
+pub const Update = struct {
+    items: std.ArrayList(UpdateClause),
+
+    pub fn deinit(self: *Update, allocator: Allocator) void {
+        for (self.items.items) |*item| item.deinit(allocator);
+        self.items.deinit(allocator);
+    }
+};
+
+pub const UpdateClause = struct {
+    ident: u16,
+    key: []u8,
+    value: Exp,
+
+    pub fn deinit(self: *UpdateClause, allocator: Allocator) void {
+        allocator.free(self.key);
+        self.value.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+pub const Delete = struct {
+    detach: bool,
+    idents: std.ArrayList(u16),
+
+    pub fn deinit(self: *Delete, allocator: Allocator) void {
+        self.idents.deinit(allocator);
+        self.* = undefined;
     }
 };
 
