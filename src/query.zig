@@ -27,6 +27,8 @@ pub const ResultValue = runtime.ResultValue;
 pub const NodeObject = runtime.NodeObject;
 pub const EdgeObject = runtime.EdgeObject;
 pub const ResultProperty = runtime.ResultProperty;
+pub const StatementCursor = runtime.StatementCursor;
+pub const StatementResultKind = runtime.StatementResultKind;
 
 pub const CompiledProgram = planner.CompiledProgram;
 pub const CompiledStatement = planner.CompiledStatement;
@@ -37,24 +39,65 @@ pub fn compile(allocator: Allocator, source: [:0]const u8) Error!CompiledProgram
     return try planner.compile(allocator, source);
 }
 
-pub fn execute(allocator: Allocator, io: std.Io, store: storage.Storage, source: [:0]const u8) Error!ResultSet {
-    _ = io;
-    var compiled = try compile(allocator, source);
-    defer compiled.deinit(allocator);
+/// Owns a compiled query program and transaction while statement results are
+/// pulled. A cursor returned by `nextStatement` borrows both, so callers should
+/// finish and deinit each cursor before advancing or committing the execution.
+pub const Execution = struct {
+    allocator: Allocator,
+    compiled: CompiledProgram,
+    txn: storage.Transaction,
+    next_statement: usize = 0,
+    committed: bool = false,
 
-    var txn = store.txn();
-    defer txn.close();
+    pub fn init(allocator: Allocator, io: std.Io, store: storage.Storage, source: [:0]const u8) Error!Execution {
+        _ = io;
+        var compiled = try compile(allocator, source);
+        errdefer compiled.deinit(allocator);
+        return .{
+            .allocator = allocator,
+            .compiled = compiled,
+            .txn = store.txn(),
+        };
+    }
+
+    pub fn deinit(self: *Execution) void {
+        self.txn.close();
+        self.compiled.deinit(self.allocator);
+        self.* = undefined;
+    }
+
+    pub fn nextStatement(self: *Execution) Error!?StatementCursor {
+        if (self.next_statement >= self.compiled.statements.len) return null;
+        const statement = &self.compiled.statements[self.next_statement];
+        var cursor = try StatementCursor.init(self.allocator, self.txn, statement);
+        errdefer cursor.deinit();
+        self.next_statement += 1;
+        return cursor;
+    }
+
+    pub fn commit(self: *Execution) Error!void {
+        if (self.committed) return;
+        try self.txn.commit();
+        self.committed = true;
+    }
+};
+
+pub fn execute(allocator: Allocator, io: std.Io, store: storage.Storage, source: [:0]const u8) Error!ResultSet {
+    var execution = try Execution.init(allocator, io, store, source);
+    defer execution.deinit();
 
     var result = ResultSet{ .rows_affected = 0 };
     errdefer result.deinit(allocator);
 
-    for (compiled.statements) |*statement| {
-        const next_result = try runtime.executeCompiledStatement(allocator, txn, statement.*);
+    while (try execution.nextStatement()) |cursor_value| {
+        var cursor = cursor_value;
+        defer cursor.deinit();
+        const next_result = try cursor.collect(allocator);
         result.deinit(allocator);
         result = next_result;
     }
 
-    try txn.commit();
+    try execution.commit();
     return result;
 }
 
@@ -98,6 +141,11 @@ fn resultContainsString(result: ResultSet, column: usize, expected: []const u8) 
 fn compileForAllocationFailureTest(allocator: Allocator) !void {
     var compiled = try compile(allocator, "MATCH (p:Person {name: 'Ada'}) WHERE NOT (p.age > 30 AND p.active = true) RETURN p.name ORDER BY p.age DESC LIMIT 1");
     defer compiled.deinit(allocator);
+}
+
+fn executeForAllocationFailureTest(allocator: Allocator, store: storage.Storage) !void {
+    var result = try execute(allocator, std.testing.io, store, "MATCH (p:Person) RETURN p.name ORDER BY p.name");
+    defer result.deinit(allocator);
 }
 
 test "compile match return query plan snapshot" {
@@ -222,6 +270,85 @@ test "execute can use different result and transaction allocators" {
         try std.testing.expectEqual(@as(usize, 1), result.rows.len);
         try std.testing.expectEqualStrings("Ada", result.rows[0].values[0].scalar.string);
     }
+}
+
+test "execution pulls rows without materializing result set" {
+    var tmp = @import("test_helpers.zig").tmp();
+    defer tmp.cleanup();
+    const store = try tmp.store("test.db");
+    defer store.db.close();
+
+    {
+        var result = try execForTest(store, "INSERT (:Person {name: 'Ada'}), (:Person {name: 'Bert'})");
+        defer result.deinit(std.testing.allocator);
+    }
+
+    var execution = try Execution.init(std.testing.allocator, std.testing.io, store, "MATCH (p:Person) RETURN p.name ORDER BY p.name");
+    defer execution.deinit();
+
+    {
+        var cursor = (try execution.nextStatement()).?;
+        defer cursor.deinit();
+        try std.testing.expectEqual(StatementResultKind.rows, cursor.kind());
+        try std.testing.expectEqual(@as(usize, 1), cursor.columns().len);
+        try std.testing.expectEqualStrings("p.name", cursor.columns()[0].name);
+        try std.testing.expectError(error.WrongResultKind, cursor.finishMutation());
+
+        {
+            var row = (try cursor.nextRow()).?;
+            defer row.deinit(std.testing.allocator);
+            try std.testing.expectEqualStrings("Ada", row.values[0].scalar.string);
+        }
+        {
+            var row = (try cursor.nextRow()).?;
+            defer row.deinit(std.testing.allocator);
+            try std.testing.expectEqualStrings("Bert", row.values[0].scalar.string);
+        }
+        try std.testing.expect((try cursor.nextRow()) == null);
+    }
+    try std.testing.expect((try execution.nextStatement()) == null);
+    try execution.commit();
+}
+
+test "execution pulls mutation count" {
+    var tmp = @import("test_helpers.zig").tmp();
+    defer tmp.cleanup();
+    const store = try tmp.store("test.db");
+    defer store.db.close();
+
+    {
+        var result = try execForTest(store, "INSERT (:Person {name: 'Ada'}), (:Person {name: 'Bert'})");
+        defer result.deinit(std.testing.allocator);
+    }
+
+    var execution = try Execution.init(std.testing.allocator, std.testing.io, store, "MATCH (p:Person) FINISH");
+    defer execution.deinit();
+
+    {
+        var cursor = (try execution.nextStatement()).?;
+        defer cursor.deinit();
+        try std.testing.expectEqual(StatementResultKind.mutation, cursor.kind());
+        try std.testing.expectEqual(@as(usize, 0), cursor.columns().len);
+        try std.testing.expectError(error.WrongResultKind, cursor.nextRow());
+        try std.testing.expectEqual(@as(usize, 2), try cursor.finishMutation());
+        try std.testing.expectEqual(@as(usize, 2), try cursor.finishMutation());
+    }
+    try std.testing.expect((try execution.nextStatement()) == null);
+    try execution.commit();
+}
+
+test "execute materializes pulled rows with allocation failure cleanup" {
+    var tmp = @import("test_helpers.zig").tmp();
+    defer tmp.cleanup();
+    const store = try tmp.store("test.db");
+    defer store.db.close();
+
+    {
+        var result = try execForTest(store, "INSERT (:Person {name: 'Ada'}), (:Person {name: 'Bert'})");
+        defer result.deinit(std.testing.allocator);
+    }
+
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, executeForAllocationFailureTest, .{store});
 }
 
 test "insert match return and detach delete" {

@@ -1,4 +1,4 @@
-//! Execute compiled query plans and materialize public query results.
+//! Pull-based execution for compiled query plans plus materialized result sets.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -11,7 +11,7 @@ const Value = types.Value;
 const Plan = @import("../Plan.zig");
 const executor = @import("../executor.zig");
 
-pub const Error = executor.Error || storage.Error || Allocator.Error;
+pub const Error = executor.Error || storage.Error || Allocator.Error || error{WrongResultKind};
 
 pub const ResultSet = struct {
     columns: []const []u8 = &.{},
@@ -124,6 +124,140 @@ pub const ResultProperty = struct {
     }
 };
 
+pub const StatementResultKind = enum {
+    rows,
+    mutation,
+};
+
+pub const StatementCursor = struct {
+    allocator: Allocator,
+    txn: storage.Transaction,
+    inner: union(StatementResultKind) {
+        rows: RowCursor,
+        mutation: MutationCursor,
+    },
+
+    const RowCursor = struct {
+        exec: executor.Executor,
+        columns: []const planner.ResultColumn,
+        done: bool = false,
+    };
+
+    const MutationCursor = struct {
+        exec: executor.Executor,
+        count: planner.MutationCount,
+        rows: usize = 0,
+        rows_affected: ?usize = null,
+    };
+
+    pub fn init(
+        allocator: Allocator,
+        txn: storage.Transaction,
+        statement: *const planner.CompiledStatement,
+    ) Error!StatementCursor {
+        const exec = try executor.Executor.init(&statement.plan, txn);
+        return .{
+            .allocator = allocator,
+            .txn = txn,
+            .inner = switch (statement.result) {
+                .rows => |result_columns| .{ .rows = .{ .exec = exec, .columns = result_columns } },
+                .mutation => |count| .{ .mutation = .{ .exec = exec, .count = count } },
+            },
+        };
+    }
+
+    pub fn deinit(self: *StatementCursor) void {
+        switch (self.inner) {
+            .rows => |*rows| rows.exec.deinit(),
+            .mutation => |*mutation| mutation.exec.deinit(),
+        }
+        self.* = undefined;
+    }
+
+    pub fn kind(self: StatementCursor) StatementResultKind {
+        return std.meta.activeTag(self.inner);
+    }
+
+    pub fn columns(self: StatementCursor) []const planner.ResultColumn {
+        return switch (self.inner) {
+            .rows => |rows| rows.columns,
+            .mutation => &.{},
+        };
+    }
+
+    pub fn nextRow(self: *StatementCursor) Error!?Row {
+        switch (self.inner) {
+            .rows => |*rows| {
+                if (rows.done) return null;
+
+                var result = (try rows.exec.run()) orelse {
+                    rows.done = true;
+                    return null;
+                };
+                defer result.deinit(self.txn.allocator);
+                return try rowFromCompiledResult(self.allocator, self.txn, result, rows.columns);
+            },
+            .mutation => return error.WrongResultKind,
+        }
+    }
+
+    pub fn finishMutation(self: *StatementCursor) Error!usize {
+        switch (self.inner) {
+            .rows => return error.WrongResultKind,
+            .mutation => |*mutation| {
+                if (mutation.rows_affected) |rows_affected| return rows_affected;
+
+                while (try mutation.exec.run()) |result_value| {
+                    var result = result_value;
+                    result.deinit(self.txn.allocator);
+                    mutation.rows += 1;
+                }
+
+                const rows_affected = switch (mutation.count) {
+                    .mutations => mutation.exec.mutations,
+                    .rows => mutation.rows,
+                };
+                mutation.rows_affected = rows_affected;
+                return rows_affected;
+            },
+        }
+    }
+
+    pub fn collect(self: *StatementCursor, allocator: Allocator) Error!ResultSet {
+        switch (self.kind()) {
+            .rows => {
+                var rows = std.ArrayList(Row).empty;
+                errdefer deinitRowList(&rows, allocator);
+                while (try self.nextRow()) |row| {
+                    var owned_row: ?Row = row;
+                    errdefer if (owned_row) |*r| r.deinit(allocator);
+                    try rows.append(allocator, owned_row.?);
+                    owned_row = null;
+                }
+
+                const owned_rows = try rows.toOwnedSlice(allocator);
+                rows = .empty;
+                errdefer {
+                    for (owned_rows) |*row| row.deinit(allocator);
+                    allocator.free(owned_rows);
+                }
+                const names = try resultColumnNames(allocator, self.columns());
+                errdefer {
+                    for (names) |name| allocator.free(name);
+                    allocator.free(names);
+                }
+
+                return .{
+                    .columns = names,
+                    .rows = owned_rows,
+                    .rows_affected = null,
+                };
+            },
+            .mutation => return mutationResult(try self.finishMutation()),
+        }
+    }
+};
+
 fn writeJsonValue(json: *std.json.Stringify, value: ResultValue) !void {
     switch (value) {
         .scalar => |scalar| try writeJsonScalar(json, scalar),
@@ -190,66 +324,15 @@ fn writeJsonProperties(json: *std.json.Stringify, properties: []const ResultProp
 pub fn executeCompiledStatement(
     allocator: Allocator,
     txn: storage.Transaction,
-    statement: planner.CompiledStatement,
+    statement: *const planner.CompiledStatement,
 ) Error!ResultSet {
-    return switch (statement.result) {
-        .rows => |columns| try executeCompiledRows(allocator, txn, &statement.plan, columns),
-        .mutation => |count| blk: {
-            const stats = try consumePlanRows(txn, &statement.plan);
-            break :blk mutationResult(switch (count) {
-                .mutations => stats.mutations,
-                .rows => stats.rows,
-            });
-        },
-    };
+    var cursor = try StatementCursor.init(allocator, txn, statement);
+    defer cursor.deinit();
+    return try cursor.collect(allocator);
 }
 
 fn mutationResult(rows_affected: usize) ResultSet {
     return .{ .columns = &.{}, .rows = &.{}, .rows_affected = rows_affected };
-}
-
-const ConsumedPlanStats = struct {
-    rows: usize = 0,
-    mutations: usize = 0,
-};
-
-fn consumePlanRows(txn: storage.Transaction, plan: *const Plan) Error!ConsumedPlanStats {
-    var exec = try executor.Executor.init(plan, txn);
-    defer exec.deinit();
-
-    var stats = ConsumedPlanStats{};
-    while (try exec.run()) |result_value| {
-        var result = result_value;
-        result.deinit(txn.allocator);
-        stats.rows += 1;
-    }
-    stats.mutations = exec.mutations;
-
-    return stats;
-}
-
-fn executeCompiledRows(
-    allocator: Allocator,
-    txn: storage.Transaction,
-    plan: *const Plan,
-    columns: []const planner.ResultColumn,
-) Error!ResultSet {
-    var exec = try executor.Executor.init(plan, txn);
-    defer exec.deinit();
-
-    var rows = std.ArrayList(Row).empty;
-    errdefer deinitRowList(&rows, allocator);
-    while (try exec.run()) |result_value| {
-        var result = result_value;
-        defer result.deinit(txn.allocator);
-        try rows.append(allocator, try rowFromCompiledResult(allocator, txn, result, columns));
-    }
-
-    return .{
-        .columns = try resultColumnNames(allocator, columns),
-        .rows = try rows.toOwnedSlice(allocator),
-        .rows_affected = null,
-    };
 }
 
 fn rowFromCompiledResult(
@@ -264,8 +347,9 @@ fn rowFromCompiledResult(
     errdefer for (values) |*value| value.deinit(allocator);
 
     for (columns, result.values, 0..) |column, value, i| {
+        const next_value = try resultValueFromCompiledValue(allocator, txn, column, value);
         values[i].deinit(allocator);
-        values[i] = try resultValueFromCompiledValue(allocator, txn, column, value);
+        values[i] = next_value;
     }
     return .{ .values = values };
 }
