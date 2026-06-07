@@ -234,7 +234,7 @@ fn executeStatement(allocator: Allocator, io: std.Io, txn: storage.Transaction, 
             errdefer deinitRowList(&rows, allocator);
             var binding = Binding{};
             defer binding.deinit(allocator);
-            if (ret.limit == null or ret.limit.? > 0) {
+            if (ret.skip == 0 and (ret.limit == null or ret.limit.? > 0)) {
                 try appendReturnRow(allocator, txn, &rows, binding, ret.items);
             }
             return .{
@@ -267,7 +267,12 @@ fn executeStatement(allocator: Allocator, io: std.Io, txn: storage.Transaction, 
                 .ret => |ret| {
                     var out_rows = std.ArrayList(Row).empty;
                     errdefer deinitRowList(&out_rows, allocator);
+                    var skipped: usize = 0;
                     for (rows.items) |binding| {
+                        if (skipped < ret.skip) {
+                            skipped += 1;
+                            continue;
+                        }
                         if (ret.limit) |limit| {
                             if (out_rows.items.len >= limit) break;
                         }
@@ -368,6 +373,7 @@ const MatchAction = union(enum) {
 
 const ReturnClause = struct {
     items: []ReturnItem,
+    skip: usize = 0,
     limit: ?usize = null,
 
     fn deinit(self: *ReturnClause, allocator: Allocator) void {
@@ -637,8 +643,17 @@ const Parser = struct {
     fn parseReturnClause(p: *Parser) Error!ReturnClause {
         const items = try p.parseReturnItems();
         errdefer deinitReturnItems(items, p.allocator);
-        const limit = if (p.eat(.keyword_limit)) try p.parseLimit() else null;
-        return .{ .items = items, .limit = limit };
+        var ret = ReturnClause{ .items = items };
+        while (true) {
+            if (p.eat(.keyword_skip)) {
+                ret.skip = try p.parseCount();
+            } else if (p.eat(.keyword_limit)) {
+                ret.limit = try p.parseCount();
+            } else {
+                break;
+            }
+        }
+        return ret;
     }
 
     fn parseReturnItems(p: *Parser) Error![]ReturnItem {
@@ -647,7 +662,7 @@ const Parser = struct {
             for (items.items) |*item| item.deinit(p.allocator);
             items.deinit(p.allocator);
         }
-        while (!p.at(.keyword_limit) and !p.at(.semicolon) and !p.at(.eof)) {
+        while (!p.at(.keyword_skip) and !p.at(.keyword_limit) and !p.at(.semicolon) and !p.at(.eof)) {
             var expr = try p.parseExpr(0);
             errdefer expr.deinit(p.allocator);
             const alias = if (p.eat(.keyword_as)) try p.expectName() else null;
@@ -658,7 +673,7 @@ const Parser = struct {
         return try items.toOwnedSlice(p.allocator);
     }
 
-    fn parseLimit(p: *Parser) Error!usize {
+    fn parseCount(p: *Parser) Error!usize {
         const tok = p.next();
         if (tok.tag != .number_literal) return error.ParseError;
         const s = p.slice(tok);
@@ -1645,6 +1660,19 @@ test "return limit zero" {
     try std.testing.expectEqualStrings("expr", result.columns[0]);
 }
 
+test "return skip one" {
+    var tmp = @import("test_helpers.zig").tmp();
+    defer tmp.cleanup();
+    const store = try tmp.store("test.db");
+    defer store.db.close();
+
+    var result = try execForTest(store, "RETURN 100 * 3 SKIP 1");
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 0), result.rows.len);
+    try std.testing.expectEqual(@as(usize, 1), result.columns.len);
+    try std.testing.expectEqualStrings("expr", result.columns[0]);
+}
+
 test "insert match return and detach delete" {
     var tmp = @import("test_helpers.zig").tmp();
     defer tmp.cleanup();
@@ -1700,6 +1728,26 @@ test "match return limit" {
         var result = try execForTest(store, "MATCH (p:Person) RETURN p.name LIMIT 2");
         defer result.deinit(std.testing.allocator);
         try std.testing.expectEqual(@as(usize, 2), result.rows.len);
+        try std.testing.expectEqual(@as(usize, 1), result.columns.len);
+        try std.testing.expectEqualStrings("p.name", result.columns[0]);
+    }
+}
+
+test "match return skip and limit" {
+    var tmp = @import("test_helpers.zig").tmp();
+    defer tmp.cleanup();
+    const store = try tmp.store("test.db");
+    defer store.db.close();
+
+    {
+        var result = try execForTest(store, "INSERT (:Person {name: 'Ada'}), (:Person {name: 'Bert'}), (:Person {name: 'Cara'})");
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(?usize, 3), result.rows_affected);
+    }
+    {
+        var result = try execForTest(store, "MATCH (p:Person) RETURN p.name SKIP 1 LIMIT 1");
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 1), result.rows.len);
         try std.testing.expectEqual(@as(usize, 1), result.columns.len);
         try std.testing.expectEqualStrings("p.name", result.columns[0]);
     }
