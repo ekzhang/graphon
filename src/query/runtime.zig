@@ -130,7 +130,7 @@ pub const StatementResultKind = enum {
 };
 
 pub const StatementCursor = struct {
-    allocator: Allocator,
+    result_allocator: Allocator,
     txn: storage.Transaction,
     inner: union(StatementResultKind) {
         rows: RowCursor,
@@ -151,13 +151,13 @@ pub const StatementCursor = struct {
     };
 
     pub fn init(
-        allocator: Allocator,
+        result_allocator: Allocator,
         txn: storage.Transaction,
         statement: *const planner.CompiledStatement,
     ) Error!StatementCursor {
         const exec = try executor.Executor.init(&statement.plan, txn);
         return .{
-            .allocator = allocator,
+            .result_allocator = result_allocator,
             .txn = txn,
             .inner = switch (statement.result) {
                 .rows => |result_columns| .{ .rows = .{ .exec = exec, .columns = result_columns } },
@@ -195,7 +195,7 @@ pub const StatementCursor = struct {
                     return null;
                 };
                 defer result.deinit(self.txn.allocator);
-                return try rowFromCompiledResult(self.allocator, self.txn, result, rows.columns);
+                return try rowFromCompiledResult(self.result_allocator, self.txn, result, rows.columns);
             },
             .mutation => return error.WrongResultKind,
         }
@@ -223,7 +223,8 @@ pub const StatementCursor = struct {
         }
     }
 
-    pub fn collect(self: *StatementCursor, allocator: Allocator) Error!ResultSet {
+    pub fn collect(self: *StatementCursor) Error!ResultSet {
+        const allocator = self.result_allocator;
         switch (self.kind()) {
             .rows => {
                 var rows = std.ArrayList(Row).empty;
@@ -322,13 +323,13 @@ fn writeJsonProperties(json: *std.json.Stringify, properties: []const ResultProp
 }
 
 pub fn executeCompiledStatement(
-    allocator: Allocator,
+    result_allocator: Allocator,
     txn: storage.Transaction,
     statement: *const planner.CompiledStatement,
 ) Error!ResultSet {
-    var cursor = try StatementCursor.init(allocator, txn, statement);
+    var cursor = try StatementCursor.init(result_allocator, txn, statement);
     defer cursor.deinit();
-    return try cursor.collect(allocator);
+    return try cursor.collect();
 }
 
 fn mutationResult(rows_affected: usize) ResultSet {

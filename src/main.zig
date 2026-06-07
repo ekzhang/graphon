@@ -106,7 +106,7 @@ fn executeLocal(allocator: std.mem.Allocator, io: std.Io, db_path: []const u8, s
     const db = try rocksdb.DB.open(db_path);
     defer db.close();
     const store = storage.Storage{ .db = db, .allocator = allocator, .io = io };
-    return try query.execute(allocator, io, store, source);
+    return try query.execute(allocator, store, source);
 }
 
 fn localShell(allocator: std.mem.Allocator, io: std.Io, db_path: []const u8) !void {
@@ -172,11 +172,11 @@ fn handleConnection(allocator: std.mem.Allocator, io: std.Io, store: storage.Sto
             error.HttpConnectionClosing => return,
             else => return err,
         };
-        try handleRequest(allocator, io, store, &request);
+        try handleRequest(allocator, store, &request);
     }
 }
 
-fn handleRequest(allocator: std.mem.Allocator, io: std.Io, store: storage.Storage, request: *std.http.Server.Request) !void {
+fn handleRequest(allocator: std.mem.Allocator, store: storage.Storage, request: *std.http.Server.Request) !void {
     if (request.head.method != .GET) {
         try request.respond("{\"error\":\"only GET is supported\"}", .{
             .status = .method_not_allowed,
@@ -201,7 +201,7 @@ fn handleRequest(allocator: std.mem.Allocator, io: std.Io, store: storage.Storag
     const gql = try allocator.dupeZ(u8, raw_query);
     defer allocator.free(gql);
 
-    var result = query.execute(allocator, io, store, gql) catch |err| {
+    var result = query.execute(allocator, store, gql) catch |err| {
         var body = std.Io.Writer.Allocating.init(allocator);
         defer body.deinit();
         try body.writer.print("{{\"error\":\"{s}\"}}", .{@errorName(err)});

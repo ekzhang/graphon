@@ -43,18 +43,17 @@ pub fn compile(allocator: Allocator, source: [:0]const u8) Error!CompiledProgram
 /// pulled. A cursor returned by `nextStatement` borrows both, so callers should
 /// finish and deinit each cursor before advancing or committing the execution.
 pub const Execution = struct {
-    allocator: Allocator,
+    result_allocator: Allocator,
     compiled: CompiledProgram,
     txn: storage.Transaction,
     next_statement: usize = 0,
     committed: bool = false,
 
-    pub fn init(allocator: Allocator, io: std.Io, store: storage.Storage, source: [:0]const u8) Error!Execution {
-        _ = io;
-        var compiled = try compile(allocator, source);
-        errdefer compiled.deinit(allocator);
+    pub fn init(result_allocator: Allocator, store: storage.Storage, source: [:0]const u8) Error!Execution {
+        var compiled = try compile(result_allocator, source);
+        errdefer compiled.deinit(result_allocator);
         return .{
-            .allocator = allocator,
+            .result_allocator = result_allocator,
             .compiled = compiled,
             .txn = store.txn(),
         };
@@ -62,14 +61,14 @@ pub const Execution = struct {
 
     pub fn deinit(self: *Execution) void {
         self.txn.close();
-        self.compiled.deinit(self.allocator);
+        self.compiled.deinit(self.result_allocator);
         self.* = undefined;
     }
 
     pub fn nextStatement(self: *Execution) Error!?StatementCursor {
         if (self.next_statement >= self.compiled.statements.len) return null;
         const statement = &self.compiled.statements[self.next_statement];
-        var cursor = try StatementCursor.init(self.allocator, self.txn, statement);
+        var cursor = try StatementCursor.init(self.result_allocator, self.txn, statement);
         errdefer cursor.deinit();
         self.next_statement += 1;
         return cursor;
@@ -82,18 +81,18 @@ pub const Execution = struct {
     }
 };
 
-pub fn execute(allocator: Allocator, io: std.Io, store: storage.Storage, source: [:0]const u8) Error!ResultSet {
-    var execution = try Execution.init(allocator, io, store, source);
+pub fn execute(result_allocator: Allocator, store: storage.Storage, source: [:0]const u8) Error!ResultSet {
+    var execution = try Execution.init(result_allocator, store, source);
     defer execution.deinit();
 
     var result = ResultSet{ .rows_affected = 0 };
-    errdefer result.deinit(allocator);
+    errdefer result.deinit(result_allocator);
 
     while (try execution.nextStatement()) |cursor_value| {
         var cursor = cursor_value;
         defer cursor.deinit();
-        const next_result = try cursor.collect(allocator);
-        result.deinit(allocator);
+        const next_result = try cursor.collect();
+        result.deinit(result_allocator);
         result = next_result;
     }
 
@@ -107,7 +106,7 @@ const Snap = @import("vendor/snaptest.zig").Snap;
 const snap = Snap.snap;
 
 fn execForTest(store: storage.Storage, source: [:0]const u8) !ResultSet {
-    return try execute(std.testing.allocator, std.testing.io, store, source);
+    return try execute(std.testing.allocator, store, source);
 }
 
 fn checkQueryPlanSnapshot(source: [:0]const u8, want: Snap) !void {
@@ -144,7 +143,7 @@ fn compileForAllocationFailureTest(allocator: Allocator) !void {
 }
 
 fn executeForAllocationFailureTest(allocator: Allocator, store: storage.Storage) !void {
-    var result = try execute(allocator, std.testing.io, store, "MATCH (p:Person) RETURN p.name ORDER BY p.name");
+    var result = try execute(allocator, store, "MATCH (p:Person) RETURN p.name ORDER BY p.name");
     defer result.deinit(allocator);
 }
 
@@ -260,12 +259,12 @@ test "execute can use different result and transaction allocators" {
     };
 
     {
-        var result = try execute(std.testing.allocator, std.testing.io, store, "INSERT (:Person {name: 'Ada'})");
+        var result = try execute(std.testing.allocator, store, "INSERT (:Person {name: 'Ada'})");
         defer result.deinit(std.testing.allocator);
         try std.testing.expectEqual(@as(?usize, 1), result.rows_affected);
     }
     {
-        var result = try execute(std.testing.allocator, std.testing.io, store, "MATCH (p:Person) RETURN p.name");
+        var result = try execute(std.testing.allocator, store, "MATCH (p:Person) RETURN p.name");
         defer result.deinit(std.testing.allocator);
         try std.testing.expectEqual(@as(usize, 1), result.rows.len);
         try std.testing.expectEqualStrings("Ada", result.rows[0].values[0].scalar.string);
@@ -283,7 +282,7 @@ test "execution pulls rows without materializing result set" {
         defer result.deinit(std.testing.allocator);
     }
 
-    var execution = try Execution.init(std.testing.allocator, std.testing.io, store, "MATCH (p:Person) RETURN p.name ORDER BY p.name");
+    var execution = try Execution.init(std.testing.allocator, store, "MATCH (p:Person) RETURN p.name ORDER BY p.name");
     defer execution.deinit();
 
     {
@@ -321,7 +320,7 @@ test "execution pulls mutation count" {
         defer result.deinit(std.testing.allocator);
     }
 
-    var execution = try Execution.init(std.testing.allocator, std.testing.io, store, "MATCH (p:Person) FINISH");
+    var execution = try Execution.init(std.testing.allocator, store, "MATCH (p:Person) FINISH");
     defer execution.deinit();
 
     {
