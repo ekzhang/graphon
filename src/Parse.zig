@@ -14,18 +14,13 @@ const EdgeDirection = @import("types.zig").EdgeDirection;
 
 const Parse = @This();
 
+/// An error occurred while parsing.
 pub const Error = error{ParseError} || Allocator.Error;
-
-const Lexeme = struct {
-    tag: Token.Tag,
-    start: usize,
-    end: usize,
-};
 
 gpa: Allocator,
 source: [:0]const u8,
-tokens: []Lexeme = &.{},
-i: usize = 0,
+tokens: Ast.TokenList.Slice = .empty,
+tok_i: u32 = 0,
 
 pub fn parse(p: *Parse) Error!Ast.Program {
     p.deinitTokens();
@@ -51,24 +46,25 @@ pub fn parse(p: *Parse) Error!Ast.Program {
 }
 
 fn tokenize(p: *Parse) Error!void {
-    var toks = std.ArrayList(Lexeme).empty;
+    var toks: Ast.TokenList = .empty;
     errdefer toks.deinit(p.gpa);
     var t = tokenizer.Tokenizer.init(p.source);
     while (true) {
         const token = t.next();
         if (token.tag == .invalid) return error.ParseError;
-        try toks.append(p.gpa, .{ .tag = token.tag, .start = token.loc.start, .end = token.loc.end });
+        const start = std.math.cast(Ast.ByteOffset, token.loc.start) orelse return error.ParseError;
+        try toks.append(p.gpa, .{ .tag = token.tag, .start = start });
         if (token.tag == .eof) break;
     }
 
-    p.tokens = try toks.toOwnedSlice(p.gpa);
-    p.i = 0;
+    p.tokens = toks.toOwnedSlice();
+    p.tok_i = 0;
 }
 
 fn deinitTokens(p: *Parse) void {
-    if (p.tokens.len > 0) p.gpa.free(p.tokens);
-    p.tokens = &.{};
-    p.i = 0;
+    if (p.tokens.capacity > 0) p.tokens.deinit(p.gpa);
+    p.tokens = .empty;
+    p.tok_i = 0;
 }
 
 fn parseStatement(p: *Parse) Error!Ast.Statement {
@@ -197,7 +193,7 @@ fn parseReturnItems(p: *Parse) Error![]Ast.ReturnItem {
 
 fn parseCount(p: *Parse) Error!usize {
     const tok = p.next();
-    if (tok.tag != .number_literal) return error.ParseError;
+    if (p.tokenTag(tok) != .number_literal) return error.ParseError;
     const s = p.slice(tok);
     if (std.mem.indexOfScalar(u8, s, '.') != null) return error.ParseError;
     return std.fmt.parseInt(usize, s, 10) catch return error.ParseError;
@@ -382,7 +378,7 @@ fn parseUnary(p: *Parse) Error!Ast.Expr {
 
 fn parsePrimary(p: *Parse) Error!Ast.Expr {
     const tok = p.next();
-    switch (tok.tag) {
+    switch (p.tokenTag(tok)) {
         .number_literal => {
             const s = p.slice(tok);
             if (std.mem.indexOfScalar(u8, s, '.') != null) {
@@ -400,7 +396,7 @@ fn parsePrimary(p: *Parse) Error!Ast.Expr {
             return expr;
         },
         else => {
-            if (!isNameToken(tok.tag)) return error.ParseError;
+            if (!isNameToken(p.tokenTag(tok))) return error.ParseError;
             const name = p.slice(tok);
             if (p.eat(.period)) {
                 return .{ .property = .{ .variable = name, .property = try p.expectName() } };
@@ -469,7 +465,7 @@ fn atKeywordLike(p: *Parse, tag: Token.Tag) bool {
 
 fn eat(p: *Parse, tag: Token.Tag) bool {
     if (p.peek() == tag) {
-        p.i += 1;
+        p.tok_i += 1;
         return true;
     }
     return false;
@@ -481,22 +477,36 @@ fn expect(p: *Parse, tag: Token.Tag) Error!void {
 
 fn expectName(p: *Parse) Error![]const u8 {
     const tok = p.next();
-    if (!isNameToken(tok.tag)) return error.ParseError;
+    if (!isNameToken(p.tokenTag(tok))) return error.ParseError;
     return p.slice(tok);
 }
 
 fn peek(p: *Parse) Token.Tag {
-    return p.tokens[p.i].tag;
+    return p.tokenTag(p.tok_i);
 }
 
-fn next(p: *Parse) Lexeme {
-    const tok = p.tokens[p.i];
-    p.i += 1;
+fn next(p: *Parse) u32 {
+    const tok = p.tok_i;
+    p.tok_i += 1;
     return tok;
 }
 
-fn slice(p: *Parse, tok: Lexeme) []const u8 {
-    return p.source[tok.start..tok.end];
+fn tokenTag(p: *Parse, tok: u32) Token.Tag {
+    return p.tokens.items(.tag)[@intCast(tok)];
+}
+
+fn tokenStart(p: *Parse, tok: u32) usize {
+    return p.tokens.items(.start)[@intCast(tok)];
+}
+
+fn slice(p: *Parse, tok: u32) []const u8 {
+    var t = tokenizer.Tokenizer{
+        .buffer = p.source,
+        .index = p.tokenStart(tok),
+    };
+    const token = t.next();
+    std.debug.assert(token.tag == p.tokenTag(tok));
+    return p.source[token.loc.start..token.loc.end];
 }
 
 fn binaryInfo(tag: Token.Tag) ?struct { op: Plan.Binop, prec: u8 } {

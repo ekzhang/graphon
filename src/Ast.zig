@@ -6,15 +6,25 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
+const Parse = @import("Parse.zig");
 const Plan = @import("Plan.zig");
+const Token = @import("tokenizer.zig").Token;
 const types = @import("types.zig");
 const EdgeDirection = types.EdgeDirection;
 const Value = types.Value;
 
-pub const ParseError = @import("Parse.zig").Error;
+pub const ByteOffset = u32;
 
+/// Compact list of tokens after lexical analysis, with offsets into source.
+pub const TokenList = std.MultiArrayList(struct {
+    tag: Token.Tag,
+    start: ByteOffset,
+});
+
+pub const ParseError = Parse.Error;
+
+/// Parse a GQL query into an AST (list of statements).
 pub fn parse(gpa: Allocator, source: [:0]const u8) ParseError!Program {
-    const Parse = @import("Parse.zig");
     var parser: Parse = .{ .gpa = gpa, .source = source };
     return try parser.parse();
 }
