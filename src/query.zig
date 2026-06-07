@@ -1,7 +1,7 @@
 //! Minimal GQL parser and execution layer for the functional Graphon MVP.
 //!
 //! This module intentionally implements a small, useful subset of GQL while the
-//! full ISO grammar in `Parse.zig` is still being built out. Supported today:
+//! full ISO grammar is still being built out. Supported today:
 //!
 //! * `RETURN` scalar expressions (`+`, `-`, `*`, `=`, `<>`) and properties.
 //! * `INSERT` node/edge path patterns.
@@ -12,30 +12,22 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const tokenizer = @import("tokenizer.zig");
-const Token = tokenizer.Token;
 const storage = @import("storage.zig");
 const types = @import("types.zig");
 const ElementId = types.ElementId;
-const EdgeDirection = types.EdgeDirection;
 const Value = types.Value;
+const Ast = @import("Ast.zig");
+const Parse = @import("Parse.zig");
 const Plan = @import("Plan.zig");
 const executor = @import("executor.zig");
 
-pub const Error = error{
-    ParseError,
+pub const Error = Parse.Error || error{
     Unsupported,
     UnknownIdentifier,
     WrongType,
     InvalidRequest,
     MalformedPlan,
-} || Allocator.Error || storage.Error;
-
-const Lexeme = struct {
-    tag: Token.Tag,
-    start: usize,
-    end: usize,
-};
+} || storage.Error;
 
 pub const ResultSet = struct {
     columns: []const []u8 = &.{},
@@ -259,7 +251,7 @@ fn writeJsonProperties(json: *std.json.Stringify, properties: []const ResultProp
 }
 
 pub fn compile(allocator: Allocator, source: [:0]const u8) Error!CompiledProgram {
-    var parsed = try Parser.parse(allocator, source);
+    var parsed = try Parse.parse(allocator, source);
     defer parsed.deinit(allocator);
 
     var statements = std.ArrayList(CompiledStatement).empty;
@@ -294,7 +286,7 @@ pub fn execute(allocator: Allocator, io: std.Io, store: storage.Storage, source:
     return result;
 }
 
-fn compileStatement(allocator: Allocator, statement: Statement) Error!CompiledStatement {
+fn compileStatement(allocator: Allocator, statement: Ast.Statement) Error!CompiledStatement {
     var planner = Planner{ .allocator = allocator };
     defer planner.deinit();
 
@@ -332,229 +324,6 @@ fn executeCompiledStatement(
 
 fn mutationResult(rows_affected: usize) ResultSet {
     return .{ .columns = &.{}, .rows = &.{}, .rows_affected = rows_affected };
-}
-
-// ------------------------------- AST --------------------------------------
-
-const Statement = union(enum) {
-    return_only: ReturnClause,
-    insert: []PathPattern,
-    match_query: MatchQuery,
-
-    fn deinit(self: *Statement, allocator: Allocator) void {
-        switch (self.*) {
-            .return_only => |*ret| ret.deinit(allocator),
-            .insert => |patterns| deinitPatterns(patterns, allocator),
-            .match_query => |*mq| mq.deinit(allocator),
-        }
-        self.* = undefined;
-    }
-};
-
-const MatchQuery = struct {
-    patterns: []PathPattern,
-    where: ?Expr = null,
-    action: MatchAction,
-
-    fn deinit(self: *MatchQuery, allocator: Allocator) void {
-        deinitPatterns(self.patterns, allocator);
-        if (self.where) |*where| where.deinit(allocator);
-        self.action.deinit(allocator);
-        self.* = undefined;
-    }
-};
-
-const MatchAction = union(enum) {
-    ret: ReturnClause,
-    insert: []PathPattern,
-    delete: DeleteAction,
-    set: []SetClause,
-    finish,
-
-    fn deinit(self: *MatchAction, allocator: Allocator) void {
-        switch (self.*) {
-            .ret => |*ret| ret.deinit(allocator),
-            .insert => |patterns| deinitPatterns(patterns, allocator),
-            .delete => |del| allocator.free(del.variables),
-            .set => |sets| {
-                for (sets) |*s| s.deinit(allocator);
-                allocator.free(sets);
-            },
-            .finish => {},
-        }
-        self.* = undefined;
-    }
-};
-
-const ReturnClause = struct {
-    items: []ReturnItem,
-    order_by: []SortItem = &.{},
-    skip: usize = 0,
-    limit: ?usize = null,
-
-    fn deinit(self: *ReturnClause, allocator: Allocator) void {
-        deinitReturnItems(self.items, allocator);
-        deinitSortItems(self.order_by, allocator);
-        self.* = undefined;
-    }
-};
-
-const SortItem = struct {
-    expr: Expr,
-    desc: bool = false,
-
-    fn deinit(self: *SortItem, allocator: Allocator) void {
-        self.expr.deinit(allocator);
-        self.* = undefined;
-    }
-};
-
-const DeleteAction = struct {
-    detach: bool,
-    variables: []const []const u8,
-};
-
-const SetClause = struct {
-    variable: []const u8,
-    property: []const u8,
-    value: Expr,
-
-    fn deinit(self: *SetClause, allocator: Allocator) void {
-        self.value.deinit(allocator);
-        self.* = undefined;
-    }
-};
-
-const ReturnItem = struct {
-    expr: Expr,
-    alias: ?[]const u8 = null,
-
-    fn deinit(self: *ReturnItem, allocator: Allocator) void {
-        self.expr.deinit(allocator);
-        self.* = undefined;
-    }
-};
-
-const PathPattern = struct {
-    start: NodePattern,
-    segments: []PathSegment,
-
-    fn deinit(self: *PathPattern, allocator: Allocator) void {
-        self.start.deinit(allocator);
-        for (self.segments) |*segment| segment.deinit(allocator);
-        allocator.free(self.segments);
-        self.* = undefined;
-    }
-};
-
-const PathSegment = struct {
-    edge: EdgePattern,
-    node: NodePattern,
-
-    fn deinit(self: *PathSegment, allocator: Allocator) void {
-        self.edge.deinit(allocator);
-        self.node.deinit(allocator);
-        self.* = undefined;
-    }
-};
-
-const NodePattern = struct {
-    variable: ?[]const u8 = null,
-    label: ?[]const u8 = null,
-    properties: []Property = &.{},
-
-    fn deinit(self: *NodePattern, allocator: Allocator) void {
-        deinitProperties(self.properties, allocator);
-        self.* = undefined;
-    }
-};
-
-const EdgePattern = struct {
-    variable: ?[]const u8 = null,
-    label: ?[]const u8 = null,
-    properties: []Property = &.{},
-    direction: EdgeDirection,
-
-    fn deinit(self: *EdgePattern, allocator: Allocator) void {
-        deinitProperties(self.properties, allocator);
-        self.* = undefined;
-    }
-};
-
-const Property = struct {
-    key: []const u8,
-    value: Expr,
-
-    fn deinit(self: *Property, allocator: Allocator) void {
-        self.value.deinit(allocator);
-        self.* = undefined;
-    }
-};
-
-const Expr = union(enum) {
-    literal: Value,
-    variable: []const u8,
-    property: struct { variable: []const u8, property: []const u8 },
-    unary: *UnaryExpr,
-    binary: *BinaryExpr,
-
-    fn deinit(self: *Expr, allocator: Allocator) void {
-        switch (self.*) {
-            .literal => |*v| v.deinit(allocator),
-            .unary => |u| {
-                u.deinit(allocator);
-                allocator.destroy(u);
-            },
-            .binary => |b| {
-                b.deinit(allocator);
-                allocator.destroy(b);
-            },
-            .variable, .property => {},
-        }
-        self.* = undefined;
-    }
-};
-
-const UnaryExpr = struct {
-    op: Plan.UnaryOp,
-    operand: Expr,
-
-    fn deinit(self: *UnaryExpr, allocator: Allocator) void {
-        self.operand.deinit(allocator);
-        self.* = undefined;
-    }
-};
-
-const BinaryExpr = struct {
-    op: Plan.Binop,
-    left: Expr,
-    right: Expr,
-
-    fn deinit(self: *BinaryExpr, allocator: Allocator) void {
-        self.left.deinit(allocator);
-        self.right.deinit(allocator);
-        self.* = undefined;
-    }
-};
-
-fn deinitPatterns(patterns: []PathPattern, allocator: Allocator) void {
-    for (patterns) |*pattern| pattern.deinit(allocator);
-    allocator.free(patterns);
-}
-
-fn deinitReturnItems(items: []ReturnItem, allocator: Allocator) void {
-    for (items) |*item| item.deinit(allocator);
-    allocator.free(items);
-}
-
-fn deinitSortItems(items: []SortItem, allocator: Allocator) void {
-    for (items) |*item| item.deinit(allocator);
-    if (items.len > 0) allocator.free(items);
-}
-
-fn deinitProperties(properties: []Property, allocator: Allocator) void {
-    for (properties) |*property| property.deinit(allocator);
-    allocator.free(properties);
 }
 
 // ------------------------------ Planner -----------------------------------
@@ -595,7 +364,7 @@ const Planner = struct {
     }
 };
 
-fn appendReturnResult(allocator: Allocator, planner: *Planner, ret: ReturnClause) Error!CompiledStatement {
+fn appendReturnResult(allocator: Allocator, planner: *Planner, ret: Ast.ReturnClause) Error!CompiledStatement {
     try appendReturnProjection(planner, ret);
     try appendOrderBy(planner, ret);
     try appendSkipLimit(planner, ret);
@@ -615,7 +384,7 @@ fn appendMutationResult(planner: *Planner, affected_per_row: usize) CompiledStat
     };
 }
 
-fn appendInsertPatterns(planner: *Planner, patterns: []PathPattern) Error!usize {
+fn appendInsertPatterns(planner: *Planner, patterns: []Ast.PathPattern) Error!usize {
     var inserted_per_row: usize = 0;
     for (patterns) |pattern| {
         inserted_per_row += try appendInsertPath(planner, pattern);
@@ -629,7 +398,7 @@ fn takePlan(planner: *Planner) Plan {
     return plan;
 }
 
-fn resultColumns(allocator: Allocator, ret: ReturnClause) Allocator.Error![]ResultColumn {
+fn resultColumns(allocator: Allocator, ret: Ast.ReturnClause) Allocator.Error![]ResultColumn {
     const columns = try allocator.alloc(ResultColumn, ret.items.len);
     errdefer allocator.free(columns);
     for (columns) |*column| column.* = .{ .name = &.{}, .graph_value = false };
@@ -664,7 +433,7 @@ fn consumePlanRows(allocator: Allocator, txn: storage.Transaction, plan: *const 
     return rows;
 }
 
-fn appendUpdate(planner: *Planner, sets: []const SetClause) Error!usize {
+fn appendUpdate(planner: *Planner, sets: []const Ast.SetClause) Error!usize {
     var items = std.ArrayList(Plan.UpdateClause).empty;
     errdefer {
         for (items.items) |*item| item.deinit(planner.allocator);
@@ -685,7 +454,7 @@ fn appendUpdate(planner: *Planner, sets: []const SetClause) Error!usize {
     return sets.len;
 }
 
-fn appendDelete(planner: *Planner, del: DeleteAction) Error!usize {
+fn appendDelete(planner: *Planner, del: Ast.DeleteAction) Error!usize {
     var idents = std.ArrayList(u16).empty;
     errdefer idents.deinit(planner.allocator);
 
@@ -705,7 +474,7 @@ fn appendDelete(planner: *Planner, del: DeleteAction) Error!usize {
     return count;
 }
 
-fn appendMatchQuery(planner: *Planner, mq: MatchQuery) Error!void {
+fn appendMatchQuery(planner: *Planner, mq: Ast.MatchQuery) Error!void {
     for (mq.patterns) |pattern| {
         try appendPathPattern(planner, pattern);
     }
@@ -714,7 +483,7 @@ fn appendMatchQuery(planner: *Planner, mq: MatchQuery) Error!void {
     }
 }
 
-fn appendInsertPath(planner: *Planner, pattern: PathPattern) Error!usize {
+fn appendInsertPath(planner: *Planner, pattern: Ast.PathPattern) Error!usize {
     var count: usize = 0;
     var current = try appendInsertNodeOrUse(planner, pattern.start, &count);
     for (pattern.segments) |segment| {
@@ -726,7 +495,7 @@ fn appendInsertPath(planner: *Planner, pattern: PathPattern) Error!usize {
     return count;
 }
 
-fn appendInsertNodeOrUse(planner: *Planner, pattern: NodePattern, count: *usize) Error!u16 {
+fn appendInsertNodeOrUse(planner: *Planner, pattern: Ast.NodePattern, count: *usize) Error!u16 {
     if (pattern.variable) |name| {
         if (planner.bindings.get(name)) |binding| {
             if (binding.kind != .node) return error.WrongType;
@@ -751,7 +520,7 @@ fn appendInsertNodeOrUse(planner: *Planner, pattern: NodePattern, count: *usize)
     return ident;
 }
 
-fn appendInsertEdge(planner: *Planner, src: u16, dest: u16, pattern: EdgePattern) Error!void {
+fn appendInsertEdge(planner: *Planner, src: u16, dest: u16, pattern: Ast.EdgePattern) Error!void {
     const ident = if (pattern.variable) |name| blk: {
         if (planner.bindings.get(name) != null) return error.Unsupported;
         const edge_ident = planner.allocIdent();
@@ -791,7 +560,7 @@ fn deinitLabelList(labels: *std.ArrayList([]u8), allocator: Allocator) void {
     labels.deinit(allocator);
 }
 
-fn planProperties(planner: *Planner, properties: []Property) Error!Plan.Properties {
+fn planProperties(planner: *Planner, properties: []Ast.Property) Error!Plan.Properties {
     var out: Plan.Properties = .{};
     errdefer deinitPlanProperties(&out, planner.allocator);
     for (properties) |property| {
@@ -810,7 +579,7 @@ fn deinitPlanProperties(properties: *Plan.Properties, allocator: Allocator) void
     properties.deinit(allocator);
 }
 
-fn appendReturnProjection(planner: *Planner, ret: ReturnClause) Error!void {
+fn appendReturnProjection(planner: *Planner, ret: Ast.ReturnClause) Error!void {
     var project = std.ArrayList(Plan.ProjectClause).empty;
     errdefer {
         for (project.items) |*clause| clause.deinit(planner.allocator);
@@ -838,7 +607,7 @@ fn appendReturnProjection(planner: *Planner, ret: ReturnClause) Error!void {
     }
 }
 
-fn appendSkipLimit(planner: *Planner, ret: ReturnClause) Error!void {
+fn appendSkipLimit(planner: *Planner, ret: Ast.ReturnClause) Error!void {
     if (ret.skip > 0) {
         try planner.plan.ops.append(planner.allocator, .{ .skip = @intCast(ret.skip) });
     }
@@ -847,7 +616,7 @@ fn appendSkipLimit(planner: *Planner, ret: ReturnClause) Error!void {
     }
 }
 
-fn appendOrderBy(planner: *Planner, ret: ReturnClause) Error!void {
+fn appendOrderBy(planner: *Planner, ret: Ast.ReturnClause) Error!void {
     if (ret.order_by.len == 0) return;
 
     var project = std.ArrayList(Plan.ProjectClause).empty;
@@ -870,14 +639,14 @@ fn appendOrderBy(planner: *Planner, ret: ReturnClause) Error!void {
     sort = .{};
 }
 
-fn appendPathPattern(planner: *Planner, pattern: PathPattern) Error!void {
+fn appendPathPattern(planner: *Planner, pattern: Ast.PathPattern) Error!void {
     var current = try appendNodeStart(planner, pattern.start);
     for (pattern.segments) |segment| {
         current = try appendPathSegment(planner, current, segment);
     }
 }
 
-fn appendNodeStart(planner: *Planner, pattern: NodePattern) Error!u16 {
+fn appendNodeStart(planner: *Planner, pattern: Ast.NodePattern) Error!u16 {
     if (pattern.variable) |name| {
         if (planner.bindings.get(name)) |binding| {
             if (binding.kind != .node) return error.WrongType;
@@ -896,7 +665,7 @@ fn appendNodeStart(planner: *Planner, pattern: NodePattern) Error!u16 {
     return ident;
 }
 
-fn appendPathSegment(planner: *Planner, current: u16, segment: PathSegment) Error!u16 {
+fn appendPathSegment(planner: *Planner, current: u16, segment: Ast.PathSegment) Error!u16 {
     if (segment.node.variable) |name| {
         if (planner.bindings.get(name) != null) return error.Unsupported;
     }
@@ -926,7 +695,7 @@ fn appendPathSegment(planner: *Planner, current: u16, segment: PathSegment) Erro
     return dest_ident;
 }
 
-fn appendNodeFilters(planner: *Planner, ident: u16, pattern: NodePattern, label_in_scan: bool) Error!void {
+fn appendNodeFilters(planner: *Planner, ident: u16, pattern: Ast.NodePattern, label_in_scan: bool) Error!void {
     if (!label_in_scan) {
         if (pattern.label) |label| {
             try appendFilter(planner, .{ .ident_label = .{ .ident = ident, .label = try planner.allocator.dupe(u8, label) } });
@@ -937,13 +706,13 @@ fn appendNodeFilters(planner: *Planner, ident: u16, pattern: NodePattern, label_
     }
 }
 
-fn appendEdgeFilters(planner: *Planner, ident: u16, pattern: EdgePattern) Error!void {
+fn appendEdgeFilters(planner: *Planner, ident: u16, pattern: Ast.EdgePattern) Error!void {
     for (pattern.properties) |property| {
         try appendPropertyFilter(planner, ident, property);
     }
 }
 
-fn appendPropertyFilter(planner: *Planner, ident: u16, property: Property) Error!void {
+fn appendPropertyFilter(planner: *Planner, ident: u16, property: Ast.Property) Error!void {
     var left = Plan.Exp{ .property = .{ .ident = ident, .key = try planner.allocator.dupe(u8, property.key) } };
     errdefer left.deinit(planner.allocator);
     var right = try planExpr(planner, property.value);
@@ -963,7 +732,7 @@ fn appendFilter(planner: *Planner, clause: Plan.FilterClause) Error!void {
     try planner.plan.ops.append(planner.allocator, .{ .filter = clauses });
 }
 
-fn planExpr(planner: *Planner, expr: Expr) Error!Plan.Exp {
+fn planExpr(planner: *Planner, expr: Ast.Expr) Error!Plan.Exp {
     return switch (expr) {
         .literal => |value| .{ .literal = try value.dupe(planner.allocator) },
         .variable => |name| .{ .ident = (planner.bindings.get(name) orelse return error.UnknownIdentifier).ident },
@@ -1054,501 +823,6 @@ fn resultValueFromCompiledValue(
     return .{ .scalar = try value.dupe(allocator) };
 }
 
-// ------------------------------ Parser ------------------------------------
-
-const Parsed = struct {
-    tokens: []Lexeme,
-    statements: []Statement,
-
-    fn deinit(self: *Parsed, allocator: Allocator) void {
-        for (self.statements) |*statement| statement.deinit(allocator);
-        allocator.free(self.statements);
-        allocator.free(self.tokens);
-        self.* = undefined;
-    }
-};
-
-const Parser = struct {
-    allocator: Allocator,
-    source: [:0]const u8,
-    tokens: []Lexeme,
-    i: usize = 0,
-
-    fn parse(allocator: Allocator, source: [:0]const u8) Error!Parsed {
-        var toks = std.ArrayList(Lexeme).empty;
-        errdefer toks.deinit(allocator);
-        var t = tokenizer.Tokenizer.init(source);
-        while (true) {
-            const token = t.next();
-            if (token.tag == .invalid) return error.ParseError;
-            try toks.append(allocator, .{ .tag = token.tag, .start = token.loc.start, .end = token.loc.end });
-            if (token.tag == .eof) break;
-        }
-
-        const owned_tokens = try toks.toOwnedSlice(allocator);
-        errdefer allocator.free(owned_tokens);
-
-        var parser = Parser{ .allocator = allocator, .source = source, .tokens = owned_tokens };
-        var statements = std.ArrayList(Statement).empty;
-        errdefer {
-            for (statements.items) |*statement| statement.deinit(allocator);
-            statements.deinit(allocator);
-        }
-
-        while (!parser.at(.eof)) {
-            if (parser.eat(.semicolon)) continue;
-            try statements.append(allocator, try parser.parseStatement());
-            _ = parser.eat(.semicolon);
-        }
-
-        return .{ .tokens = owned_tokens, .statements = try statements.toOwnedSlice(allocator) };
-    }
-
-    fn parseStatement(p: *Parser) Error!Statement {
-        if (p.eat(.keyword_return)) {
-            return .{ .return_only = try p.parseReturnClause() };
-        }
-        if (p.eat(.keyword_insert)) {
-            return .{ .insert = try p.parsePatternListUntilAction() };
-        }
-        if (p.eat(.keyword_match)) {
-            const patterns = try p.parsePatternListUntilAction();
-            errdefer deinitPatterns(patterns, p.allocator);
-            var where: ?Expr = null;
-            errdefer if (where) |*expr| expr.deinit(p.allocator);
-            if (p.eat(.keyword_where)) {
-                where = try p.parseExpr(0);
-            }
-            const action = try p.parseMatchAction();
-            return .{ .match_query = .{ .patterns = patterns, .where = where, .action = action } };
-        }
-        return error.ParseError;
-    }
-
-    fn parseMatchAction(p: *Parser) Error!MatchAction {
-        if (p.eat(.keyword_return)) return .{ .ret = try p.parseReturnClause() };
-        if (p.eat(.keyword_insert)) return .{ .insert = try p.parsePatternListUntilAction() };
-        if (p.eat(.keyword_finish)) return .finish;
-        if (p.eat(.keyword_set)) return .{ .set = try p.parseSetClauses() };
-
-        var detach = false;
-        if (p.eat(.keyword_detach)) detach = true;
-        if (p.eat(.keyword_delete)) {
-            var vars = std.ArrayList([]const u8).empty;
-            errdefer vars.deinit(p.allocator);
-            while (true) {
-                try vars.append(p.allocator, try p.expectName());
-                if (!p.eat(.comma)) break;
-            }
-            return .{ .delete = .{ .detach = detach, .variables = try vars.toOwnedSlice(p.allocator) } };
-        }
-        return error.ParseError;
-    }
-
-    fn parseSetClauses(p: *Parser) Error![]SetClause {
-        var clauses = std.ArrayList(SetClause).empty;
-        errdefer {
-            for (clauses.items) |*clause| clause.deinit(p.allocator);
-            clauses.deinit(p.allocator);
-        }
-        while (true) {
-            const variable = try p.expectName();
-            try p.expect(.period);
-            const property = try p.expectName();
-            try p.expect(.equal);
-            const value = try p.parseExpr(0);
-            try clauses.append(p.allocator, .{ .variable = variable, .property = property, .value = value });
-            if (!p.eat(.comma)) break;
-        }
-        return try clauses.toOwnedSlice(p.allocator);
-    }
-
-    fn parseReturnClause(p: *Parser) Error!ReturnClause {
-        const items = try p.parseReturnItems();
-        var ret = ReturnClause{ .items = items };
-        errdefer ret.deinit(p.allocator);
-        if (p.eat(.keyword_order)) {
-            try p.expect(.keyword_by);
-            ret.order_by = try p.parseSortItems();
-        }
-        while (true) {
-            if (p.eat(.keyword_skip)) {
-                ret.skip = try p.parseCount();
-            } else if (p.eat(.keyword_limit)) {
-                ret.limit = try p.parseCount();
-            } else {
-                break;
-            }
-        }
-        const out = ret;
-        ret = .{ .items = &.{} };
-        return out;
-    }
-
-    fn parseSortItems(p: *Parser) Error![]SortItem {
-        var items = std.ArrayList(SortItem).empty;
-        errdefer {
-            for (items.items) |*item| item.deinit(p.allocator);
-            items.deinit(p.allocator);
-        }
-        while (!p.at(.keyword_skip) and !p.at(.keyword_limit) and !p.at(.semicolon) and !p.at(.eof)) {
-            var expr = try p.parseExpr(0);
-            errdefer expr.deinit(p.allocator);
-            const desc = if (p.eat(.keyword_desc) or p.eat(.keyword_descending))
-                true
-            else if (p.eat(.keyword_asc) or p.eat(.keyword_ascending))
-                false
-            else
-                false;
-            try items.append(p.allocator, .{ .expr = expr, .desc = desc });
-            if (!p.eat(.comma)) break;
-        }
-        if (items.items.len == 0) return error.ParseError;
-        return try items.toOwnedSlice(p.allocator);
-    }
-
-    fn parseReturnItems(p: *Parser) Error![]ReturnItem {
-        var items = std.ArrayList(ReturnItem).empty;
-        errdefer {
-            for (items.items) |*item| item.deinit(p.allocator);
-            items.deinit(p.allocator);
-        }
-        while (!p.at(.keyword_order) and !p.at(.keyword_skip) and !p.at(.keyword_limit) and !p.at(.semicolon) and !p.at(.eof)) {
-            var expr = try p.parseExpr(0);
-            errdefer expr.deinit(p.allocator);
-            const alias = if (p.eat(.keyword_as)) try p.expectName() else null;
-            try items.append(p.allocator, .{ .expr = expr, .alias = alias });
-            if (!p.eat(.comma)) break;
-        }
-        if (items.items.len == 0) return error.ParseError;
-        return try items.toOwnedSlice(p.allocator);
-    }
-
-    fn parseCount(p: *Parser) Error!usize {
-        const tok = p.next();
-        if (tok.tag != .number_literal) return error.ParseError;
-        const s = p.slice(tok);
-        if (std.mem.indexOfScalar(u8, s, '.') != null) return error.ParseError;
-        return std.fmt.parseInt(usize, s, 10) catch return error.ParseError;
-    }
-
-    fn parsePatternListUntilAction(p: *Parser) Error![]PathPattern {
-        var patterns = std.ArrayList(PathPattern).empty;
-        errdefer {
-            for (patterns.items) |*pattern| pattern.deinit(p.allocator);
-            patterns.deinit(p.allocator);
-        }
-        while (!p.at(.semicolon) and !p.at(.eof) and !p.atActionKeyword()) {
-            try patterns.append(p.allocator, try p.parsePathPattern());
-            if (!p.eat(.comma)) break;
-        }
-        if (patterns.items.len == 0) return error.ParseError;
-        return try patterns.toOwnedSlice(p.allocator);
-    }
-
-    fn parsePathPattern(p: *Parser) Error!PathPattern {
-        const start = try p.parseNodePattern();
-        errdefer {
-            var s = start;
-            s.deinit(p.allocator);
-        }
-        var segments = std.ArrayList(PathSegment).empty;
-        errdefer {
-            for (segments.items) |*segment| segment.deinit(p.allocator);
-            segments.deinit(p.allocator);
-        }
-        while (p.edgeStartsHere()) {
-            const edge = try p.parseEdgePattern();
-            errdefer {
-                var e = edge;
-                e.deinit(p.allocator);
-            }
-            const node = try p.parseNodePattern();
-            errdefer {
-                var n = node;
-                n.deinit(p.allocator);
-            }
-            try segments.append(p.allocator, .{ .edge = edge, .node = node });
-        }
-        return .{ .start = start, .segments = try segments.toOwnedSlice(p.allocator) };
-    }
-
-    fn parseNodePattern(p: *Parser) Error!NodePattern {
-        try p.expect(.l_paren);
-        var node = NodePattern{};
-        errdefer node.deinit(p.allocator);
-
-        if (p.isName() and !p.atKeywordLike(.keyword_return)) {
-            node.variable = try p.expectName();
-        }
-        while (p.eat(.colon)) {
-            const label = try p.expectName();
-            if (node.label == null) node.label = label;
-        }
-        if (p.at(.l_brace)) node.properties = try p.parseProperties();
-        try p.expect(.r_paren);
-        return node;
-    }
-
-    fn parseEdgePattern(p: *Parser) Error!EdgePattern {
-        var direction: EdgeDirection = .undirected;
-        var bracketed = true;
-
-        switch (p.peek()) {
-            .minus_left_bracket => {
-                _ = p.next();
-                direction = .undirected;
-            },
-            .left_arrow_bracket => {
-                _ = p.next();
-                direction = .left;
-            },
-            .right_arrow => {
-                _ = p.next();
-                direction = .right;
-                if (p.eat(.l_bracket)) {
-                    bracketed = true;
-                } else {
-                    bracketed = false;
-                }
-            },
-            .left_arrow => {
-                _ = p.next();
-                direction = .left;
-                bracketed = false;
-            },
-            .left_minus_right => {
-                _ = p.next();
-                direction = .any;
-                bracketed = false;
-            },
-            else => return error.ParseError,
-        }
-
-        var edge = EdgePattern{ .direction = direction };
-        errdefer edge.deinit(p.allocator);
-
-        if (bracketed) {
-            if (p.isName() and !p.at(.r_bracket)) {
-                edge.variable = try p.expectName();
-            }
-            while (p.eat(.colon)) {
-                const label = try p.expectName();
-                if (edge.label == null) edge.label = label;
-            }
-            if (p.at(.l_brace)) edge.properties = try p.parseProperties();
-
-            const close = p.peek();
-            switch (close) {
-                .bracket_right_arrow => {
-                    _ = p.next();
-                    edge.direction = .right;
-                },
-                .right_bracket_minus => {
-                    _ = p.next();
-                    // Keep explicit left arrows left; otherwise `-[]-` is undirected.
-                    if (direction != .left) edge.direction = .undirected;
-                },
-                .r_bracket => {
-                    _ = p.next();
-                    edge.direction = direction;
-                },
-                else => return error.ParseError,
-            }
-        }
-        return edge;
-    }
-
-    fn parseProperties(p: *Parser) Error![]Property {
-        try p.expect(.l_brace);
-        var properties = std.ArrayList(Property).empty;
-        errdefer {
-            for (properties.items) |*property| property.deinit(p.allocator);
-            properties.deinit(p.allocator);
-        }
-        while (!p.eat(.r_brace)) {
-            const key = try p.expectName();
-            try p.expect(.colon);
-            var value = try p.parseExpr(0);
-            errdefer value.deinit(p.allocator);
-            try properties.append(p.allocator, .{ .key = key, .value = value });
-            if (!p.eat(.comma)) {
-                try p.expect(.r_brace);
-                break;
-            }
-        }
-        return try properties.toOwnedSlice(p.allocator);
-    }
-
-    fn parseExpr(p: *Parser, min_prec: u8) Error!Expr {
-        var left = try p.parseUnary();
-        errdefer left.deinit(p.allocator);
-
-        while (binaryInfo(p.peek())) |info| {
-            if (info.prec < min_prec) break;
-            _ = p.next();
-            var right = try p.parseExpr(info.prec + 1);
-            errdefer right.deinit(p.allocator);
-            const bin = try p.allocator.create(BinaryExpr);
-            bin.* = .{ .op = info.op, .left = left, .right = right };
-            left = .{ .binary = bin };
-        }
-        return left;
-    }
-
-    fn parseUnary(p: *Parser) Error!Expr {
-        if (p.eat(.keyword_not)) {
-            var operand = try p.parseExpr(3);
-            errdefer operand.deinit(p.allocator);
-            const unary = try p.allocator.create(UnaryExpr);
-            unary.* = .{ .op = .not, .operand = operand };
-            return .{ .unary = unary };
-        }
-        return p.parsePrimary();
-    }
-
-    fn parsePrimary(p: *Parser) Error!Expr {
-        const tok = p.next();
-        switch (tok.tag) {
-            .number_literal => {
-                const s = p.slice(tok);
-                if (std.mem.indexOfScalar(u8, s, '.') != null) {
-                    return .{ .literal = .{ .float64 = std.fmt.parseFloat(f64, s) catch return error.ParseError } };
-                }
-                return .{ .literal = .{ .int64 = std.fmt.parseInt(i64, s, 10) catch return error.ParseError } };
-            },
-            .string_literal => return .{ .literal = .{ .string = try p.unquoteString(p.slice(tok)) } },
-            .keyword_true => return .{ .literal = .{ .bool = true } },
-            .keyword_false => return .{ .literal = .{ .bool = false } },
-            .keyword_null => return .{ .literal = .null },
-            .l_paren => {
-                const expr = try p.parseExpr(0);
-                try p.expect(.r_paren);
-                return expr;
-            },
-            else => {
-                if (!isNameToken(tok.tag)) return error.ParseError;
-                const name = p.slice(tok);
-                if (p.eat(.period)) {
-                    return .{ .property = .{ .variable = name, .property = try p.expectName() } };
-                }
-                return .{ .variable = name };
-            },
-        }
-    }
-
-    fn unquoteString(p: *Parser, s: []const u8) Error![]u8 {
-        if (s.len < 2) return error.ParseError;
-        var start: usize = 1;
-        const delimiter = s[0];
-        if (delimiter == '@') {
-            if (s.len < 3) return error.ParseError;
-            start = 2;
-        }
-        const end = s.len - 1;
-        var out = std.ArrayList(u8).empty;
-        errdefer out.deinit(p.allocator);
-        var i = start;
-        while (i < end) : (i += 1) {
-            if (s[i] == delimiter and i + 1 < end and s[i + 1] == delimiter) {
-                try out.append(p.allocator, delimiter);
-                i += 1;
-            } else if (s[i] == '\\' and i + 1 < end) {
-                i += 1;
-                try out.append(p.allocator, switch (s[i]) {
-                    'n' => '\n',
-                    'r' => '\r',
-                    't' => '\t',
-                    else => s[i],
-                });
-            } else {
-                try out.append(p.allocator, s[i]);
-            }
-        }
-        return try out.toOwnedSlice(p.allocator);
-    }
-
-    fn binaryInfo(tag: Token.Tag) ?struct { op: Plan.Binop, prec: u8 } {
-        return switch (tag) {
-            .keyword_or => .{ .op = .or_, .prec = 1 },
-            .keyword_and => .{ .op = .and_, .prec = 2 },
-            .equal => .{ .op = .eql, .prec = 3 },
-            .not_equal => .{ .op = .neq, .prec = 3 },
-            .angle_bracket_left => .{ .op = .lt, .prec = 3 },
-            .angle_bracket_left_equal => .{ .op = .lte, .prec = 3 },
-            .angle_bracket_right => .{ .op = .gt, .prec = 3 },
-            .angle_bracket_right_equal => .{ .op = .gte, .prec = 3 },
-            .plus => .{ .op = .add, .prec = 4 },
-            .minus => .{ .op = .sub, .prec = 4 },
-            .asterisk => .{ .op = .mul, .prec = 5 },
-            else => null,
-        };
-    }
-
-    fn atActionKeyword(p: *Parser) bool {
-        return switch (p.peek()) {
-            .keyword_return, .keyword_insert, .keyword_delete, .keyword_detach, .keyword_set, .keyword_finish, .keyword_where => true,
-            else => false,
-        };
-    }
-
-    fn edgeStartsHere(p: *Parser) bool {
-        return switch (p.peek()) {
-            .minus_left_bracket, .left_arrow_bracket, .right_arrow, .left_arrow, .left_minus_right => true,
-            else => false,
-        };
-    }
-
-    fn isName(p: *Parser) bool {
-        return isNameToken(p.peek());
-    }
-
-    fn at(p: *Parser, tag: Token.Tag) bool {
-        return p.peek() == tag;
-    }
-
-    fn atKeywordLike(p: *Parser, tag: Token.Tag) bool {
-        return p.peek() == tag;
-    }
-
-    fn eat(p: *Parser, tag: Token.Tag) bool {
-        if (p.peek() == tag) {
-            p.i += 1;
-            return true;
-        }
-        return false;
-    }
-
-    fn expect(p: *Parser, tag: Token.Tag) Error!void {
-        if (!p.eat(tag)) return error.ParseError;
-    }
-
-    fn expectName(p: *Parser) Error![]const u8 {
-        const tok = p.next();
-        if (!isNameToken(tok.tag)) return error.ParseError;
-        return p.slice(tok);
-    }
-
-    fn peek(p: *Parser) Token.Tag {
-        return p.tokens[p.i].tag;
-    }
-
-    fn next(p: *Parser) Lexeme {
-        const tok = p.tokens[p.i];
-        p.i += 1;
-        return tok;
-    }
-
-    fn slice(p: *Parser, tok: Lexeme) []const u8 {
-        return p.source[tok.start..tok.end];
-    }
-};
-
-fn isNameToken(tag: Token.Tag) bool {
-    if (tag == .identifier) return true;
-    return std.mem.startsWith(u8, @tagName(tag), "keyword_");
-}
-
 // ----------------------------- Execution ----------------------------------
 
 fn deinitRowList(rows: *std.ArrayList(Row), allocator: Allocator) void {
@@ -1611,7 +885,7 @@ fn resultColumnNames(allocator: Allocator, columns: []const ResultColumn) Alloca
     return names;
 }
 
-fn exprName(allocator: Allocator, item: ReturnItem) Allocator.Error![]u8 {
+fn exprName(allocator: Allocator, item: Ast.ReturnItem) Allocator.Error![]u8 {
     if (item.alias) |alias| return allocator.dupe(u8, alias);
     return switch (item.expr) {
         .variable => |name| allocator.dupe(u8, name),
