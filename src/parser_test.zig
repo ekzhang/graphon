@@ -7,8 +7,18 @@ const EdgeDirection = @import("types.zig").EdgeDirection;
 const Parse = @import("Parse.zig");
 const Plan = @import("Plan.zig");
 
+test "parse object parses source into ast" {
+    var parser: Parse = .{ .source = "RETURN 42", .gpa = std.testing.allocator };
+    var program = try parser.parse();
+    defer program.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), program.statements.len);
+    try std.testing.expect(program.statements[0] == .return_only);
+    try expectIntLiteral(program.statements[0].return_only.items[0].expr, 42);
+}
+
 test "parse return clause modifiers and expression precedence" {
-    var program = try Parse.parse(std.testing.allocator, "RETURN 1 + 2 * 3 AS total ORDER BY total DESC SKIP 4 LIMIT 5");
+    var program = try Ast.parse(std.testing.allocator, "RETURN 1 + 2 * 3 AS total ORDER BY total DESC SKIP 4 LIMIT 5");
     defer program.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(usize, 1), program.statements.len);
@@ -32,7 +42,7 @@ test "parse return clause modifiers and expression precedence" {
 }
 
 test "parse match path with labels properties and directed edge" {
-    var program = try Parse.parse(std.testing.allocator, "MATCH (a:User {name: 'Ada'})-[e:Likes {since: 2024}]->(f:Food) RETURN f.name");
+    var program = try Ast.parse(std.testing.allocator, "MATCH (a:User {name: 'Ada'})-[e:Likes {since: 2024}]->(f:Food) RETURN f.name");
     defer program.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(usize, 1), program.statements.len);
@@ -58,7 +68,7 @@ test "parse match path with labels properties and directed edge" {
 }
 
 test "parse match where and set clauses" {
-    var program = try Parse.parse(std.testing.allocator, "MATCH (p:Person), (f:Food) WHERE NOT (p.age < 30 AND f.name <> 'Soup') SET p.favorite = f.name, p.active = true");
+    var program = try Ast.parse(std.testing.allocator, "MATCH (p:Person), (f:Food) WHERE NOT (p.age < 30 AND f.name <> 'Soup') SET p.favorite = f.name, p.active = true");
     defer program.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(usize, 1), program.statements.len);
@@ -90,7 +100,7 @@ test "parse match where and set clauses" {
 }
 
 test "parse multiple mutation statements" {
-    var program = try Parse.parse(std.testing.allocator, "INSERT (:Person {name: 'Ada'}); MATCH (p:Person) DETACH DELETE p; MATCH (p:Person) FINISH;");
+    var program = try Ast.parse(std.testing.allocator, "INSERT (:Person {name: 'Ada'}); MATCH (p:Person) DETACH DELETE p; MATCH (p:Person) FINISH;");
     defer program.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(usize, 3), program.statements.len);
@@ -113,8 +123,8 @@ test "parse multiple mutation statements" {
 }
 
 test "parse rejects fractional skip and limit counts" {
-    try std.testing.expectError(error.ParseError, Parse.parse(std.testing.allocator, "RETURN 1 SKIP 1.5"));
-    try std.testing.expectError(error.ParseError, Parse.parse(std.testing.allocator, "RETURN 1 LIMIT 2.5"));
+    try std.testing.expectError(error.ParseError, Ast.parse(std.testing.allocator, "RETURN 1 SKIP 1.5"));
+    try std.testing.expectError(error.ParseError, Ast.parse(std.testing.allocator, "RETURN 1 LIMIT 2.5"));
 }
 
 fn expectOptionalName(actual: ?[]const u8, expected: []const u8) !void {

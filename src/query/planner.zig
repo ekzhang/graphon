@@ -4,10 +4,9 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const Ast = @import("../Ast.zig");
-const Parse = @import("../Parse.zig");
 const Plan = @import("../Plan.zig");
 
-pub const Error = Parse.Error || error{
+pub const Error = Ast.ParseError || error{
     Unsupported,
     UnknownIdentifier,
     WrongType,
@@ -67,7 +66,7 @@ pub const ResultColumn = struct {
 };
 
 pub fn compile(allocator: Allocator, source: [:0]const u8) Error!CompiledProgram {
-    var parsed = try Parse.parse(allocator, source);
+    var parsed = try Ast.parse(allocator, source);
     defer parsed.deinit(allocator);
 
     var statements = std.ArrayList(CompiledStatement).empty;

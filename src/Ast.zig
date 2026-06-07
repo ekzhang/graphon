@@ -11,6 +11,14 @@ const types = @import("types.zig");
 const EdgeDirection = types.EdgeDirection;
 const Value = types.Value;
 
+pub const ParseError = @import("Parse.zig").Error;
+
+pub fn parse(gpa: Allocator, source: [:0]const u8) ParseError!Program {
+    const Parse = @import("Parse.zig");
+    var parser: Parse = .{ .gpa = gpa, .source = source };
+    return try parser.parse();
+}
+
 pub const Program = struct {
     statements: []Statement,
 
