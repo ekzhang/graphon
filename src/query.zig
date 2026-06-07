@@ -19,6 +19,8 @@ const rocksdb = @import("storage/rocksdb.zig");
 const types = @import("types.zig");
 const ElementId = types.ElementId;
 const Value = types.Value;
+const Plan = @import("Plan.zig");
+const executor = @import("executor.zig");
 
 pub const Error = error{
     ParseError,
@@ -26,6 +28,7 @@ pub const Error = error{
     UnknownIdentifier,
     WrongType,
     InvalidRequest,
+    MalformedPlan,
 } || Allocator.Error || storage.Error;
 
 const Lexeme = struct {
@@ -229,20 +232,7 @@ pub fn execute(allocator: Allocator, io: std.Io, store: storage.Storage, source:
 
 fn executeStatement(allocator: Allocator, io: std.Io, txn: storage.Transaction, statement: Statement) Error!ResultSet {
     switch (statement) {
-        .return_only => |ret| {
-            var rows = std.ArrayList(Row).empty;
-            errdefer deinitRowList(&rows, allocator);
-            var binding = Binding{};
-            defer binding.deinit(allocator);
-            if (ret.skip == 0 and (ret.limit == null or ret.limit.? > 0)) {
-                try appendReturnRow(allocator, txn, &rows, binding, ret.items);
-            }
-            return .{
-                .columns = try columnNames(allocator, ret.items),
-                .rows = try rows.toOwnedSlice(allocator),
-                .rows_affected = null,
-            };
-        },
+        .return_only => |ret| return try executeReturnPlan(allocator, txn, ret),
         .insert => |patterns| {
             var binding = Binding{};
             defer binding.deinit(allocator);
@@ -253,6 +243,17 @@ fn executeStatement(allocator: Allocator, io: std.Io, txn: storage.Transaction, 
             return mutationResult(count);
         },
         .match_query => |mq| {
+            if (mq.action == .ret) {
+                if (executeMatchReturnPlan(allocator, txn, mq)) |result| {
+                    return result;
+                } else |err| {
+                    switch (err) {
+                        error.Unsupported => {},
+                        else => |e| return e,
+                    }
+                }
+            }
+
             var rows = std.ArrayList(Binding).empty;
             errdefer deinitBindings(&rows, allocator);
             try rows.append(allocator, Binding{});
@@ -529,6 +530,316 @@ fn deinitReturnItems(items: []ReturnItem, allocator: Allocator) void {
 fn deinitProperties(properties: []Property, allocator: Allocator) void {
     for (properties) |*property| property.deinit(allocator);
     allocator.free(properties);
+}
+
+// ------------------------------ Planner -----------------------------------
+
+const PlanBindingKind = enum { node, edge };
+
+const PlanBinding = struct {
+    ident: u16,
+    kind: PlanBindingKind,
+};
+
+const Planner = struct {
+    allocator: Allocator,
+    plan: Plan = .{},
+    bindings: std.StringHashMapUnmanaged(PlanBinding) = .empty,
+    next_ident: u16 = 0,
+
+    fn deinit(self: *Planner) void {
+        self.plan.deinit(self.allocator);
+        self.bindings.deinit(self.allocator);
+        self.* = undefined;
+    }
+
+    fn allocIdent(self: *Planner) u16 {
+        const ident = self.next_ident;
+        self.next_ident += 1;
+        return ident;
+    }
+
+    fn bind(self: *Planner, name: []const u8, kind: PlanBindingKind, ident: u16) Error!void {
+        try self.bindings.put(self.allocator, name, .{ .ident = ident, .kind = kind });
+    }
+
+    fn get(self: *Planner, name: []const u8, kind: PlanBindingKind) Error!PlanBinding {
+        const binding = self.bindings.get(name) orelse return error.UnknownIdentifier;
+        if (binding.kind != kind) return error.WrongType;
+        return binding;
+    }
+};
+
+fn executeReturnPlan(allocator: Allocator, txn: storage.Transaction, ret: ReturnClause) Error!ResultSet {
+    var planner = Planner{ .allocator = allocator };
+    defer planner.deinit();
+    try appendReturnProjection(&planner, ret);
+    appendSkipLimit(&planner, ret) catch |err| return err;
+    return try executePlannedResult(allocator, txn, &planner.plan, ret.items);
+}
+
+fn executeMatchReturnPlan(allocator: Allocator, txn: storage.Transaction, mq: MatchQuery) Error!ResultSet {
+    if (mq.action != .ret) return error.Unsupported;
+    if (mq.patterns.len != 1) return error.Unsupported;
+
+    var planner = Planner{ .allocator = allocator };
+    defer planner.deinit();
+    try appendPathPattern(&planner, mq.patterns[0]);
+    if (mq.where) |where| {
+        try appendFilter(&planner, .{ .bool_exp = try planExpr(&planner, where) });
+    }
+    const ret = mq.action.ret;
+    try appendReturnProjection(&planner, ret);
+    try appendSkipLimit(&planner, ret);
+    return try executePlannedResult(allocator, txn, &planner.plan, ret.items);
+}
+
+fn appendReturnProjection(planner: *Planner, ret: ReturnClause) Error!void {
+    var project = std.ArrayList(Plan.ProjectClause).empty;
+    errdefer {
+        for (project.items) |*clause| clause.deinit(planner.allocator);
+        project.deinit(planner.allocator);
+    }
+
+    for (ret.items) |item| {
+        if (item.expr == .variable) {
+            const binding = planner.bindings.get(item.expr.variable) orelse null;
+            if (binding) |b| {
+                try planner.plan.results.append(planner.allocator, b.ident);
+                continue;
+            }
+        }
+
+        const ident = planner.allocIdent();
+        try project.append(planner.allocator, .{ .ident = ident, .exp = try planExpr(planner, item.expr) });
+        try planner.plan.results.append(planner.allocator, ident);
+    }
+
+    if (project.items.len > 0) {
+        try planner.plan.ops.append(planner.allocator, .{ .project = project });
+    } else {
+        project.deinit(planner.allocator);
+    }
+}
+
+fn appendSkipLimit(planner: *Planner, ret: ReturnClause) Error!void {
+    if (ret.skip > 0) {
+        try planner.plan.ops.append(planner.allocator, .{ .skip = @intCast(ret.skip) });
+    }
+    if (ret.limit) |limit| {
+        try planner.plan.ops.append(planner.allocator, .{ .limit = @intCast(limit) });
+    }
+}
+
+fn appendPathPattern(planner: *Planner, pattern: PathPattern) Error!void {
+    var current = try appendNodeStart(planner, pattern.start);
+    for (pattern.segments) |segment| {
+        current = try appendPathSegment(planner, current, segment);
+    }
+}
+
+fn appendNodeStart(planner: *Planner, pattern: NodePattern) Error!u16 {
+    if (pattern.variable) |name| {
+        if (planner.bindings.get(name)) |binding| {
+            if (binding.kind != .node) return error.WrongType;
+            try appendNodeFilters(planner, binding.ident, pattern, false);
+            return binding.ident;
+        }
+    }
+
+    const ident = planner.allocIdent();
+    if (pattern.variable) |name| try planner.bind(name, .node, ident);
+    try planner.plan.ops.append(planner.allocator, .{ .node_scan = .{
+        .ident = ident,
+        .label = if (pattern.label) |label| try planner.allocator.dupe(u8, label) else null,
+    } });
+    try appendNodeFilters(planner, ident, pattern, true);
+    return ident;
+}
+
+fn appendPathSegment(planner: *Planner, current: u16, segment: PathSegment) Error!u16 {
+    if (segment.node.variable) |name| {
+        if (planner.bindings.get(name) != null) return error.Unsupported;
+    }
+    if (segment.edge.variable) |name| {
+        if (planner.bindings.get(name) != null) return error.Unsupported;
+    }
+
+    const edge_ident: ?u16 = if (segment.edge.variable != null or segment.edge.properties.len > 0)
+        planner.allocIdent()
+    else
+        null;
+    const dest_ident = planner.allocIdent();
+
+    if (segment.edge.variable) |name| try planner.bind(name, .edge, edge_ident.?);
+    if (segment.node.variable) |name| try planner.bind(name, .node, dest_ident);
+
+    try planner.plan.ops.append(planner.allocator, .{ .step = .{
+        .ident_src = current,
+        .ident_edge = edge_ident,
+        .ident_dest = dest_ident,
+        .direction = planDirection(segment.edge.direction),
+        .edge_label = if (segment.edge.label) |label| try planner.allocator.dupe(u8, label) else null,
+    } });
+
+    if (edge_ident) |ident| try appendEdgeFilters(planner, ident, segment.edge);
+    try appendNodeFilters(planner, dest_ident, segment.node, false);
+    return dest_ident;
+}
+
+fn appendNodeFilters(planner: *Planner, ident: u16, pattern: NodePattern, label_in_scan: bool) Error!void {
+    if (!label_in_scan) {
+        if (pattern.label) |label| {
+            try appendFilter(planner, .{ .ident_label = .{ .ident = ident, .label = try planner.allocator.dupe(u8, label) } });
+        }
+    }
+    for (pattern.properties) |property| {
+        try appendPropertyFilter(planner, ident, property);
+    }
+}
+
+fn appendEdgeFilters(planner: *Planner, ident: u16, pattern: EdgePattern) Error!void {
+    for (pattern.properties) |property| {
+        try appendPropertyFilter(planner, ident, property);
+    }
+}
+
+fn appendPropertyFilter(planner: *Planner, ident: u16, property: Property) Error!void {
+    var left = Plan.Exp{ .property = .{ .ident = ident, .key = try planner.allocator.dupe(u8, property.key) } };
+    errdefer left.deinit(planner.allocator);
+    var right = try planExpr(planner, property.value);
+    errdefer right.deinit(planner.allocator);
+    const binop = try planner.allocator.create(Plan.BinopExp);
+    binop.* = .{ .op = .eql, .left = left, .right = right };
+    try appendFilter(planner, .{ .bool_exp = .{ .binop = binop } });
+}
+
+fn appendFilter(planner: *Planner, clause: Plan.FilterClause) Error!void {
+    var clauses = std.ArrayList(Plan.FilterClause).empty;
+    errdefer {
+        for (clauses.items) |*item| item.deinit(planner.allocator);
+        clauses.deinit(planner.allocator);
+    }
+    try clauses.append(planner.allocator, clause);
+    try planner.plan.ops.append(planner.allocator, .{ .filter = clauses });
+}
+
+fn planExpr(planner: *Planner, expr: Expr) Error!Plan.Exp {
+    return switch (expr) {
+        .literal => |value| .{ .literal = try value.dupe(planner.allocator) },
+        .variable => |name| .{ .ident = (planner.bindings.get(name) orelse return error.UnknownIdentifier).ident },
+        .property => |p| blk: {
+            const binding = planner.bindings.get(p.variable) orelse return error.UnknownIdentifier;
+            break :blk .{ .property = .{ .ident = binding.ident, .key = try planner.allocator.dupe(u8, p.property) } };
+        },
+        .unary => |unary| blk: {
+            const planned = try planner.allocator.create(Plan.UnaryExp);
+            planned.* = .{ .op = switch (unary.op) {
+                .not => .not,
+            }, .operand = try planExpr(planner, unary.operand) };
+            break :blk .{ .unary = planned };
+        },
+        .binary => |bin| blk: {
+            const planned = try planner.allocator.create(Plan.BinopExp);
+            planned.* = .{
+                .op = planBinop(bin.op),
+                .left = try planExpr(planner, bin.left),
+                .right = try planExpr(planner, bin.right),
+            };
+            break :blk .{ .binop = planned };
+        },
+    };
+}
+
+fn planBinop(op: BinaryOp) Plan.Binop {
+    return switch (op) {
+        .add => .add,
+        .sub => .sub,
+        .mul => .mul,
+        .eql => .eql,
+        .neq => .neq,
+        .lt => .lt,
+        .lte => .lte,
+        .gt => .gt,
+        .gte => .gte,
+        .and_ => .and_,
+        .or_ => .or_,
+    };
+}
+
+fn planDirection(direction: Direction) types.EdgeDirection {
+    return switch (direction) {
+        .right => .right,
+        .left => .left,
+        .undirected => .undirected,
+        .any => .any,
+    };
+}
+
+fn executePlannedResult(
+    allocator: Allocator,
+    txn: storage.Transaction,
+    plan: *const Plan,
+    items: []const ReturnItem,
+) Error!ResultSet {
+    var exec = try executor.Executor.init(plan, txn);
+    defer exec.deinit();
+
+    var rows = std.ArrayList(Row).empty;
+    errdefer deinitRowList(&rows, allocator);
+    while (try exec.run()) |result_value| {
+        var result = result_value;
+        defer result.deinit(allocator);
+        try rows.append(allocator, try rowFromPlanResult(allocator, txn, result, items));
+    }
+
+    return .{
+        .columns = try columnNames(allocator, items),
+        .rows = try rows.toOwnedSlice(allocator),
+        .rows_affected = null,
+    };
+}
+
+fn rowFromPlanResult(
+    allocator: Allocator,
+    txn: storage.Transaction,
+    result: executor.Result,
+    items: []const ReturnItem,
+) Error!Row {
+    const values = try allocator.alloc(ResultValue, items.len);
+    errdefer allocator.free(values);
+    for (values) |*value| value.* = .{ .scalar = .null };
+    errdefer for (values) |*value| value.deinit(allocator);
+
+    for (items, result.values, 0..) |item, value, i| {
+        values[i].deinit(allocator);
+        values[i] = try resultValueFromPlanValue(allocator, txn, item.expr, value);
+    }
+    return .{ .values = values };
+}
+
+fn resultValueFromPlanValue(
+    allocator: Allocator,
+    txn: storage.Transaction,
+    expr: Expr,
+    value: Value,
+) Error!ResultValue {
+    if (expr == .variable) {
+        switch (value) {
+            .node_ref => |id| {
+                var node = try txn.getNode(id) orelse return .{ .scalar = .null };
+                defer node.deinit(allocator);
+                return .{ .node = try nodeObjectFromNode(allocator, node) };
+            },
+            .edge_ref => |id| {
+                var edge = try txn.getEdge(id) orelse return .{ .scalar = .null };
+                defer edge.deinit(allocator);
+                return .{ .edge = try edgeObjectFromEdge(allocator, edge) };
+            },
+            else => {},
+        }
+    }
+    return .{ .scalar = try value.dupe(allocator) };
 }
 
 // ------------------------------ Parser ------------------------------------
