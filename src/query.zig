@@ -7,7 +7,7 @@
 //! * `INSERT` node/edge path patterns.
 //! * `MATCH` node/edge path patterns with labels and property predicates.
 //! * `MATCH ... RETURN`, `MATCH ... INSERT`, `MATCH ... SET`, and
-//!   `MATCH ... [DETACH] DELETE`.
+//!   `MATCH ... [DETACH] DELETE`, and `MATCH ... FINISH`.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -15,7 +15,6 @@ const Allocator = std.mem.Allocator;
 const tokenizer = @import("tokenizer.zig");
 const Token = tokenizer.Token;
 const storage = @import("storage.zig");
-const rocksdb = @import("storage/rocksdb.zig");
 const types = @import("types.zig");
 const ElementId = types.ElementId;
 const Value = types.Value;
@@ -148,6 +147,53 @@ pub const ResultProperty = struct {
     }
 };
 
+pub const CompiledProgram = struct {
+    statements: []CompiledStatement,
+
+    pub fn deinit(self: *CompiledProgram, allocator: Allocator) void {
+        for (self.statements) |*statement| statement.deinit(allocator);
+        allocator.free(self.statements);
+        self.* = undefined;
+    }
+};
+
+pub const CompiledStatement = struct {
+    plan: Plan,
+    result: CompiledResult,
+
+    pub fn deinit(self: *CompiledStatement, allocator: Allocator) void {
+        self.plan.deinit(allocator);
+        self.result.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+pub const CompiledResult = union(enum) {
+    rows: []ResultColumn,
+    mutation: usize,
+
+    pub fn deinit(self: *CompiledResult, allocator: Allocator) void {
+        switch (self.*) {
+            .rows => |columns| {
+                for (columns) |*column| column.deinit(allocator);
+                allocator.free(columns);
+            },
+            .mutation => {},
+        }
+        self.* = undefined;
+    }
+};
+
+pub const ResultColumn = struct {
+    name: []u8,
+    graph_value: bool,
+
+    pub fn deinit(self: *ResultColumn, allocator: Allocator) void {
+        allocator.free(self.name);
+        self.* = undefined;
+    }
+};
+
 fn writeJsonValue(json: *std.json.Stringify, value: ResultValue) !void {
     switch (value) {
         .scalar => |scalar| try writeJsonScalar(json, scalar),
@@ -211,9 +257,26 @@ fn writeJsonProperties(json: *std.json.Stringify, properties: []const ResultProp
     try json.endObject();
 }
 
-pub fn execute(allocator: Allocator, io: std.Io, store: storage.Storage, source: [:0]const u8) Error!ResultSet {
+pub fn compile(allocator: Allocator, source: [:0]const u8) Error!CompiledProgram {
     var parsed = try Parser.parse(allocator, source);
     defer parsed.deinit(allocator);
+
+    var statements = std.ArrayList(CompiledStatement).empty;
+    errdefer {
+        for (statements.items) |*statement| statement.deinit(allocator);
+        statements.deinit(allocator);
+    }
+
+    for (parsed.statements) |statement| {
+        try statements.append(allocator, try compileStatement(allocator, statement));
+    }
+
+    return .{ .statements = try statements.toOwnedSlice(allocator) };
+}
+
+pub fn execute(allocator: Allocator, io: std.Io, store: storage.Storage, source: [:0]const u8) Error!ResultSet {
+    var compiled = try compile(allocator, source);
+    defer compiled.deinit(allocator);
 
     var txn = store.txn();
     defer txn.close();
@@ -221,131 +284,43 @@ pub fn execute(allocator: Allocator, io: std.Io, store: storage.Storage, source:
     var result = ResultSet{ .rows_affected = 0 };
     errdefer result.deinit(allocator);
 
-    for (parsed.statements) |*statement| {
+    for (compiled.statements) |*statement| {
         result.deinit(allocator);
-        result = try executeStatement(allocator, io, txn, statement.*);
+        result = try executeCompiledStatement(allocator, io, txn, statement.*);
     }
 
     try txn.commit();
     return result;
 }
 
-fn executeStatement(allocator: Allocator, io: std.Io, txn: storage.Transaction, statement: Statement) Error!ResultSet {
+fn compileStatement(allocator: Allocator, statement: Statement) Error!CompiledStatement {
     switch (statement) {
-        .return_only => |ret| return try executeReturnPlan(allocator, txn, ret),
-        .insert => |patterns| return try executeInsertPlan(allocator, txn, patterns),
-        .match_query => |mq| {
-            if (mq.action == .ret) {
-                if (executeMatchReturnPlan(allocator, txn, mq)) |result| {
-                    return result;
-                } else |err| {
-                    switch (err) {
-                        error.Unsupported => {},
-                        else => |e| return e,
-                    }
-                }
-            }
-            if (mq.action == .insert) {
-                if (executeMatchInsertPlan(allocator, txn, mq)) |result| {
-                    return result;
-                } else |err| {
-                    switch (err) {
-                        error.Unsupported => {},
-                        else => |e| return e,
-                    }
-                }
-            }
-            if (mq.action == .set) {
-                if (executeMatchSetPlan(allocator, txn, mq)) |result| {
-                    return result;
-                } else |err| {
-                    switch (err) {
-                        error.Unsupported => {},
-                        else => |e| return e,
-                    }
-                }
-            }
-            if (mq.action == .delete) {
-                if (executeMatchDeletePlan(allocator, txn, mq)) |result| {
-                    return result;
-                } else |err| {
-                    switch (err) {
-                        error.Unsupported => {},
-                        else => |e| return e,
-                    }
-                }
-            }
-            if (mq.action == .finish) {
-                if (executeMatchFinishPlan(allocator, txn, mq)) |result| {
-                    return result;
-                } else |err| {
-                    switch (err) {
-                        error.Unsupported => {},
-                        else => |e| return e,
-                    }
-                }
-            }
-
-            var rows = std.ArrayList(Binding).empty;
-            errdefer deinitBindings(&rows, allocator);
-            try rows.append(allocator, Binding{});
-            for (mq.patterns) |pattern| {
-                try matchPath(allocator, txn, &rows, pattern);
-            }
-            if (mq.where) |where| {
-                try filterBindings(allocator, txn, &rows, where);
-            }
-
-            switch (mq.action) {
-                .ret => |ret| {
-                    var out_rows = std.ArrayList(Row).empty;
-                    errdefer deinitRowList(&out_rows, allocator);
-                    var skipped: usize = 0;
-                    for (rows.items) |binding| {
-                        if (skipped < ret.skip) {
-                            skipped += 1;
-                            continue;
-                        }
-                        if (ret.limit) |limit| {
-                            if (out_rows.items.len >= limit) break;
-                        }
-                        try appendReturnRow(allocator, txn, &out_rows, binding, ret.items);
-                    }
-                    deinitBindings(&rows, allocator);
-                    return .{
-                        .columns = try columnNames(allocator, ret.items),
-                        .rows = try out_rows.toOwnedSlice(allocator),
-                        .rows_affected = null,
-                    };
-                },
-                .insert => |patterns| {
-                    var count: usize = 0;
-                    for (rows.items) |*binding| {
-                        for (patterns) |pattern| {
-                            count += try insertPath(allocator, io, txn, binding, pattern);
-                        }
-                    }
-                    deinitBindings(&rows, allocator);
-                    return mutationResult(count);
-                },
-                .delete => |del| {
-                    const count = try deleteBindings(allocator, txn, rows.items, del);
-                    deinitBindings(&rows, allocator);
-                    return mutationResult(count);
-                },
-                .set => |sets| {
-                    const count = try setProperties(allocator, txn, rows.items, sets);
-                    deinitBindings(&rows, allocator);
-                    return mutationResult(count);
-                },
-                .finish => {
-                    const n = rows.items.len;
-                    deinitBindings(&rows, allocator);
-                    return mutationResult(n);
-                },
-            }
+        .return_only => |ret| return try compileReturnPlan(allocator, ret),
+        .insert => |patterns| return try compileInsertPlan(allocator, patterns),
+        .match_query => |mq| return switch (mq.action) {
+            .ret => try compileMatchReturnPlan(allocator, mq),
+            .insert => try compileMatchInsertPlan(allocator, mq),
+            .set => try compileMatchSetPlan(allocator, mq),
+            .delete => try compileMatchDeletePlan(allocator, mq),
+            .finish => try compileMatchFinishPlan(allocator, mq),
         },
     }
+}
+
+fn executeCompiledStatement(
+    allocator: Allocator,
+    io: std.Io,
+    txn: storage.Transaction,
+    statement: CompiledStatement,
+) Error!ResultSet {
+    _ = io;
+    return switch (statement.result) {
+        .rows => |columns| try executeCompiledRows(allocator, txn, &statement.plan, columns),
+        .mutation => |affected_per_row| blk: {
+            const rows = try consumePlanRows(allocator, txn, &statement.plan);
+            break :blk mutationResult(rows * affected_per_row);
+        },
+    };
 }
 
 fn mutationResult(rows_affected: usize) ResultSet {
@@ -621,16 +596,16 @@ const Planner = struct {
     }
 };
 
-fn executeReturnPlan(allocator: Allocator, txn: storage.Transaction, ret: ReturnClause) Error!ResultSet {
+fn compileReturnPlan(allocator: Allocator, ret: ReturnClause) Error!CompiledStatement {
     var planner = Planner{ .allocator = allocator };
     defer planner.deinit();
     try appendReturnProjection(&planner, ret);
     try appendOrderBy(&planner, ret);
     try appendSkipLimit(&planner, ret);
-    return try executePlannedResult(allocator, txn, &planner.plan, ret.items);
+    return try compiledRows(allocator, &planner, ret);
 }
 
-fn executeMatchReturnPlan(allocator: Allocator, txn: storage.Transaction, mq: MatchQuery) Error!ResultSet {
+fn compileMatchReturnPlan(allocator: Allocator, mq: MatchQuery) Error!CompiledStatement {
     if (mq.action != .ret) return error.Unsupported;
 
     var planner = Planner{ .allocator = allocator };
@@ -640,10 +615,10 @@ fn executeMatchReturnPlan(allocator: Allocator, txn: storage.Transaction, mq: Ma
     try appendReturnProjection(&planner, ret);
     try appendOrderBy(&planner, ret);
     try appendSkipLimit(&planner, ret);
-    return try executePlannedResult(allocator, txn, &planner.plan, ret.items);
+    return try compiledRows(allocator, &planner, ret);
 }
 
-fn executeInsertPlan(allocator: Allocator, txn: storage.Transaction, patterns: []PathPattern) Error!ResultSet {
+fn compileInsertPlan(allocator: Allocator, patterns: []PathPattern) Error!CompiledStatement {
     var planner = Planner{ .allocator = allocator };
     defer planner.deinit();
 
@@ -652,11 +627,10 @@ fn executeInsertPlan(allocator: Allocator, txn: storage.Transaction, patterns: [
         inserted_per_row += try appendInsertPath(&planner, pattern);
     }
 
-    const rows = try consumePlanRows(allocator, txn, &planner.plan);
-    return mutationResult(rows * inserted_per_row);
+    return compiledMutation(&planner, inserted_per_row);
 }
 
-fn executeMatchInsertPlan(allocator: Allocator, txn: storage.Transaction, mq: MatchQuery) Error!ResultSet {
+fn compileMatchInsertPlan(allocator: Allocator, mq: MatchQuery) Error!CompiledStatement {
     if (mq.action != .insert) return error.Unsupported;
 
     var planner = Planner{ .allocator = allocator };
@@ -668,11 +642,10 @@ fn executeMatchInsertPlan(allocator: Allocator, txn: storage.Transaction, mq: Ma
         inserted_per_row += try appendInsertPath(&planner, pattern);
     }
 
-    const rows = try consumePlanRows(allocator, txn, &planner.plan);
-    return mutationResult(rows * inserted_per_row);
+    return compiledMutation(&planner, inserted_per_row);
 }
 
-fn executeMatchSetPlan(allocator: Allocator, txn: storage.Transaction, mq: MatchQuery) Error!ResultSet {
+fn compileMatchSetPlan(allocator: Allocator, mq: MatchQuery) Error!CompiledStatement {
     if (mq.action != .set) return error.Unsupported;
 
     var planner = Planner{ .allocator = allocator };
@@ -680,11 +653,10 @@ fn executeMatchSetPlan(allocator: Allocator, txn: storage.Transaction, mq: Match
     try appendMatchQuery(&planner, mq);
     const updates_per_row = try appendUpdate(&planner, mq.action.set);
 
-    const rows = try consumePlanRows(allocator, txn, &planner.plan);
-    return mutationResult(rows * updates_per_row);
+    return compiledMutation(&planner, updates_per_row);
 }
 
-fn executeMatchDeletePlan(allocator: Allocator, txn: storage.Transaction, mq: MatchQuery) Error!ResultSet {
+fn compileMatchDeletePlan(allocator: Allocator, mq: MatchQuery) Error!CompiledStatement {
     if (mq.action != .delete) return error.Unsupported;
 
     var planner = Planner{ .allocator = allocator };
@@ -692,19 +664,60 @@ fn executeMatchDeletePlan(allocator: Allocator, txn: storage.Transaction, mq: Ma
     try appendMatchQuery(&planner, mq);
     const deletes_per_row = try appendDelete(&planner, mq.action.delete);
 
-    const rows = try consumePlanRows(allocator, txn, &planner.plan);
-    return mutationResult(rows * deletes_per_row);
+    return compiledMutation(&planner, deletes_per_row);
 }
 
-fn executeMatchFinishPlan(allocator: Allocator, txn: storage.Transaction, mq: MatchQuery) Error!ResultSet {
+fn compileMatchFinishPlan(allocator: Allocator, mq: MatchQuery) Error!CompiledStatement {
     if (mq.action != .finish) return error.Unsupported;
 
     var planner = Planner{ .allocator = allocator };
     defer planner.deinit();
     try appendMatchQuery(&planner, mq);
 
-    const rows = try consumePlanRows(allocator, txn, &planner.plan);
-    return mutationResult(rows);
+    return compiledMutation(&planner, 1);
+}
+
+fn compiledRows(allocator: Allocator, planner: *Planner, ret: ReturnClause) Error!CompiledStatement {
+    const columns = try resultColumns(allocator, ret);
+    errdefer deinitResultColumns(allocator, columns);
+    return .{
+        .plan = takePlan(planner),
+        .result = .{ .rows = columns },
+    };
+}
+
+fn compiledMutation(planner: *Planner, affected_per_row: usize) CompiledStatement {
+    return .{
+        .plan = takePlan(planner),
+        .result = .{ .mutation = affected_per_row },
+    };
+}
+
+fn takePlan(planner: *Planner) Plan {
+    const plan = planner.plan;
+    planner.plan = .{};
+    return plan;
+}
+
+fn resultColumns(allocator: Allocator, ret: ReturnClause) Allocator.Error![]ResultColumn {
+    const columns = try allocator.alloc(ResultColumn, ret.items.len);
+    errdefer allocator.free(columns);
+    for (columns) |*column| column.* = .{ .name = &.{}, .graph_value = false };
+    errdefer deinitResultColumns(allocator, columns);
+
+    for (ret.items, 0..) |item, i| {
+        columns[i] = .{
+            .name = try exprName(allocator, item),
+            .graph_value = item.expr == .variable,
+        };
+    }
+
+    return columns;
+}
+
+fn deinitResultColumns(allocator: Allocator, columns: []ResultColumn) void {
+    for (columns) |*column| column.deinit(allocator);
+    allocator.free(columns);
 }
 
 fn consumePlanRows(allocator: Allocator, txn: storage.Transaction, plan: *const Plan) Error!usize {
@@ -1072,11 +1085,11 @@ fn planDirection(direction: Direction) types.EdgeDirection {
     };
 }
 
-fn executePlannedResult(
+fn executeCompiledRows(
     allocator: Allocator,
     txn: storage.Transaction,
     plan: *const Plan,
-    items: []const ReturnItem,
+    columns: []const ResultColumn,
 ) Error!ResultSet {
     var exec = try executor.Executor.init(plan, txn);
     defer exec.deinit();
@@ -1086,41 +1099,41 @@ fn executePlannedResult(
     while (try exec.run()) |result_value| {
         var result = result_value;
         defer result.deinit(allocator);
-        try rows.append(allocator, try rowFromPlanResult(allocator, txn, result, items));
+        try rows.append(allocator, try rowFromCompiledResult(allocator, txn, result, columns));
     }
 
     return .{
-        .columns = try columnNames(allocator, items),
+        .columns = try resultColumnNames(allocator, columns),
         .rows = try rows.toOwnedSlice(allocator),
         .rows_affected = null,
     };
 }
 
-fn rowFromPlanResult(
+fn rowFromCompiledResult(
     allocator: Allocator,
     txn: storage.Transaction,
     result: executor.Result,
-    items: []const ReturnItem,
+    columns: []const ResultColumn,
 ) Error!Row {
-    const values = try allocator.alloc(ResultValue, items.len);
+    const values = try allocator.alloc(ResultValue, columns.len);
     errdefer allocator.free(values);
     for (values) |*value| value.* = .{ .scalar = .null };
     errdefer for (values) |*value| value.deinit(allocator);
 
-    for (items, result.values, 0..) |item, value, i| {
+    for (columns, result.values, 0..) |column, value, i| {
         values[i].deinit(allocator);
-        values[i] = try resultValueFromPlanValue(allocator, txn, item.expr, value);
+        values[i] = try resultValueFromCompiledValue(allocator, txn, column, value);
     }
     return .{ .values = values };
 }
 
-fn resultValueFromPlanValue(
+fn resultValueFromCompiledValue(
     allocator: Allocator,
     txn: storage.Transaction,
-    expr: Expr,
+    column: ResultColumn,
     value: Value,
 ) Error!ResultValue {
-    if (expr == .variable) {
+    if (column.graph_value) {
         switch (value) {
             .node_ref => |id| {
                 var node = try txn.getNode(id) orelse return .{ .scalar = .null };
@@ -1635,426 +1648,9 @@ fn isNameToken(tag: Token.Tag) bool {
 
 // ----------------------------- Execution ----------------------------------
 
-const Bound = union(enum) {
-    node: ElementId,
-    edge: ElementId,
-};
-
-const Binding = struct {
-    vars: std.StringHashMapUnmanaged(Bound) = .empty,
-
-    fn deinit(self: *Binding, allocator: Allocator) void {
-        self.vars.deinit(allocator);
-        self.* = undefined;
-    }
-
-    fn clone(self: Binding, allocator: Allocator) Allocator.Error!Binding {
-        return .{ .vars = try self.vars.clone(allocator) };
-    }
-
-    fn bindNode(self: *Binding, allocator: Allocator, name: []const u8, id: ElementId) Allocator.Error!bool {
-        if (self.vars.get(name)) |bound| return switch (bound) {
-            .node => |node_id| node_id.value == id.value,
-            .edge => false,
-        };
-        try self.vars.put(allocator, name, .{ .node = id });
-        return true;
-    }
-
-    fn bindEdge(self: *Binding, allocator: Allocator, name: []const u8, id: ElementId) Allocator.Error!bool {
-        if (self.vars.get(name)) |bound| return switch (bound) {
-            .edge => |edge_id| edge_id.value == id.value,
-            .node => false,
-        };
-        try self.vars.put(allocator, name, .{ .edge = id });
-        return true;
-    }
-};
-
-const PathRow = struct {
-    binding: Binding,
-    current: ElementId,
-
-    fn deinit(self: *PathRow, allocator: Allocator) void {
-        self.binding.deinit(allocator);
-        self.* = undefined;
-    }
-};
-
-fn deinitBindings(rows: *std.ArrayList(Binding), allocator: Allocator) void {
-    for (rows.items) |*row| row.deinit(allocator);
-    rows.deinit(allocator);
-}
-
-fn deinitPathRows(rows: *std.ArrayList(PathRow), allocator: Allocator) void {
-    for (rows.items) |*row| row.deinit(allocator);
-    rows.deinit(allocator);
-}
-
 fn deinitRowList(rows: *std.ArrayList(Row), allocator: Allocator) void {
     for (rows.items) |*row| row.deinit(allocator);
     rows.deinit(allocator);
-}
-
-fn filterBindings(allocator: Allocator, txn: storage.Transaction, rows: *std.ArrayList(Binding), predicate: Expr) Error!void {
-    var kept = std.ArrayList(Binding).empty;
-    errdefer deinitBindings(&kept, allocator);
-
-    for (rows.items) |*binding| {
-        var value = try evalExpr(allocator, txn, binding.*, predicate);
-        defer value.deinit(allocator);
-        if (value.truthy()) {
-            const moved = binding.*;
-            try kept.append(allocator, moved);
-            binding.* = Binding{};
-        }
-    }
-
-    deinitBindings(rows, allocator);
-    rows.* = kept;
-}
-
-fn matchPath(allocator: Allocator, txn: storage.Transaction, rows: *std.ArrayList(Binding), pattern: PathPattern) Error!void {
-    var path_rows = std.ArrayList(PathRow).empty;
-    errdefer deinitPathRows(&path_rows, allocator);
-
-    for (rows.items) |row| {
-        if (pattern.start.variable) |name| {
-            if (row.vars.get(name)) |bound| {
-                if (bound != .node) continue;
-                var node = try txn.getNode(bound.node) orelse continue;
-                defer node.deinit(allocator);
-                if (!try nodeMatches(allocator, txn, row, pattern.start, node)) continue;
-                try path_rows.append(allocator, .{ .binding = try row.clone(allocator), .current = bound.node });
-                continue;
-            }
-        }
-
-        var it = try txn.iterateNodes();
-        defer it.close();
-        while (try it.next()) |node_value| {
-            var node = node_value;
-            defer node.deinit(allocator);
-            if (!try nodeMatches(allocator, txn, row, pattern.start, node)) continue;
-            var next_binding = try row.clone(allocator);
-            errdefer next_binding.deinit(allocator);
-            if (pattern.start.variable) |name| {
-                if (!try next_binding.bindNode(allocator, name, node.id)) continue;
-            }
-            try path_rows.append(allocator, .{ .binding = next_binding, .current = node.id });
-        }
-    }
-
-    for (pattern.segments) |segment| {
-        var next_path_rows = std.ArrayList(PathRow).empty;
-        errdefer deinitPathRows(&next_path_rows, allocator);
-
-        for (path_rows.items) |path_row| {
-            const min_inout, const max_inout = inoutRange(segment.edge.direction);
-            var adj = try txn.iterateAdj(path_row.current, min_inout, max_inout);
-            defer adj.close();
-            while (try adj.next()) |entry| {
-                var edge = try txn.getEdge(entry.edge_id) orelse continue;
-                defer edge.deinit(allocator);
-                if (!try edgeMatches(allocator, txn, path_row.binding, segment.edge, edge)) continue;
-
-                var dest_node = try txn.getNode(entry.dest_node_id) orelse continue;
-                defer dest_node.deinit(allocator);
-                if (!try nodeMatches(allocator, txn, path_row.binding, segment.node, dest_node)) continue;
-
-                var next_binding = try path_row.binding.clone(allocator);
-                errdefer next_binding.deinit(allocator);
-                if (segment.edge.variable) |name| {
-                    if (!try next_binding.bindEdge(allocator, name, edge.id)) continue;
-                }
-                if (segment.node.variable) |name| {
-                    if (!try next_binding.bindNode(allocator, name, dest_node.id)) continue;
-                }
-                try next_path_rows.append(allocator, .{ .binding = next_binding, .current = dest_node.id });
-            }
-        }
-
-        deinitPathRows(&path_rows, allocator);
-        path_rows = next_path_rows;
-    }
-
-    deinitBindings(rows, allocator);
-    rows.* = std.ArrayList(Binding).empty;
-    for (path_rows.items) |path_row| {
-        try rows.append(allocator, path_row.binding);
-    }
-    // `path_row.binding` ownership moved into `rows`; only free the backing array.
-    path_rows.deinit(allocator);
-}
-
-fn inoutRange(direction: Direction) struct { types.EdgeInOut, types.EdgeInOut } {
-    return switch (direction) {
-        .right => .{ .out, .out },
-        .left => .{ .in, .in },
-        .undirected => .{ .simple, .simple },
-        .any => .{ .out, .in },
-    };
-}
-
-fn nodeMatches(allocator: Allocator, txn: storage.Transaction, binding: Binding, pattern: NodePattern, node: types.Node) Error!bool {
-    if (pattern.label) |label| {
-        if (!node.labels.contains(label)) return false;
-    }
-    const b = binding;
-    for (pattern.properties) |property| {
-        const actual = node.properties.get(property.key) orelse return false;
-        var expected = try evalExpr(allocator, txn, b, property.value);
-        defer expected.deinit(allocator);
-        if (!actual.eql(expected)) return false;
-    }
-    return true;
-}
-
-fn edgeMatches(allocator: Allocator, txn: storage.Transaction, binding: Binding, pattern: EdgePattern, edge: types.Edge) Error!bool {
-    if (pattern.label) |label| {
-        if (!edge.labels.contains(label)) return false;
-    }
-    const b = binding;
-    for (pattern.properties) |property| {
-        const actual = edge.properties.get(property.key) orelse return false;
-        var expected = try evalExpr(allocator, txn, b, property.value);
-        defer expected.deinit(allocator);
-        if (!actual.eql(expected)) return false;
-    }
-    return true;
-}
-
-fn insertPath(allocator: Allocator, io: std.Io, txn: storage.Transaction, binding: *Binding, pattern: PathPattern) Error!usize {
-    var count: usize = 0;
-    var current = try insertOrUseNode(allocator, io, txn, binding, pattern.start, &count);
-    for (pattern.segments) |segment| {
-        const dest = try insertOrUseNode(allocator, io, txn, binding, segment.node, &count);
-        try insertEdge(allocator, io, txn, binding, current, dest, segment.edge);
-        count += 1;
-        current = dest;
-    }
-    return count;
-}
-
-fn insertOrUseNode(
-    allocator: Allocator,
-    io: std.Io,
-    txn: storage.Transaction,
-    binding: *Binding,
-    pattern: NodePattern,
-    count: *usize,
-) Error!ElementId {
-    if (pattern.variable) |name| {
-        if (binding.vars.get(name)) |bound| return switch (bound) {
-            .node => |id| id,
-            .edge => error.WrongType,
-        };
-    }
-
-    var node = types.Node{ .id = ElementId.generate(io) };
-    errdefer node.deinit(allocator);
-    if (pattern.label) |label| {
-        try node.labels.put(allocator, try allocator.dupe(u8, label), void{});
-    }
-    node.properties = try evaluateProperties(allocator, txn, binding.*, pattern.properties);
-    try txn.putNode(node);
-    const id = node.id;
-    node.deinit(allocator);
-    if (pattern.variable) |name| {
-        _ = try binding.bindNode(allocator, name, id);
-    }
-    count.* += 1;
-    return id;
-}
-
-fn insertEdge(
-    allocator: Allocator,
-    io: std.Io,
-    txn: storage.Transaction,
-    binding: *Binding,
-    src: ElementId,
-    dest: ElementId,
-    pattern: EdgePattern,
-) Error!void {
-    var edge = types.Edge{
-        .id = ElementId.generate(io),
-        .endpoints = .{ src, dest },
-        .directed = pattern.direction == .right or pattern.direction == .left,
-    };
-    errdefer edge.deinit(allocator);
-
-    if (pattern.direction == .left) {
-        edge.endpoints = .{ dest, src };
-    }
-    if (pattern.label) |label| {
-        try edge.labels.put(allocator, try allocator.dupe(u8, label), void{});
-    }
-    edge.properties = try evaluateProperties(allocator, txn, binding.*, pattern.properties);
-    try txn.putEdge(edge);
-    const id = edge.id;
-    edge.deinit(allocator);
-    if (pattern.variable) |name| {
-        _ = try binding.bindEdge(allocator, name, id);
-    }
-}
-
-fn evaluateProperties(
-    allocator: Allocator,
-    txn: storage.Transaction,
-    binding: Binding,
-    properties: []const Property,
-) Error!std.StringArrayHashMapUnmanaged(Value) {
-    var ret: std.StringArrayHashMapUnmanaged(Value) = .empty;
-    errdefer types.freeProperties(allocator, &ret);
-    for (properties) |property| {
-        const key = try allocator.dupe(u8, property.key);
-        errdefer allocator.free(key);
-        var value = try evalExpr(allocator, txn, binding, property.value);
-        errdefer value.deinit(allocator);
-        try ret.put(allocator, key, value);
-    }
-    return ret;
-}
-
-fn deleteBindings(allocator: Allocator, txn: storage.Transaction, rows: []const Binding, del: DeleteAction) Error!usize {
-    var deleted_nodes: std.AutoHashMapUnmanaged(u96, void) = .empty;
-    defer deleted_nodes.deinit(allocator);
-    var deleted_edges: std.AutoHashMapUnmanaged(u96, void) = .empty;
-    defer deleted_edges.deinit(allocator);
-
-    var count: usize = 0;
-    for (rows) |binding| {
-        for (del.variables) |name| {
-            const bound = binding.vars.get(name) orelse continue;
-            switch (bound) {
-                .edge => |edge_id| {
-                    if (deleted_edges.contains(edge_id.value)) continue;
-                    txn.deleteEdge(edge_id) catch |err| switch (err) {
-                        rocksdb.Error.NotFound => {},
-                        else => |e| return e,
-                    };
-                    try deleted_edges.put(allocator, edge_id.value, void{});
-                    count += 1;
-                },
-                .node => |node_id| {
-                    if (deleted_nodes.contains(node_id.value)) continue;
-                    if (del.detach) {
-                        try deleteAttachedEdges(allocator, txn, node_id, &deleted_edges, &count);
-                    }
-                    txn.deleteNode(node_id) catch |err| switch (err) {
-                        rocksdb.Error.NotFound => {},
-                        else => |e| return e,
-                    };
-                    try deleted_nodes.put(allocator, node_id.value, void{});
-                    count += 1;
-                },
-            }
-        }
-    }
-    return count;
-}
-
-fn deleteAttachedEdges(
-    allocator: Allocator,
-    txn: storage.Transaction,
-    node_id: ElementId,
-    deleted_edges: *std.AutoHashMapUnmanaged(u96, void),
-    count: *usize,
-) Error!void {
-    var ids = std.ArrayList(ElementId).empty;
-    defer ids.deinit(allocator);
-    var it = try txn.iterateAdj(node_id, .out, .in);
-    defer it.close();
-    while (try it.next()) |entry| try ids.append(allocator, entry.edge_id);
-
-    for (ids.items) |edge_id| {
-        if (deleted_edges.contains(edge_id.value)) continue;
-        txn.deleteEdge(edge_id) catch |err| switch (err) {
-            rocksdb.Error.NotFound => {},
-            else => |e| return e,
-        };
-        try deleted_edges.put(allocator, edge_id.value, void{});
-        count.* += 1;
-    }
-}
-
-fn setProperties(allocator: Allocator, txn: storage.Transaction, rows: []const Binding, sets: []const SetClause) Error!usize {
-    var count: usize = 0;
-    for (rows) |binding| {
-        for (sets) |set| {
-            const bound = binding.vars.get(set.variable) orelse return error.UnknownIdentifier;
-            var value = try evalExpr(allocator, txn, binding, set.value);
-            errdefer value.deinit(allocator);
-            switch (bound) {
-                .node => |node_id| {
-                    var node = try txn.getNode(node_id) orelse continue;
-                    defer node.deinit(allocator);
-                    try putProperty(allocator, &node.properties, set.property, value);
-                    value = .null; // ownership moved
-                    try txn.putNode(node);
-                    count += 1;
-                },
-                .edge => |edge_id| {
-                    var edge = try txn.getEdge(edge_id) orelse continue;
-                    defer edge.deinit(allocator);
-                    try putProperty(allocator, &edge.properties, set.property, value);
-                    value = .null; // ownership moved
-                    try txn.putEdge(edge);
-                    count += 1;
-                },
-            }
-        }
-    }
-    return count;
-}
-
-fn putProperty(allocator: Allocator, properties: *std.StringArrayHashMapUnmanaged(Value), key: []const u8, value: Value) Allocator.Error!void {
-    if (properties.getIndex(key)) |idx| {
-        properties.values()[idx].deinit(allocator);
-        properties.values()[idx] = value;
-    } else {
-        try properties.put(allocator, try allocator.dupe(u8, key), value);
-    }
-}
-
-fn appendReturnRow(
-    allocator: Allocator,
-    txn: storage.Transaction,
-    out_rows: *std.ArrayList(Row),
-    binding: Binding,
-    items: []const ReturnItem,
-) Error!void {
-    const values = try allocator.alloc(ResultValue, items.len);
-    errdefer allocator.free(values);
-    for (values) |*v| v.* = .{ .scalar = .null };
-    errdefer for (values) |*v| v.deinit(allocator);
-
-    for (items, 0..) |item, i| {
-        values[i].deinit(allocator);
-        values[i] = try evalReturnExpr(allocator, txn, binding, item.expr);
-    }
-    try out_rows.append(allocator, .{ .values = values });
-}
-
-fn evalReturnExpr(allocator: Allocator, txn: storage.Transaction, binding: Binding, expr: Expr) Error!ResultValue {
-    switch (expr) {
-        .variable => |name| {
-            const bound = binding.vars.get(name) orelse return error.UnknownIdentifier;
-            return switch (bound) {
-                .node => |id| blk: {
-                    var node = try txn.getNode(id) orelse return .{ .scalar = .null };
-                    defer node.deinit(allocator);
-                    break :blk .{ .node = try nodeObjectFromNode(allocator, node) };
-                },
-                .edge => |id| blk: {
-                    var edge = try txn.getEdge(id) orelse return .{ .scalar = .null };
-                    defer edge.deinit(allocator);
-                    break :blk .{ .edge = try edgeObjectFromEdge(allocator, edge) };
-                },
-            };
-        },
-        else => return .{ .scalar = try evalExpr(allocator, txn, binding, expr) },
-    }
 }
 
 fn nodeObjectFromNode(allocator: Allocator, node: types.Node) Allocator.Error!NodeObject {
@@ -2100,13 +1696,16 @@ fn cloneResultProperties(allocator: Allocator, keys: []const []const u8, values:
     return out;
 }
 
-fn columnNames(allocator: Allocator, items: []const ReturnItem) Allocator.Error![]const []u8 {
-    var cols = try allocator.alloc([]u8, items.len);
-    errdefer allocator.free(cols);
-    for (items, 0..) |item, i| {
-        cols[i] = try exprName(allocator, item);
+fn resultColumnNames(allocator: Allocator, columns: []const ResultColumn) Allocator.Error![]const []u8 {
+    const names = try allocator.alloc([]u8, columns.len);
+    errdefer allocator.free(names);
+    for (names) |*name| name.* = &.{};
+    errdefer for (names) |name| allocator.free(name);
+
+    for (columns, 0..) |column, i| {
+        names[i] = try allocator.dupe(u8, column.name);
     }
-    return cols;
+    return names;
 }
 
 fn exprName(allocator: Allocator, item: ReturnItem) Allocator.Error![]u8 {
@@ -2120,133 +1719,24 @@ fn exprName(allocator: Allocator, item: ReturnItem) Allocator.Error![]u8 {
     };
 }
 
-fn evalExpr(allocator: Allocator, txn: storage.Transaction, binding: Binding, expr: Expr) Error!Value {
-    switch (expr) {
-        .literal => |v| return try v.dupe(allocator),
-        .variable => |name| {
-            const bound = binding.vars.get(name) orelse return error.UnknownIdentifier;
-            return switch (bound) {
-                .node => |id| .{ .node_ref = id },
-                .edge => |id| .{ .edge_ref = id },
-            };
-        },
-        .property => |p| {
-            const bound = binding.vars.get(p.variable) orelse return error.UnknownIdentifier;
-            switch (bound) {
-                .node => |id| {
-                    var node = try txn.getNode(id) orelse return .null;
-                    defer node.deinit(allocator);
-                    const value = node.properties.get(p.property) orelse return .null;
-                    return try value.dupe(allocator);
-                },
-                .edge => |id| {
-                    var edge = try txn.getEdge(id) orelse return .null;
-                    defer edge.deinit(allocator);
-                    const value = edge.properties.get(p.property) orelse return .null;
-                    return try value.dupe(allocator);
-                },
-            }
-        },
-        .unary => |unary| {
-            var operand = try evalExpr(allocator, txn, binding, unary.operand);
-            defer operand.deinit(allocator);
-            return switch (unary.op) {
-                .not => .{ .bool = !operand.truthy() },
-            };
-        },
-        .binary => |bin| {
-            switch (bin.op) {
-                .and_ => {
-                    var left = try evalExpr(allocator, txn, binding, bin.left);
-                    defer left.deinit(allocator);
-                    if (!left.truthy()) return .{ .bool = false };
-                    var right = try evalExpr(allocator, txn, binding, bin.right);
-                    defer right.deinit(allocator);
-                    return .{ .bool = right.truthy() };
-                },
-                .or_ => {
-                    var left = try evalExpr(allocator, txn, binding, bin.left);
-                    defer left.deinit(allocator);
-                    if (left.truthy()) return .{ .bool = true };
-                    var right = try evalExpr(allocator, txn, binding, bin.right);
-                    defer right.deinit(allocator);
-                    return .{ .bool = right.truthy() };
-                },
-                else => {},
-            }
-            var left = try evalExpr(allocator, txn, binding, bin.left);
-            defer left.deinit(allocator);
-            var right = try evalExpr(allocator, txn, binding, bin.right);
-            defer right.deinit(allocator);
-            return switch (bin.op) {
-                .add => try left.add(right, allocator),
-                .sub => left.sub(right),
-                .mul => multiplyValues(left, right),
-                .eql => .{ .bool = left.eql(right) },
-                .neq => .{ .bool = !left.eql(right) },
-                .lt => .{ .bool = if (compareValues(left, right)) |order| order == .lt else false },
-                .lte => .{ .bool = if (compareValues(left, right)) |order| order == .lt or order == .eq else false },
-                .gt => .{ .bool = if (compareValues(left, right)) |order| order == .gt else false },
-                .gte => .{ .bool = if (compareValues(left, right)) |order| order == .gt or order == .eq else false },
-                .and_, .or_ => unreachable,
-            };
-        },
-    }
-}
-
-fn compareValues(left: Value, right: Value) ?std.math.Order {
-    return switch (left) {
-        .int64 => |a| switch (right) {
-            .int64 => |b| orderInt(a, b),
-            .float64 => |b| orderFloat(@floatFromInt(a), b),
-            else => null,
-        },
-        .float64 => |a| switch (right) {
-            .int64 => |b| orderFloat(a, @floatFromInt(b)),
-            .float64 => |b| orderFloat(a, b),
-            else => null,
-        },
-        .string => |a| switch (right) {
-            .string => |b| std.mem.order(u8, a, b),
-            else => null,
-        },
-        else => null,
-    };
-}
-
-fn orderInt(a: i64, b: i64) std.math.Order {
-    if (a < b) return .lt;
-    if (a > b) return .gt;
-    return .eq;
-}
-
-fn orderFloat(a: f64, b: f64) ?std.math.Order {
-    if (std.math.isNan(a) or std.math.isNan(b)) return null;
-    if (a < b) return .lt;
-    if (a > b) return .gt;
-    return .eq;
-}
-
-fn multiplyValues(left: Value, right: Value) Value {
-    return switch (left) {
-        .int64 => |a| switch (right) {
-            .int64 => |b| .{ .int64 = a * b },
-            .float64 => |b| .{ .float64 = @as(f64, @floatFromInt(a)) * b },
-            else => .null,
-        },
-        .float64 => |a| switch (right) {
-            .int64 => |b| .{ .float64 = a * @as(f64, @floatFromInt(b)) },
-            .float64 => |b| .{ .float64 = a * b },
-            else => .null,
-        },
-        else => .null,
-    };
-}
-
 // ------------------------------- Tests ------------------------------------
+
+const Snap = @import("vendor/snaptest.zig").Snap;
+const snap = Snap.snap;
 
 fn execForTest(store: storage.Storage, source: [:0]const u8) !ResultSet {
     return try execute(std.testing.allocator, std.testing.io, store, source);
+}
+
+fn checkQueryPlanSnapshot(source: [:0]const u8, want: Snap) !void {
+    var compiled = try compile(std.testing.allocator, source);
+    defer compiled.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), compiled.statements.len);
+
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try compiled.statements[0].plan.print(&out.writer);
+    try want.diff(out.written());
 }
 
 fn jsonForTest(result: ResultSet) ![]u8 {
@@ -2264,6 +1754,27 @@ fn resultContainsString(result: ResultSet, column: usize, expected: []const u8) 
         if (std.mem.eql(u8, scalar.string, expected)) return true;
     }
     return false;
+}
+
+test "compile match return query plan snapshot" {
+    try checkQueryPlanSnapshot("MATCH (p:Person) WHERE p.age > 30 RETURN p.name ORDER BY p.age DESC LIMIT 2", snap(@src(),
+        \\Plan{%1}
+        \\  Limit 2
+        \\  Sort %2 desc
+        \\  Project %2: %0.age
+        \\  Project %1: %0.name
+        \\  Filter (%0.age > 30)
+        \\  NodeScan (%0:Person)
+    ));
+}
+
+test "compile match set query plan snapshot" {
+    try checkQueryPlanSnapshot("MATCH (p:Person {name: 'Eric'}) SET p.age = 23", snap(@src(),
+        \\Plan{}
+        \\  Update %0.age = 23
+        \\  Filter (%0.name = 'Eric')
+        \\  NodeScan (%0:Person)
+    ));
 }
 
 test "return arithmetic" {
