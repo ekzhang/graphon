@@ -37,7 +37,7 @@ pub const CompiledStatement = struct {
 
 pub const CompiledResult = union(enum) {
     rows: []ResultColumn,
-    mutation: usize,
+    mutation: MutationCount,
 
     pub fn deinit(self: *CompiledResult, allocator: Allocator) void {
         switch (self.*) {
@@ -49,6 +49,11 @@ pub const CompiledResult = union(enum) {
         }
         self.* = undefined;
     }
+};
+
+pub const MutationCount = enum {
+    mutations,
+    rows,
 };
 
 pub const ResultColumn = struct {
@@ -87,15 +92,27 @@ fn compileStatement(allocator: Allocator, statement: Ast.Statement) Error!Compil
 
     switch (statement) {
         .return_only => |ret| return try appendReturnResult(allocator, &planner, ret),
-        .insert => |patterns| return appendMutationResult(&planner, try appendInsertPatterns(&planner, patterns)),
+        .insert => |patterns| {
+            try appendInsertPatterns(&planner, patterns);
+            return appendMutationResult(&planner, .mutations);
+        },
         .match_query => |mq| {
             try appendMatchQuery(&planner, mq);
             return switch (mq.action) {
                 .ret => |ret| try appendReturnResult(allocator, &planner, ret),
-                .insert => |patterns| appendMutationResult(&planner, try appendInsertPatterns(&planner, patterns)),
-                .set => |sets| appendMutationResult(&planner, try appendUpdate(&planner, sets)),
-                .delete => |del| appendMutationResult(&planner, try appendDelete(&planner, del)),
-                .finish => appendMutationResult(&planner, 1),
+                .insert => |patterns| blk: {
+                    try appendInsertPatterns(&planner, patterns);
+                    break :blk appendMutationResult(&planner, .mutations);
+                },
+                .set => |sets| blk: {
+                    try appendUpdate(&planner, sets);
+                    break :blk appendMutationResult(&planner, .mutations);
+                },
+                .delete => |del| blk: {
+                    try appendDelete(&planner, del);
+                    break :blk appendMutationResult(&planner, .mutations);
+                },
+                .finish => appendMutationResult(&planner, .rows),
             };
         },
     }
@@ -152,19 +169,17 @@ fn appendReturnResult(allocator: Allocator, planner: *Planner, ret: Ast.ReturnCl
     };
 }
 
-fn appendMutationResult(planner: *Planner, affected_per_row: usize) CompiledStatement {
+fn appendMutationResult(planner: *Planner, count: MutationCount) CompiledStatement {
     return .{
         .plan = takePlan(planner),
-        .result = .{ .mutation = affected_per_row },
+        .result = .{ .mutation = count },
     };
 }
 
-fn appendInsertPatterns(planner: *Planner, patterns: []Ast.PathPattern) Error!usize {
-    var inserted_per_row: usize = 0;
+fn appendInsertPatterns(planner: *Planner, patterns: []Ast.PathPattern) Error!void {
     for (patterns) |pattern| {
-        inserted_per_row += try appendInsertPath(planner, pattern);
+        try appendInsertPath(planner, pattern);
     }
-    return inserted_per_row;
 }
 
 fn takePlan(planner: *Planner) Plan {
@@ -193,7 +208,7 @@ fn deinitResultColumns(allocator: Allocator, columns: []ResultColumn) void {
     allocator.free(columns);
 }
 
-fn appendUpdate(planner: *Planner, sets: []const Ast.SetClause) Error!usize {
+fn appendUpdate(planner: *Planner, sets: []const Ast.SetClause) Error!void {
     var items = std.ArrayList(Plan.UpdateClause).empty;
     errdefer {
         for (items.items) |*item| item.deinit(planner.allocator);
@@ -213,10 +228,9 @@ fn appendUpdate(planner: *Planner, sets: []const Ast.SetClause) Error!usize {
 
     try planner.plan.ops.append(planner.allocator, .{ .update = .{ .items = items } });
     items = .empty;
-    return sets.len;
 }
 
-fn appendDelete(planner: *Planner, del: Ast.DeleteAction) Error!usize {
+fn appendDelete(planner: *Planner, del: Ast.DeleteAction) Error!void {
     var idents = std.ArrayList(u16).empty;
     errdefer idents.deinit(planner.allocator);
 
@@ -225,15 +239,13 @@ fn appendDelete(planner: *Planner, del: Ast.DeleteAction) Error!usize {
         try idents.append(planner.allocator, binding.ident);
     }
 
-    const count = idents.items.len;
-    if (count > 0) {
+    if (idents.items.len > 0) {
         try planner.plan.ops.append(planner.allocator, .{ .delete = .{
             .detach = del.detach,
             .idents = idents,
         } });
         idents = .empty;
     }
-    return count;
 }
 
 fn appendMatchQuery(planner: *Planner, mq: Ast.MatchQuery) Error!void {
@@ -247,19 +259,16 @@ fn appendMatchQuery(planner: *Planner, mq: Ast.MatchQuery) Error!void {
     }
 }
 
-fn appendInsertPath(planner: *Planner, pattern: Ast.PathPattern) Error!usize {
-    var count: usize = 0;
-    var current = try appendInsertNodeOrUse(planner, pattern.start, &count);
+fn appendInsertPath(planner: *Planner, pattern: Ast.PathPattern) Error!void {
+    var current = try appendInsertNodeOrUse(planner, pattern.start);
     for (pattern.segments) |segment| {
-        const dest = try appendInsertNodeOrUse(planner, segment.node, &count);
+        const dest = try appendInsertNodeOrUse(planner, segment.node);
         try appendInsertEdge(planner, current, dest, segment.edge);
-        count += 1;
         current = dest;
     }
-    return count;
 }
 
-fn appendInsertNodeOrUse(planner: *Planner, pattern: Ast.NodePattern, count: *usize) Error!u16 {
+fn appendInsertNodeOrUse(planner: *Planner, pattern: Ast.NodePattern) Error!u16 {
     if (pattern.variable) |name| {
         if (planner.bindings.get(name)) |binding| {
             if (binding.kind != .node) return error.WrongType;
@@ -280,7 +289,6 @@ fn appendInsertNodeOrUse(planner: *Planner, pattern: Ast.NodePattern, count: *us
     } });
     labels = .empty;
     properties = .{};
-    count.* += 1;
     return ident;
 }
 

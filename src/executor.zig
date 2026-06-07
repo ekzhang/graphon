@@ -114,6 +114,9 @@ pub const Executor = struct {
     /// Whether the implicit "initial operator" has returned yet.
     init_op: bool,
 
+    /// Number of graph storage mutations completed by this execution.
+    mutations: usize,
+
     /// Create a new executor for the given plan, within a storage transaction.
     pub fn init(plan: *const Plan, txn: storage.Transaction) !Executor {
         var exec = try init1(plan, txn);
@@ -141,6 +144,7 @@ pub const Executor = struct {
             .states = states,
             .assignments = assignments,
             .init_op = false,
+            .mutations = 0,
         };
     }
 

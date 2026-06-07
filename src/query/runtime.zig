@@ -194,9 +194,12 @@ pub fn executeCompiledStatement(
 ) Error!ResultSet {
     return switch (statement.result) {
         .rows => |columns| try executeCompiledRows(allocator, txn, &statement.plan, columns),
-        .mutation => |affected_per_row| blk: {
-            const rows = try consumePlanRows(allocator, txn, &statement.plan);
-            break :blk mutationResult(rows * affected_per_row);
+        .mutation => |count| blk: {
+            const stats = try consumePlanRows(txn, &statement.plan);
+            break :blk mutationResult(switch (count) {
+                .mutations => stats.mutations,
+                .rows => stats.rows,
+            });
         },
     };
 }
@@ -205,19 +208,24 @@ fn mutationResult(rows_affected: usize) ResultSet {
     return .{ .columns = &.{}, .rows = &.{}, .rows_affected = rows_affected };
 }
 
-fn consumePlanRows(allocator: Allocator, txn: storage.Transaction, plan: *const Plan) Error!usize {
-    _ = allocator;
+const ConsumedPlanStats = struct {
+    rows: usize = 0,
+    mutations: usize = 0,
+};
+
+fn consumePlanRows(txn: storage.Transaction, plan: *const Plan) Error!ConsumedPlanStats {
     var exec = try executor.Executor.init(plan, txn);
     defer exec.deinit();
 
-    var rows: usize = 0;
+    var stats = ConsumedPlanStats{};
     while (try exec.run()) |result_value| {
         var result = result_value;
         result.deinit(txn.allocator);
-        rows += 1;
+        stats.rows += 1;
     }
+    stats.mutations = exec.mutations;
 
-    return rows;
+    return stats;
 }
 
 fn executeCompiledRows(

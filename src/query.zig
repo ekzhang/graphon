@@ -254,12 +254,38 @@ test "insert match return and detach delete" {
     {
         var result = try execForTest(store, "MATCH (f:Food {name: 'Pizza'}) DETACH DELETE f");
         defer result.deinit(std.testing.allocator);
-        try std.testing.expect(result.rows_affected.? >= 1);
+        try std.testing.expectEqual(@as(?usize, 2), result.rows_affected);
     }
     {
         var result = try execForTest(store, "MATCH (a:User {name: 'Eric'})->[:Likes]->(f:Food) RETURN f.name, f.calories");
         defer result.deinit(std.testing.allocator);
         try std.testing.expectEqual(@as(usize, 0), result.rows.len);
+    }
+}
+
+test "delete counts actual removed graph elements" {
+    var tmp = @import("test_helpers.zig").tmp();
+    defer tmp.cleanup();
+    const store = try tmp.store("test.db");
+    defer store.db.close();
+
+    {
+        var result = try execForTest(store,
+            \\INSERT (:User {name: 'Eric'}),
+            \\       (:Food {name: 'Pizza'})
+        );
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(?usize, 2), result.rows_affected);
+    }
+    {
+        var result = try execForTest(store, "MATCH (a:User {name: 'Eric'}), (f:Food {name: 'Pizza'}) INSERT (a)-[:Likes]->(f)");
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(?usize, 1), result.rows_affected);
+    }
+    {
+        var result = try execForTest(store, "MATCH (a:User)-[e:Likes]->(f:Food) DELETE e, e");
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(?usize, 1), result.rows_affected);
     }
 }
 

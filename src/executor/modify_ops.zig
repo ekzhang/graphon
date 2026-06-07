@@ -20,6 +20,7 @@ pub fn runInsertNode(op: Plan.InsertNode, _: *void, exec: *executor.Executor, op
     node.properties = try evaluateProperties(op.properties, exec.assignments, exec.txn);
 
     try exec.txn.putNode(node);
+    exec.mutations += 1;
     if (op.ident) |ident| {
         exec.assignments[ident] = .{ .node_ref = node.id };
     }
@@ -51,6 +52,7 @@ pub fn runInsertEdge(op: Plan.InsertEdge, _: *void, exec: *executor.Executor, op
     edge.properties = try evaluateProperties(op.properties, exec.assignments, exec.txn);
 
     try exec.txn.putEdge(edge);
+    exec.mutations += 1;
     if (op.ident) |ident| {
         exec.assignments[ident] = .{ .edge_ref = edge.id };
     }
@@ -70,6 +72,7 @@ pub fn runUpdate(op: Plan.Update, _: *void, exec: *executor.Executor, op_index: 
                 try putProperty(exec.txn.allocator, &node.properties, item.key, value);
                 value = .null;
                 try exec.txn.putNode(node);
+                exec.mutations += 1;
             },
             .edge_ref => |edge_id| {
                 var edge = try exec.txn.getEdge(edge_id) orelse continue;
@@ -77,6 +80,7 @@ pub fn runUpdate(op: Plan.Update, _: *void, exec: *executor.Executor, op_index: 
                 try putProperty(exec.txn.allocator, &edge.properties, item.key, value);
                 value = .null;
                 try exec.txn.putEdge(edge);
+                exec.mutations += 1;
             },
             else => return executor.Error.WrongType,
         }
@@ -91,17 +95,11 @@ pub fn runDelete(op: Plan.Delete, _: *void, exec: *executor.Executor, op_index: 
     for (op.idents.items) |ident| {
         switch (exec.assignments[ident]) {
             .edge_ref => |edge_id| {
-                exec.txn.deleteEdge(edge_id) catch |err| switch (err) {
-                    rocksdb.Error.NotFound => {},
-                    else => |e| return e,
-                };
+                if (try deleteEdgeIfPresent(exec, edge_id)) exec.mutations += 1;
             },
             .node_ref => |node_id| {
-                if (op.detach) try deleteAttachedEdges(exec, node_id);
-                exec.txn.deleteNode(node_id) catch |err| switch (err) {
-                    rocksdb.Error.NotFound => {},
-                    else => |e| return e,
-                };
+                if (op.detach) exec.mutations += try deleteAttachedEdges(exec, node_id);
+                if (try deleteNodeIfPresent(exec, node_id)) exec.mutations += 1;
             },
             else => return executor.Error.WrongType,
         }
@@ -124,19 +122,34 @@ fn putProperty(
     }
 }
 
-fn deleteAttachedEdges(exec: *executor.Executor, node_id: types.ElementId) executor.Error!void {
+fn deleteEdgeIfPresent(exec: *executor.Executor, edge_id: types.ElementId) executor.Error!bool {
+    exec.txn.deleteEdge(edge_id) catch |err| switch (err) {
+        rocksdb.Error.NotFound => return false,
+        else => |e| return e,
+    };
+    return true;
+}
+
+fn deleteNodeIfPresent(exec: *executor.Executor, node_id: types.ElementId) executor.Error!bool {
+    exec.txn.deleteNode(node_id) catch |err| switch (err) {
+        rocksdb.Error.NotFound => return false,
+        else => |e| return e,
+    };
+    return true;
+}
+
+fn deleteAttachedEdges(exec: *executor.Executor, node_id: types.ElementId) executor.Error!usize {
     var ids = std.ArrayList(types.ElementId).empty;
     defer ids.deinit(exec.txn.allocator);
     var it = try exec.txn.iterateAdj(node_id, .out, .in);
     defer it.close();
     while (try it.next()) |entry| try ids.append(exec.txn.allocator, entry.edge_id);
 
+    var deleted: usize = 0;
     for (ids.items) |edge_id| {
-        exec.txn.deleteEdge(edge_id) catch |err| switch (err) {
-            rocksdb.Error.NotFound => {},
-            else => |e| return e,
-        };
+        if (try deleteEdgeIfPresent(exec, edge_id)) deleted += 1;
     }
+    return deleted;
 }
 
 /// Evaluate property expressions in a query plan.
