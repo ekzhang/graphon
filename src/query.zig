@@ -1,7 +1,8 @@
-//! Minimal GQL parser and execution layer for the functional Graphon MVP.
+//! GQL query pipeline for the currently supported Graphon language subset.
 //!
-//! This module intentionally implements a small, useful subset of GQL while the
-//! full ISO grammar is still being built out. Supported today:
+//! Queries are parsed, lowered into `Plan.zig`, and executed through the shared
+//! executor. The pipeline is intended to last; the supported language coverage
+//! is still growing toward the full ISO grammar. Supported today:
 //!
 //! * `RETURN` scalar expressions (`+`, `-`, `*`, `=`, `<>`) and properties.
 //! * `INSERT` node/edge path patterns.

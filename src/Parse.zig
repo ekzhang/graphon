@@ -1,7 +1,7 @@
 //! Parser for the currently supported Graphon query subset.
 //!
-//! This parser intentionally targets the MVP AST in `Ast.zig`, not the full ISO
-//! GQL grammar.
+//! This parser targets the query AST in `Ast.zig`. The supported syntax is a
+//! subset of the full ISO GQL grammar.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
