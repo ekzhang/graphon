@@ -167,7 +167,7 @@ pub const StatementResultKind = enum {
 };
 
 pub const StatementCursor = struct {
-    result_allocator: Allocator,
+    gpa: Allocator,
     txn: storage.Transaction,
     inner: union(StatementResultKind) {
         rows: RowCursor,
@@ -188,13 +188,13 @@ pub const StatementCursor = struct {
     };
 
     pub fn init(
-        result_allocator: Allocator,
+        gpa: Allocator,
         txn: storage.Transaction,
         statement: *const planner.CompiledStatement,
     ) Error!StatementCursor {
         const exec = try executor.Executor.init(&statement.plan, txn);
         return .{
-            .result_allocator = result_allocator,
+            .gpa = gpa,
             .txn = txn,
             .inner = switch (statement.result) {
                 .rows => |result_columns| .{ .rows = .{ .exec = exec, .columns = result_columns } },
@@ -232,7 +232,7 @@ pub const StatementCursor = struct {
                     return null;
                 };
                 defer result.deinit(self.txn.allocator);
-                return try rowFromCompiledResult(self.result_allocator, self.txn, result, rows.columns);
+                return try rowFromCompiledResult(self.gpa, self.txn, result, rows.columns);
             },
             .mutation => return error.WrongResultKind,
         }
@@ -261,7 +261,7 @@ pub const StatementCursor = struct {
     }
 
     pub fn collect(self: *StatementCursor) Error!ResultSet {
-        const allocator = self.result_allocator;
+        const allocator = self.gpa;
         switch (self.kind()) {
             .rows => {
                 var rows = std.ArrayList(Row).empty;
@@ -317,11 +317,11 @@ fn writeJsonProperties(json: *std.json.Stringify, properties: []const ResultProp
 }
 
 pub fn executeCompiledStatement(
-    result_allocator: Allocator,
+    gpa: Allocator,
     txn: storage.Transaction,
     statement: *const planner.CompiledStatement,
 ) Error!ResultSet {
-    var cursor = try StatementCursor.init(result_allocator, txn, statement);
+    var cursor = try StatementCursor.init(gpa, txn, statement);
     defer cursor.deinit();
     return try cursor.collect();
 }

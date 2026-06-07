@@ -35,25 +35,25 @@ pub const CompiledStatement = planner.CompiledStatement;
 pub const CompiledResult = planner.CompiledResult;
 pub const ResultColumn = planner.ResultColumn;
 
-pub fn compile(allocator: Allocator, source: [:0]const u8) Error!CompiledProgram {
-    return try planner.compile(allocator, source);
+pub fn compile(gpa: Allocator, source: [:0]const u8) Error!CompiledProgram {
+    return try planner.compile(gpa, source);
 }
 
 /// Owns a compiled query program and transaction while statement results are
 /// pulled. A cursor returned by `nextStatement` borrows both, so callers should
 /// finish and deinit each cursor before advancing or committing the execution.
 pub const Execution = struct {
-    result_allocator: Allocator,
+    gpa: Allocator,
     compiled: CompiledProgram,
     txn: storage.Transaction,
     next_statement: usize = 0,
     committed: bool = false,
 
-    pub fn init(result_allocator: Allocator, store: storage.Storage, source: [:0]const u8) Error!Execution {
-        var compiled = try compile(result_allocator, source);
-        errdefer compiled.deinit(result_allocator);
+    pub fn init(gpa: Allocator, store: storage.Storage, source: [:0]const u8) Error!Execution {
+        var compiled = try compile(gpa, source);
+        errdefer compiled.deinit(gpa);
         return .{
-            .result_allocator = result_allocator,
+            .gpa = gpa,
             .compiled = compiled,
             .txn = store.txn(),
         };
@@ -61,14 +61,14 @@ pub const Execution = struct {
 
     pub fn deinit(self: *Execution) void {
         self.txn.close();
-        self.compiled.deinit(self.result_allocator);
+        self.compiled.deinit(self.gpa);
         self.* = undefined;
     }
 
     pub fn nextStatement(self: *Execution) Error!?StatementCursor {
         if (self.next_statement >= self.compiled.statements.len) return null;
         const statement = &self.compiled.statements[self.next_statement];
-        var cursor = try StatementCursor.init(self.result_allocator, self.txn, statement);
+        var cursor = try StatementCursor.init(self.gpa, self.txn, statement);
         errdefer cursor.deinit();
         self.next_statement += 1;
         return cursor;
@@ -81,18 +81,18 @@ pub const Execution = struct {
     }
 };
 
-pub fn execute(result_allocator: Allocator, store: storage.Storage, source: [:0]const u8) Error!ResultSet {
-    var execution = try Execution.init(result_allocator, store, source);
+pub fn execute(gpa: Allocator, store: storage.Storage, source: [:0]const u8) Error!ResultSet {
+    var execution = try Execution.init(gpa, store, source);
     defer execution.deinit();
 
     var result = ResultSet{ .rows_affected = 0 };
-    errdefer result.deinit(result_allocator);
+    errdefer result.deinit(gpa);
 
     while (try execution.nextStatement()) |cursor_value| {
         var cursor = cursor_value;
         defer cursor.deinit();
         const next_result = try cursor.collect();
-        result.deinit(result_allocator);
+        result.deinit(gpa);
         result = next_result;
     }
 
