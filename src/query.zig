@@ -233,15 +233,7 @@ pub fn execute(allocator: Allocator, io: std.Io, store: storage.Storage, source:
 fn executeStatement(allocator: Allocator, io: std.Io, txn: storage.Transaction, statement: Statement) Error!ResultSet {
     switch (statement) {
         .return_only => |ret| return try executeReturnPlan(allocator, txn, ret),
-        .insert => |patterns| {
-            var binding = Binding{};
-            defer binding.deinit(allocator);
-            var count: usize = 0;
-            for (patterns) |pattern| {
-                count += try insertPath(allocator, io, txn, &binding, pattern);
-            }
-            return mutationResult(count);
-        },
+        .insert => |patterns| return try executeInsertPlan(allocator, txn, patterns),
         .match_query => |mq| {
             if (mq.action == .ret) {
                 if (executeMatchReturnPlan(allocator, txn, mq)) |result| {
@@ -592,6 +584,124 @@ fn executeMatchReturnPlan(allocator: Allocator, txn: storage.Transaction, mq: Ma
     try appendReturnProjection(&planner, ret);
     try appendSkipLimit(&planner, ret);
     return try executePlannedResult(allocator, txn, &planner.plan, ret.items);
+}
+
+fn executeInsertPlan(allocator: Allocator, txn: storage.Transaction, patterns: []PathPattern) Error!ResultSet {
+    var planner = Planner{ .allocator = allocator };
+    defer planner.deinit();
+
+    var inserted_per_row: usize = 0;
+    for (patterns) |pattern| {
+        inserted_per_row += try appendInsertPath(&planner, pattern);
+    }
+
+    var exec = try executor.Executor.init(&planner.plan, txn);
+    defer exec.deinit();
+
+    var rows: usize = 0;
+    while (try exec.run()) |result_value| {
+        var result = result_value;
+        result.deinit(allocator);
+        rows += 1;
+    }
+
+    return mutationResult(rows * inserted_per_row);
+}
+
+fn appendInsertPath(planner: *Planner, pattern: PathPattern) Error!usize {
+    var count: usize = 0;
+    var current = try appendInsertNodeOrUse(planner, pattern.start, &count);
+    for (pattern.segments) |segment| {
+        const dest = try appendInsertNodeOrUse(planner, segment.node, &count);
+        try appendInsertEdge(planner, current, dest, segment.edge);
+        count += 1;
+        current = dest;
+    }
+    return count;
+}
+
+fn appendInsertNodeOrUse(planner: *Planner, pattern: NodePattern, count: *usize) Error!u16 {
+    if (pattern.variable) |name| {
+        if (planner.bindings.get(name)) |binding| {
+            if (binding.kind != .node) return error.WrongType;
+            return binding.ident;
+        }
+    }
+
+    const ident = planner.allocIdent();
+    if (pattern.variable) |name| try planner.bind(name, .node, ident);
+    var labels = try planLabels(planner, pattern.label);
+    errdefer deinitLabelList(&labels, planner.allocator);
+    var properties = try planProperties(planner, pattern.properties);
+    errdefer deinitPlanProperties(&properties, planner.allocator);
+    try planner.plan.ops.append(planner.allocator, .{ .insert_node = .{
+        .ident = ident,
+        .labels = labels,
+        .properties = properties,
+    } });
+    labels = .empty;
+    properties = .{};
+    count.* += 1;
+    return ident;
+}
+
+fn appendInsertEdge(planner: *Planner, src: u16, dest: u16, pattern: EdgePattern) Error!void {
+    const ident = if (pattern.variable) |name| blk: {
+        if (planner.bindings.get(name) != null) return error.Unsupported;
+        const edge_ident = planner.allocIdent();
+        try planner.bind(name, .edge, edge_ident);
+        break :blk edge_ident;
+    } else null;
+
+    var labels = try planLabels(planner, pattern.label);
+    errdefer deinitLabelList(&labels, planner.allocator);
+    var properties = try planProperties(planner, pattern.properties);
+    errdefer deinitPlanProperties(&properties, planner.allocator);
+
+    const edge_src, const edge_dest = if (pattern.direction == .left) .{ dest, src } else .{ src, dest };
+    try planner.plan.ops.append(planner.allocator, .{ .insert_edge = .{
+        .ident = ident,
+        .ident_src = edge_src,
+        .ident_dest = edge_dest,
+        .directed = pattern.direction == .right or pattern.direction == .left,
+        .labels = labels,
+        .properties = properties,
+    } });
+    labels = .empty;
+    properties = .{};
+}
+
+fn planLabels(planner: *Planner, label: ?[]const u8) Error!std.ArrayList([]u8) {
+    var labels = std.ArrayList([]u8).empty;
+    errdefer deinitLabelList(&labels, planner.allocator);
+    if (label) |value| {
+        try labels.append(planner.allocator, try planner.allocator.dupe(u8, value));
+    }
+    return labels;
+}
+
+fn deinitLabelList(labels: *std.ArrayList([]u8), allocator: Allocator) void {
+    for (labels.items) |label| allocator.free(label);
+    labels.deinit(allocator);
+}
+
+fn planProperties(planner: *Planner, properties: []Property) Error!Plan.Properties {
+    var out: Plan.Properties = .{};
+    errdefer deinitPlanProperties(&out, planner.allocator);
+    for (properties) |property| {
+        const key = try planner.allocator.dupe(u8, property.key);
+        errdefer planner.allocator.free(key);
+        var value = try planExpr(planner, property.value);
+        errdefer value.deinit(planner.allocator);
+        try out.append(planner.allocator, .{ .key = key, .value = value });
+    }
+    return out;
+}
+
+fn deinitPlanProperties(properties: *Plan.Properties, allocator: Allocator) void {
+    for (properties.items(.key)) |key| allocator.free(key);
+    for (properties.items(.value)) |*value| value.deinit(allocator);
+    properties.deinit(allocator);
 }
 
 fn appendReturnProjection(planner: *Planner, ret: ReturnClause) Error!void {

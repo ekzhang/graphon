@@ -14,7 +14,7 @@ pub fn runInsertNode(op: Plan.InsertNode, _: *void, exec: *executor.Executor, op
     defer node.deinit(exec.txn.allocator);
 
     for (op.labels.items) |label| {
-        try node.labels.put(exec.txn.allocator, label, void{});
+        try node.labels.put(exec.txn.allocator, try exec.txn.allocator.dupe(u8, label), void{});
     }
     node.properties = try evaluateProperties(op.properties, exec.assignments, exec.txn);
 
@@ -45,7 +45,7 @@ pub fn runInsertEdge(op: Plan.InsertEdge, _: *void, exec: *executor.Executor, op
     defer edge.deinit(exec.txn.allocator);
 
     for (op.labels.items) |label| {
-        try edge.labels.put(exec.txn.allocator, label, void{});
+        try edge.labels.put(exec.txn.allocator, try exec.txn.allocator.dupe(u8, label), void{});
     }
     edge.properties = try evaluateProperties(op.properties, exec.assignments, exec.txn);
 
