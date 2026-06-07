@@ -501,12 +501,19 @@ pub const Properties = std.MultiArrayList(struct { key: []u8, value: Exp });
 pub const Exp = union(enum) {
     literal: Value,
     ident: u32,
+    property: PropertyExp,
     parameter: u32,
+    unary: *UnaryExp,
     binop: *BinopExp,
 
     pub fn deinit(self: *Exp, allocator: Allocator) void {
         switch (self.*) {
             .literal => |*v| v.deinit(allocator),
+            .property => |*p| p.deinit(allocator),
+            .unary => |u| {
+                u.deinit(allocator);
+                allocator.destroy(u);
+            },
             .binop => |b| {
                 b.deinit(allocator);
                 allocator.destroy(b); // Needed because binop is a pointer.
@@ -521,7 +528,12 @@ pub const Exp = union(enum) {
         switch (self) {
             .literal => |v| try v.print(writer),
             .ident => |i| try writer.print("%{}", .{i}),
+            .property => |p| try writer.print("%{}.{s}", .{ p.ident, p.key }),
             .parameter => |n| try writer.print("${}", .{n}),
+            .unary => |u| {
+                try writer.print("{s} ", .{u.op.string()});
+                try u.operand.print(writer);
+            },
             .binop => |b| {
                 try writer.writeByte('(');
                 try b.left.print(writer);
@@ -530,6 +542,36 @@ pub const Exp = union(enum) {
                 try writer.writeByte(')');
             },
         }
+    }
+};
+
+pub const PropertyExp = struct {
+    ident: u32,
+    key: []u8,
+
+    pub fn deinit(self: *PropertyExp, allocator: Allocator) void {
+        allocator.free(self.key);
+        self.* = undefined;
+    }
+};
+
+pub const UnaryExp = struct {
+    op: UnaryOp,
+    operand: Exp,
+
+    pub fn deinit(self: *UnaryExp, allocator: Allocator) void {
+        self.operand.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+pub const UnaryOp = enum {
+    not,
+
+    fn string(self: UnaryOp) []const u8 {
+        return switch (self) {
+            .not => "NOT",
+        };
     }
 };
 
@@ -548,15 +590,29 @@ pub const BinopExp = struct {
 pub const Binop = enum {
     add,
     sub,
+    mul,
     eql,
     neq,
+    lt,
+    lte,
+    gt,
+    gte,
+    and_,
+    or_,
 
     fn string(self: Binop) []const u8 {
         return switch (self) {
             .add => "+",
             .sub => "-",
+            .mul => "*",
             .eql => "=",
             .neq => "<>",
+            .lt => "<",
+            .lte => "<=",
+            .gt => ">",
+            .gte => ">=",
+            .and_ => "AND",
+            .or_ => "OR",
         };
     }
 };

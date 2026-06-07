@@ -16,7 +16,7 @@ pub fn runInsertNode(op: Plan.InsertNode, _: *void, exec: *executor.Executor, op
     for (op.labels.items) |label| {
         try node.labels.put(exec.txn.allocator, label, void{});
     }
-    node.properties = try evaluateProperties(op.properties, exec.assignments, exec.txn.allocator);
+    node.properties = try evaluateProperties(op.properties, exec.assignments, exec.txn);
 
     try exec.txn.putNode(node);
     if (op.ident) |ident| {
@@ -47,7 +47,7 @@ pub fn runInsertEdge(op: Plan.InsertEdge, _: *void, exec: *executor.Executor, op
     for (op.labels.items) |label| {
         try edge.labels.put(exec.txn.allocator, label, void{});
     }
-    edge.properties = try evaluateProperties(op.properties, exec.assignments, exec.txn.allocator);
+    edge.properties = try evaluateProperties(op.properties, exec.assignments, exec.txn);
 
     try exec.txn.putEdge(edge);
     if (op.ident) |ident| {
@@ -60,14 +60,15 @@ pub fn runInsertEdge(op: Plan.InsertEdge, _: *void, exec: *executor.Executor, op
 fn evaluateProperties(
     properties: Plan.Properties,
     assignments: []const types.Value,
-    allocator: Allocator,
-) Allocator.Error!std.StringArrayHashMapUnmanaged(types.Value) {
+    txn: @import("../storage.zig").Transaction,
+) executor.Error!std.StringArrayHashMapUnmanaged(types.Value) {
+    const allocator = txn.allocator;
     var ret: std.StringArrayHashMapUnmanaged(types.Value) = .empty;
     errdefer types.freeProperties(allocator, &ret);
     for (properties.items(.key), properties.items(.value)) |k, v| {
         const key = try allocator.dupe(u8, k);
         errdefer allocator.free(key);
-        var value = try executor.evaluate(v, assignments, allocator);
+        var value = try executor.evaluate(v, assignments, txn);
         errdefer value.deinit(allocator);
         try ret.put(allocator, key, value);
     }
