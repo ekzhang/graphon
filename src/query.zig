@@ -42,6 +42,12 @@ pub fn compile(gpa: Allocator, source: [:0]const u8) Error!CompiledProgram {
 /// Owns a compiled query program and transaction while statement results are
 /// pulled. A cursor returned by `nextStatement` borrows both, so callers should
 /// finish and deinit each cursor before advancing or committing the execution.
+///
+/// Allocator split:
+/// * `gpa` owns query-level data: parsed/compiled program state and any rows or
+///   result objects that escape execution.
+/// * `store.allocator`, through the transaction, owns storage-decoded graph
+///   objects and executor scratch state while a statement is being pulled.
 pub const Execution = struct {
     gpa: Allocator,
     compiled: CompiledProgram,
