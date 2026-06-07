@@ -43,7 +43,10 @@ pub fn parse(allocator: Allocator, source: [:0]const u8) Error!Ast.Program {
 
     while (!parser.at(.eof)) {
         if (parser.eat(.semicolon)) continue;
-        try statements.append(allocator, try parser.parseStatement());
+        var statement: ?Ast.Statement = try parser.parseStatement();
+        errdefer if (statement) |*s| s.deinit(allocator);
+        try statements.append(allocator, statement.?);
+        statement = null;
         _ = parser.eat(.semicolon);
     }
 
@@ -108,9 +111,10 @@ const Parser = struct {
             try p.expect(.period);
             const property = try p.expectName();
             try p.expect(.equal);
-            var value = try p.parseExpr(0);
-            errdefer value.deinit(p.allocator);
-            try clauses.append(p.allocator, .{ .variable = variable, .property = property, .value = value });
+            var value: ?Ast.Expr = try p.parseExpr(0);
+            errdefer if (value) |*expr| expr.deinit(p.allocator);
+            try clauses.append(p.allocator, .{ .variable = variable, .property = property, .value = value.? });
+            value = null;
             if (!p.eat(.comma)) break;
         }
         return try clauses.toOwnedSlice(p.allocator);
@@ -145,15 +149,16 @@ const Parser = struct {
             items.deinit(p.allocator);
         }
         while (!p.at(.keyword_skip) and !p.at(.keyword_limit) and !p.at(.semicolon) and !p.at(.eof)) {
-            var expr = try p.parseExpr(0);
-            errdefer expr.deinit(p.allocator);
+            var expr: ?Ast.Expr = try p.parseExpr(0);
+            errdefer if (expr) |*e| e.deinit(p.allocator);
             const desc = if (p.eat(.keyword_desc) or p.eat(.keyword_descending))
                 true
             else if (p.eat(.keyword_asc) or p.eat(.keyword_ascending))
                 false
             else
                 false;
-            try items.append(p.allocator, .{ .expr = expr, .desc = desc });
+            try items.append(p.allocator, .{ .expr = expr.?, .desc = desc });
+            expr = null;
             if (!p.eat(.comma)) break;
         }
         if (items.items.len == 0) return error.ParseError;
@@ -167,10 +172,11 @@ const Parser = struct {
             items.deinit(p.allocator);
         }
         while (!p.at(.keyword_order) and !p.at(.keyword_skip) and !p.at(.keyword_limit) and !p.at(.semicolon) and !p.at(.eof)) {
-            var expr = try p.parseExpr(0);
-            errdefer expr.deinit(p.allocator);
+            var expr: ?Ast.Expr = try p.parseExpr(0);
+            errdefer if (expr) |*e| e.deinit(p.allocator);
             const alias = if (p.eat(.keyword_as)) try p.expectName() else null;
-            try items.append(p.allocator, .{ .expr = expr, .alias = alias });
+            try items.append(p.allocator, .{ .expr = expr.?, .alias = alias });
+            expr = null;
             if (!p.eat(.comma)) break;
         }
         if (items.items.len == 0) return error.ParseError;
@@ -192,7 +198,10 @@ const Parser = struct {
             patterns.deinit(p.allocator);
         }
         while (!p.at(.semicolon) and !p.at(.eof) and !p.atActionKeyword()) {
-            try patterns.append(p.allocator, try p.parsePathPattern());
+            var pattern: ?Ast.PathPattern = try p.parsePathPattern();
+            errdefer if (pattern) |*patt| patt.deinit(p.allocator);
+            try patterns.append(p.allocator, pattern.?);
+            pattern = null;
             if (!p.eat(.comma)) break;
         }
         if (patterns.items.len == 0) return error.ParseError;
@@ -211,17 +220,13 @@ const Parser = struct {
             segments.deinit(p.allocator);
         }
         while (p.edgeStartsHere()) {
-            const edge = try p.parseEdgePattern();
-            errdefer {
-                var e = edge;
-                e.deinit(p.allocator);
-            }
-            const node = try p.parseNodePattern();
-            errdefer {
-                var n = node;
-                n.deinit(p.allocator);
-            }
-            try segments.append(p.allocator, .{ .edge = edge, .node = node });
+            var edge: ?Ast.EdgePattern = try p.parseEdgePattern();
+            errdefer if (edge) |*e| e.deinit(p.allocator);
+            var node: ?Ast.NodePattern = try p.parseNodePattern();
+            errdefer if (node) |*n| n.deinit(p.allocator);
+            try segments.append(p.allocator, .{ .edge = edge.?, .node = node.? });
+            edge = null;
+            node = null;
         }
         return .{ .start = start, .segments = try segments.toOwnedSlice(p.allocator) };
     }
@@ -322,9 +327,10 @@ const Parser = struct {
         while (!p.eat(.r_brace)) {
             const key = try p.expectName();
             try p.expect(.colon);
-            var value = try p.parseExpr(0);
-            errdefer value.deinit(p.allocator);
-            try properties.append(p.allocator, .{ .key = key, .value = value });
+            var value: ?Ast.Expr = try p.parseExpr(0);
+            errdefer if (value) |*expr| expr.deinit(p.allocator);
+            try properties.append(p.allocator, .{ .key = key, .value = value.? });
+            value = null;
             if (!p.eat(.comma)) {
                 try p.expect(.r_brace);
                 break;
@@ -340,10 +346,11 @@ const Parser = struct {
         while (binaryInfo(p.peek())) |info| {
             if (info.prec < min_prec) break;
             _ = p.next();
-            var right = try p.parseExpr(info.prec + 1);
-            errdefer right.deinit(p.allocator);
+            var right: ?Ast.Expr = try p.parseExpr(info.prec + 1);
+            errdefer if (right) |*expr| expr.deinit(p.allocator);
             const bin = try p.allocator.create(Ast.BinaryExpr);
-            bin.* = .{ .op = info.op, .left = left, .right = right };
+            bin.* = .{ .op = info.op, .left = left, .right = right.? };
+            right = null;
             left = .{ .binary = bin };
         }
         return left;
@@ -351,10 +358,11 @@ const Parser = struct {
 
     fn parseUnary(p: *Parser) Error!Ast.Expr {
         if (p.eat(.keyword_not)) {
-            var operand = try p.parseExpr(3);
-            errdefer operand.deinit(p.allocator);
+            var operand: ?Ast.Expr = try p.parseExpr(3);
+            errdefer if (operand) |*expr| expr.deinit(p.allocator);
             const unary = try p.allocator.create(Ast.UnaryExpr);
-            unary.* = .{ .op = .not, .operand = operand };
+            unary.* = .{ .op = .not, .operand = operand.? };
+            operand = null;
             return .{ .unary = unary };
         }
         return p.parsePrimary();

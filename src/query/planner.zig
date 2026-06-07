@@ -56,7 +56,7 @@ pub const ResultColumn = struct {
     graph_value: bool,
 
     pub fn deinit(self: *ResultColumn, allocator: Allocator) void {
-        allocator.free(self.name);
+        if (self.name.len > 0) allocator.free(self.name);
         self.* = undefined;
     }
 };
@@ -72,7 +72,10 @@ pub fn compile(allocator: Allocator, source: [:0]const u8) Error!CompiledProgram
     }
 
     for (parsed.statements) |statement| {
-        try statements.append(allocator, try compileStatement(allocator, statement));
+        var compiled: ?CompiledStatement = try compileStatement(allocator, statement);
+        errdefer if (compiled) |*s| s.deinit(allocator);
+        try statements.append(allocator, compiled.?);
+        compiled = null;
     }
 
     return .{ .statements = try statements.toOwnedSlice(allocator) };
@@ -172,7 +175,6 @@ fn takePlan(planner: *Planner) Plan {
 
 fn resultColumns(allocator: Allocator, ret: Ast.ReturnClause) Allocator.Error![]ResultColumn {
     const columns = try allocator.alloc(ResultColumn, ret.items.len);
-    errdefer allocator.free(columns);
     for (columns) |*column| column.* = .{ .name = &.{}, .graph_value = false };
     errdefer deinitResultColumns(allocator, columns);
 
@@ -200,11 +202,13 @@ fn appendUpdate(planner: *Planner, sets: []const Ast.SetClause) Error!usize {
 
     for (sets) |set| {
         const binding = planner.bindings.get(set.variable) orelse return error.UnknownIdentifier;
-        const key = try planner.allocator.dupe(u8, set.property);
-        errdefer planner.allocator.free(key);
-        var value = try planExpr(planner, set.value);
-        errdefer value.deinit(planner.allocator);
-        try items.append(planner.allocator, .{ .ident = binding.ident, .key = key, .value = value });
+        var key: ?[]u8 = try planner.allocator.dupe(u8, set.property);
+        errdefer if (key) |k| planner.allocator.free(k);
+        var value: ?Plan.Exp = try planExpr(planner, set.value);
+        errdefer if (value) |*v| v.deinit(planner.allocator);
+        try items.append(planner.allocator, .{ .ident = binding.ident, .key = key.?, .value = value.? });
+        key = null;
+        value = null;
     }
 
     try planner.plan.ops.append(planner.allocator, .{ .update = .{ .items = items } });
@@ -233,8 +237,10 @@ fn appendDelete(planner: *Planner, del: Ast.DeleteAction) Error!usize {
 }
 
 fn appendMatchQuery(planner: *Planner, mq: Ast.MatchQuery) Error!void {
-    for (mq.patterns) |pattern| {
+    for (mq.patterns, 0..) |pattern, i| {
+        if (i > 0) try planner.plan.ops.append(planner.allocator, .begin);
         try appendPathPattern(planner, pattern);
+        if (i > 0) try planner.plan.ops.append(planner.allocator, .join);
     }
     if (mq.where) |where| {
         try appendFilter(planner, .{ .bool_exp = try planExpr(planner, where) });
@@ -308,7 +314,10 @@ fn planLabels(planner: *Planner, label: ?[]const u8) Error!std.ArrayList([]u8) {
     var labels = std.ArrayList([]u8).empty;
     errdefer deinitLabelList(&labels, planner.allocator);
     if (label) |value| {
-        try labels.append(planner.allocator, try planner.allocator.dupe(u8, value));
+        var owned: ?[]u8 = try planner.allocator.dupe(u8, value);
+        errdefer if (owned) |s| planner.allocator.free(s);
+        try labels.append(planner.allocator, owned.?);
+        owned = null;
     }
     return labels;
 }
@@ -322,11 +331,13 @@ fn planProperties(planner: *Planner, properties: []Ast.Property) Error!Plan.Prop
     var out: Plan.Properties = .{};
     errdefer deinitPlanProperties(&out, planner.allocator);
     for (properties) |property| {
-        const key = try planner.allocator.dupe(u8, property.key);
-        errdefer planner.allocator.free(key);
-        var value = try planExpr(planner, property.value);
-        errdefer value.deinit(planner.allocator);
-        try out.append(planner.allocator, .{ .key = key, .value = value });
+        var key: ?[]u8 = try planner.allocator.dupe(u8, property.key);
+        errdefer if (key) |k| planner.allocator.free(k);
+        var value: ?Plan.Exp = try planExpr(planner, property.value);
+        errdefer if (value) |*v| v.deinit(planner.allocator);
+        try out.append(planner.allocator, .{ .key = key.?, .value = value.? });
+        key = null;
+        value = null;
     }
     return out;
 }
@@ -421,41 +432,61 @@ fn appendNodeStart(planner: *Planner, pattern: Ast.NodePattern) Error!u16 {
 
     const ident = planner.allocIdent();
     if (pattern.variable) |name| try planner.bind(name, .node, ident);
+    var label: ?[]u8 = if (pattern.label) |name| try planner.allocator.dupe(u8, name) else null;
+    errdefer if (label) |l| planner.allocator.free(l);
     try planner.plan.ops.append(planner.allocator, .{ .node_scan = .{
         .ident = ident,
-        .label = if (pattern.label) |label| try planner.allocator.dupe(u8, label) else null,
+        .label = label,
     } });
+    label = null;
     try appendNodeFilters(planner, ident, pattern, true);
     return ident;
 }
 
 fn appendPathSegment(planner: *Planner, current: u16, segment: Ast.PathSegment) Error!u16 {
-    if (segment.node.variable) |name| {
-        if (planner.bindings.get(name) != null) return error.Unsupported;
-    }
-    if (segment.edge.variable) |name| {
-        if (planner.bindings.get(name) != null) return error.Unsupported;
-    }
+    const existing_dest = if (segment.node.variable) |name| blk: {
+        if (planner.bindings.get(name)) |binding| {
+            if (binding.kind != .node) return error.WrongType;
+            break :blk binding.ident;
+        }
+        break :blk null;
+    } else null;
+    const existing_edge = if (segment.edge.variable) |name| blk: {
+        if (planner.bindings.get(name)) |binding| {
+            if (binding.kind != .edge) return error.WrongType;
+            break :blk binding.ident;
+        }
+        break :blk null;
+    } else null;
 
-    const edge_ident: ?u16 = if (segment.edge.variable != null or segment.edge.properties.len > 0)
+    const edge_ident: ?u16 = if (segment.edge.variable != null or segment.edge.properties.len > 0 or existing_edge != null)
         planner.allocIdent()
     else
         null;
     const dest_ident = planner.allocIdent();
 
-    if (segment.edge.variable) |name| try planner.bind(name, .edge, edge_ident.?);
-    if (segment.node.variable) |name| try planner.bind(name, .node, dest_ident);
+    if (segment.edge.variable) |name| {
+        if (existing_edge == null) try planner.bind(name, .edge, edge_ident.?);
+    }
+    if (segment.node.variable) |name| {
+        if (existing_dest == null) try planner.bind(name, .node, dest_ident);
+    }
 
+    var edge_label: ?[]u8 = if (segment.edge.label) |label| try planner.allocator.dupe(u8, label) else null;
+    errdefer if (edge_label) |label| planner.allocator.free(label);
     try planner.plan.ops.append(planner.allocator, .{ .step = .{
         .ident_src = current,
         .ident_edge = edge_ident,
         .ident_dest = dest_ident,
         .direction = segment.edge.direction,
-        .edge_label = if (segment.edge.label) |label| try planner.allocator.dupe(u8, label) else null,
+        .edge_label = edge_label,
     } });
+    edge_label = null;
 
     if (edge_ident) |ident| try appendEdgeFilters(planner, ident, segment.edge);
+    if (existing_edge) |ident| try appendIdentEqualityFilter(planner, edge_ident.?, ident);
     try appendNodeFilters(planner, dest_ident, segment.node, false);
+    if (existing_dest) |ident| try appendIdentEqualityFilter(planner, dest_ident, ident);
     return dest_ident;
 }
 
@@ -476,20 +507,38 @@ fn appendEdgeFilters(planner: *Planner, ident: u16, pattern: Ast.EdgePattern) Er
     }
 }
 
+fn appendIdentEqualityFilter(planner: *Planner, left_ident: u16, right_ident: u16) Error!void {
+    var binop: ?*Plan.BinopExp = try planner.allocator.create(Plan.BinopExp);
+    errdefer if (binop) |b| {
+        var exp = Plan.Exp{ .binop = b };
+        exp.deinit(planner.allocator);
+    };
+    binop.?.* = .{
+        .op = .eql,
+        .left = .{ .ident = left_ident },
+        .right = .{ .ident = right_ident },
+    };
+    const owned = binop.?;
+    binop = null;
+    try appendFilter(planner, .{ .bool_exp = .{ .binop = owned } });
+}
+
 fn appendPropertyFilter(planner: *Planner, ident: u16, property: Ast.Property) Error!void {
     var left = Plan.Exp{ .property = .{ .ident = ident, .key = try planner.allocator.dupe(u8, property.key) } };
     errdefer left.deinit(planner.allocator);
     var right = try planExpr(planner, property.value);
     errdefer right.deinit(planner.allocator);
-    const binop = try planner.allocator.create(Plan.BinopExp);
-    binop.* = .{ .op = .eql, .left = left, .right = right };
-    errdefer {
-        var exp = Plan.Exp{ .binop = binop };
+    var binop: ?*Plan.BinopExp = try planner.allocator.create(Plan.BinopExp);
+    errdefer if (binop) |b| {
+        var exp = Plan.Exp{ .binop = b };
         exp.deinit(planner.allocator);
-    }
+    };
+    binop.?.* = .{ .op = .eql, .left = left, .right = right };
     left = .{ .ident = 0 };
     right = .{ .ident = 0 };
-    try appendFilter(planner, .{ .bool_exp = .{ .binop = binop } });
+    const owned = binop.?;
+    binop = null;
+    try appendFilter(planner, .{ .bool_exp = .{ .binop = owned } });
 }
 
 fn appendFilter(planner: *Planner, clause: Plan.FilterClause) Error!void {

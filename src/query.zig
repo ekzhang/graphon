@@ -94,6 +94,11 @@ fn resultContainsString(result: ResultSet, column: usize, expected: []const u8) 
     return false;
 }
 
+fn compileForAllocationFailureTest(allocator: Allocator) !void {
+    var compiled = try compile(allocator, "MATCH (p:Person {name: 'Ada'}) WHERE NOT (p.age > 30 AND p.active = true) RETURN p.name ORDER BY p.age DESC LIMIT 1");
+    defer compiled.deinit(allocator);
+}
+
 test "compile match return query plan snapshot" {
     try checkQueryPlanSnapshot("MATCH (p:Person) WHERE p.age > 30 RETURN p.name ORDER BY p.age DESC LIMIT 2", snap(@src(),
         \\Plan{%1}
@@ -104,6 +109,30 @@ test "compile match return query plan snapshot" {
         \\  Filter (%0.age > 30)
         \\  NodeScan (%0:Person)
     ));
+}
+
+test "compile comma match query plan snapshot" {
+    try checkQueryPlanSnapshot("MATCH (p:Person), (f:Food) RETURN p.name, f.name", snap(@src(),
+        \\Plan{%2, %3}
+        \\  Project %2: %0.name, %3: %1.name
+        \\  Join
+        \\    NodeScan (%1:Food)
+        \\  Begin
+        \\  NodeScan (%0:Person)
+    ));
+}
+
+test "compile repeated node path query plan snapshot" {
+    try checkQueryPlanSnapshot("MATCH (a:Person)->[:Knows]->(a) RETURN a", snap(@src(),
+        \\Plan{%0}
+        \\  Filter (%1 = %0)
+        \\  Step (%0)-[:Knows]->(%1)
+        \\  NodeScan (%0:Person)
+    ));
+}
+
+test "compile query cleans up across allocation failures" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, compileForAllocationFailureTest, .{});
 }
 
 test "compile match set query plan snapshot" {
@@ -157,6 +186,43 @@ test "return skip one" {
     try std.testing.expectEqualStrings("expr", result.columns[0]);
 }
 
+test "execute cleans prior result when later statement fails" {
+    var tmp = @import("test_helpers.zig").tmp();
+    defer tmp.cleanup();
+    const store = try tmp.store("test.db");
+    defer store.db.close();
+
+    try std.testing.expectError(error.UnknownIdentifier, execForTest(store, "RETURN 'ok'; RETURN missing"));
+}
+
+test "execute can use different result and transaction allocators" {
+    var tmp = @import("test_helpers.zig").tmp();
+    defer tmp.cleanup();
+    const base_store = try tmp.store("test.db");
+    defer base_store.db.close();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const store = storage.Storage{
+        .db = base_store.db,
+        .allocator = arena.allocator(),
+        .io = std.testing.io,
+    };
+
+    {
+        var result = try execute(std.testing.allocator, std.testing.io, store, "INSERT (:Person {name: 'Ada'})");
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(?usize, 1), result.rows_affected);
+    }
+    {
+        var result = try execute(std.testing.allocator, std.testing.io, store, "MATCH (p:Person) RETURN p.name");
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 1), result.rows.len);
+        try std.testing.expectEqualStrings("Ada", result.rows[0].values[0].scalar.string);
+    }
+}
+
 test "insert match return and detach delete" {
     var tmp = @import("test_helpers.zig").tmp();
     defer tmp.cleanup();
@@ -194,6 +260,59 @@ test "insert match return and detach delete" {
         var result = try execForTest(store, "MATCH (a:User {name: 'Eric'})->[:Likes]->(f:Food) RETURN f.name, f.calories");
         defer result.deinit(std.testing.allocator);
         try std.testing.expectEqual(@as(usize, 0), result.rows.len);
+    }
+}
+
+test "match comma patterns produce cross product" {
+    var tmp = @import("test_helpers.zig").tmp();
+    defer tmp.cleanup();
+    const store = try tmp.store("test.db");
+    defer store.db.close();
+
+    {
+        var result = try execForTest(store,
+            \\INSERT (:Person {name: 'Ada'}),
+            \\       (:Person {name: 'Bert'}),
+            \\       (:Food {name: 'Pizza'}),
+            \\       (:Food {name: 'Salad'}),
+            \\       (:Food {name: 'Soup'})
+        );
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(?usize, 5), result.rows_affected);
+    }
+    {
+        var result = try execForTest(store, "MATCH (p:Person), (f:Food) RETURN p.name, f.name");
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 6), result.rows.len);
+    }
+}
+
+test "match path can reuse a node variable" {
+    var tmp = @import("test_helpers.zig").tmp();
+    defer tmp.cleanup();
+    const store = try tmp.store("test.db");
+    defer store.db.close();
+
+    {
+        var result = try execForTest(store,
+            \\INSERT (:Person {name: 'Ada'}),
+            \\       (:Person {name: 'Bob'})
+        );
+        defer result.deinit(std.testing.allocator);
+    }
+    {
+        var result = try execForTest(store, "MATCH (a:Person {name: 'Ada'}) INSERT (a)-[:Knows]->(a)");
+        defer result.deinit(std.testing.allocator);
+    }
+    {
+        var result = try execForTest(store, "MATCH (a:Person {name: 'Ada'}), (b:Person {name: 'Bob'}) INSERT (a)-[:Knows]->(b)");
+        defer result.deinit(std.testing.allocator);
+    }
+    {
+        var result = try execForTest(store, "MATCH (a:Person {name: 'Ada'})->[:Knows]->(a) RETURN a.name");
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 1), result.rows.len);
+        try std.testing.expectEqualStrings("Ada", result.rows[0].values[0].scalar.string);
     }
 }
 
@@ -341,6 +460,15 @@ test "returning a node includes labels and properties" {
         try std.testing.expect(std.mem.indexOf(u8, json, "\"name\":\"Alice\"") != null);
         try std.testing.expect(std.mem.indexOf(u8, json, "\"age\":30") != null);
     }
+}
+
+test "delete rejects unknown variables" {
+    var tmp = @import("test_helpers.zig").tmp();
+    defer tmp.cleanup();
+    const store = try tmp.store("test.db");
+    defer store.db.close();
+
+    try std.testing.expectError(error.UnknownIdentifier, execForTest(store, "MATCH (p:Person) DELETE missing"));
 }
 
 test "set updates matched properties" {

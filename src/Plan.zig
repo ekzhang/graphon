@@ -114,8 +114,9 @@ pub fn idents(self: Plan) u16 {
 pub fn subqueryBegin(self: Plan, op_index: u32) ?u32 {
     std.debug.assert(self.ops.items[op_index].hasSubquery());
     var level: u32 = 1;
-    var i = op_index + 1;
-    while (i < self.ops.items.len) : (i += 1) {
+    var i = op_index;
+    while (i > 0) {
+        i -= 1;
         const op = self.ops.items[i];
         if (op == .begin) {
             if (level == 1) {
@@ -252,8 +253,8 @@ pub const Operator = union(enum) {
                 try writer.print(" %{}", .{n});
             },
             .repeat => std.debug.panic("repeat unimplemented", .{}),
-            .join => std.debug.panic("join unimplemented", .{}),
-            .semi_join => std.debug.panic("semi_join unimplemented", .{}),
+            .join => {},
+            .semi_join => {},
             .anti => {},
             .project => |n| {
                 var first = true;
@@ -726,4 +727,27 @@ test "can create, free and print plan" {
     ));
 
     try std.testing.expectEqual(3, plan.idents());
+}
+
+test "subquery begin searches backward from join" {
+    const allocator = std.testing.allocator;
+    var plan = Plan{};
+    defer plan.deinit(allocator);
+
+    try plan.ops.append(allocator, .{
+        .node_scan = .{
+            .ident = 0,
+            .label = null,
+        },
+    });
+    try plan.ops.append(allocator, .begin);
+    try plan.ops.append(allocator, .{
+        .node_scan = .{
+            .ident = 1,
+            .label = null,
+        },
+    });
+    try plan.ops.append(allocator, .join);
+
+    try std.testing.expectEqual(@as(?u32, 1), plan.subqueryBegin(3));
 }
