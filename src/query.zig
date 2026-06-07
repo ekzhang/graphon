@@ -259,6 +259,9 @@ fn executeStatement(allocator: Allocator, io: std.Io, txn: storage.Transaction, 
             for (mq.patterns) |pattern| {
                 try matchPath(allocator, txn, &rows, pattern);
             }
+            if (mq.where) |where| {
+                try filterBindings(allocator, txn, &rows, where);
+            }
 
             switch (mq.action) {
                 .ret => |ret| {
@@ -330,10 +333,12 @@ const Statement = union(enum) {
 
 const MatchQuery = struct {
     patterns: []PathPattern,
+    where: ?Expr = null,
     action: MatchAction,
 
     fn deinit(self: *MatchQuery, allocator: Allocator) void {
         deinitPatterns(self.patterns, allocator);
+        if (self.where) |*where| where.deinit(allocator);
         self.action.deinit(allocator);
         self.* = undefined;
     }
@@ -459,11 +464,16 @@ const Expr = union(enum) {
     literal: Value,
     variable: []const u8,
     property: struct { variable: []const u8, property: []const u8 },
+    unary: *UnaryExpr,
     binary: *BinaryExpr,
 
     fn deinit(self: *Expr, allocator: Allocator) void {
         switch (self.*) {
             .literal => |*v| v.deinit(allocator),
+            .unary => |u| {
+                u.deinit(allocator);
+                allocator.destroy(u);
+            },
             .binary => |b| {
                 b.deinit(allocator);
                 allocator.destroy(b);
@@ -473,6 +483,18 @@ const Expr = union(enum) {
         self.* = undefined;
     }
 };
+
+const UnaryExpr = struct {
+    op: UnaryOp,
+    operand: Expr,
+
+    fn deinit(self: *UnaryExpr, allocator: Allocator) void {
+        self.operand.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+const UnaryOp = enum { not };
 
 const BinaryExpr = struct {
     op: BinaryOp,
@@ -486,7 +508,7 @@ const BinaryExpr = struct {
     }
 };
 
-const BinaryOp = enum { add, sub, mul, eql, neq };
+const BinaryOp = enum { add, sub, mul, eql, neq, lt, lte, gt, gte, and_, or_ };
 
 fn deinitPatterns(patterns: []PathPattern, allocator: Allocator) void {
     for (patterns) |*pattern| pattern.deinit(allocator);
@@ -563,8 +585,13 @@ const Parser = struct {
         if (p.eat(.keyword_match)) {
             const patterns = try p.parsePatternListUntilAction();
             errdefer deinitPatterns(patterns, p.allocator);
+            var where: ?Expr = null;
+            errdefer if (where) |*expr| expr.deinit(p.allocator);
+            if (p.eat(.keyword_where)) {
+                where = try p.parseExpr(0);
+            }
             const action = try p.parseMatchAction();
-            return .{ .match_query = .{ .patterns = patterns, .action = action } };
+            return .{ .match_query = .{ .patterns = patterns, .where = where, .action = action } };
         }
         return error.ParseError;
     }
@@ -788,7 +815,7 @@ const Parser = struct {
     }
 
     fn parseExpr(p: *Parser, min_prec: u8) Error!Expr {
-        var left = try p.parsePrimary();
+        var left = try p.parseUnary();
         errdefer left.deinit(p.allocator);
 
         while (binaryInfo(p.peek())) |info| {
@@ -801,6 +828,17 @@ const Parser = struct {
             left = .{ .binary = bin };
         }
         return left;
+    }
+
+    fn parseUnary(p: *Parser) Error!Expr {
+        if (p.eat(.keyword_not)) {
+            var operand = try p.parseExpr(3);
+            errdefer operand.deinit(p.allocator);
+            const unary = try p.allocator.create(UnaryExpr);
+            unary.* = .{ .op = .not, .operand = operand };
+            return .{ .unary = unary };
+        }
+        return p.parsePrimary();
     }
 
     fn parsePrimary(p: *Parser) Error!Expr {
@@ -866,18 +904,24 @@ const Parser = struct {
 
     fn binaryInfo(tag: Token.Tag) ?struct { op: BinaryOp, prec: u8 } {
         return switch (tag) {
-            .equal => .{ .op = .eql, .prec = 1 },
-            .not_equal => .{ .op = .neq, .prec = 1 },
-            .plus => .{ .op = .add, .prec = 2 },
-            .minus => .{ .op = .sub, .prec = 2 },
-            .asterisk => .{ .op = .mul, .prec = 3 },
+            .keyword_or => .{ .op = .or_, .prec = 1 },
+            .keyword_and => .{ .op = .and_, .prec = 2 },
+            .equal => .{ .op = .eql, .prec = 3 },
+            .not_equal => .{ .op = .neq, .prec = 3 },
+            .angle_bracket_left => .{ .op = .lt, .prec = 3 },
+            .angle_bracket_left_equal => .{ .op = .lte, .prec = 3 },
+            .angle_bracket_right => .{ .op = .gt, .prec = 3 },
+            .angle_bracket_right_equal => .{ .op = .gte, .prec = 3 },
+            .plus => .{ .op = .add, .prec = 4 },
+            .minus => .{ .op = .sub, .prec = 4 },
+            .asterisk => .{ .op = .mul, .prec = 5 },
             else => null,
         };
     }
 
     fn atActionKeyword(p: *Parser) bool {
         return switch (p.peek()) {
-            .keyword_return, .keyword_insert, .keyword_delete, .keyword_detach, .keyword_set, .keyword_finish => true,
+            .keyword_return, .keyword_insert, .keyword_delete, .keyword_detach, .keyword_set, .keyword_finish, .keyword_where => true,
             else => false,
         };
     }
@@ -1000,6 +1044,24 @@ fn deinitPathRows(rows: *std.ArrayList(PathRow), allocator: Allocator) void {
 fn deinitRowList(rows: *std.ArrayList(Row), allocator: Allocator) void {
     for (rows.items) |*row| row.deinit(allocator);
     rows.deinit(allocator);
+}
+
+fn filterBindings(allocator: Allocator, txn: storage.Transaction, rows: *std.ArrayList(Binding), predicate: Expr) Error!void {
+    var kept = std.ArrayList(Binding).empty;
+    errdefer deinitBindings(&kept, allocator);
+
+    for (rows.items) |*binding| {
+        var value = try evalExpr(allocator, txn, binding.*, predicate);
+        defer value.deinit(allocator);
+        if (value.truthy()) {
+            const moved = binding.*;
+            try kept.append(allocator, moved);
+            binding.* = Binding{};
+        }
+    }
+
+    deinitBindings(rows, allocator);
+    rows.* = kept;
 }
 
 fn matchPath(allocator: Allocator, txn: storage.Transaction, rows: *std.ArrayList(Binding), pattern: PathPattern) Error!void {
@@ -1403,6 +1465,7 @@ fn exprName(allocator: Allocator, item: ReturnItem) Allocator.Error![]u8 {
         .variable => |name| allocator.dupe(u8, name),
         .property => |p| std.fmt.allocPrint(allocator, "{s}.{s}", .{ p.variable, p.property }),
         .literal => allocator.dupe(u8, "value"),
+        .unary => allocator.dupe(u8, "expr"),
         .binary => allocator.dupe(u8, "expr"),
     };
 }
@@ -1434,7 +1497,33 @@ fn evalExpr(allocator: Allocator, txn: storage.Transaction, binding: Binding, ex
                 },
             }
         },
+        .unary => |unary| {
+            var operand = try evalExpr(allocator, txn, binding, unary.operand);
+            defer operand.deinit(allocator);
+            return switch (unary.op) {
+                .not => .{ .bool = !operand.truthy() },
+            };
+        },
         .binary => |bin| {
+            switch (bin.op) {
+                .and_ => {
+                    var left = try evalExpr(allocator, txn, binding, bin.left);
+                    defer left.deinit(allocator);
+                    if (!left.truthy()) return .{ .bool = false };
+                    var right = try evalExpr(allocator, txn, binding, bin.right);
+                    defer right.deinit(allocator);
+                    return .{ .bool = right.truthy() };
+                },
+                .or_ => {
+                    var left = try evalExpr(allocator, txn, binding, bin.left);
+                    defer left.deinit(allocator);
+                    if (left.truthy()) return .{ .bool = true };
+                    var right = try evalExpr(allocator, txn, binding, bin.right);
+                    defer right.deinit(allocator);
+                    return .{ .bool = right.truthy() };
+                },
+                else => {},
+            }
             var left = try evalExpr(allocator, txn, binding, bin.left);
             defer left.deinit(allocator);
             var right = try evalExpr(allocator, txn, binding, bin.right);
@@ -1445,9 +1534,47 @@ fn evalExpr(allocator: Allocator, txn: storage.Transaction, binding: Binding, ex
                 .mul => multiplyValues(left, right),
                 .eql => .{ .bool = left.eql(right) },
                 .neq => .{ .bool = !left.eql(right) },
+                .lt => .{ .bool = if (compareValues(left, right)) |order| order == .lt else false },
+                .lte => .{ .bool = if (compareValues(left, right)) |order| order == .lt or order == .eq else false },
+                .gt => .{ .bool = if (compareValues(left, right)) |order| order == .gt else false },
+                .gte => .{ .bool = if (compareValues(left, right)) |order| order == .gt or order == .eq else false },
+                .and_, .or_ => unreachable,
             };
         },
     }
+}
+
+fn compareValues(left: Value, right: Value) ?std.math.Order {
+    return switch (left) {
+        .int64 => |a| switch (right) {
+            .int64 => |b| orderInt(a, b),
+            .float64 => |b| orderFloat(@floatFromInt(a), b),
+            else => null,
+        },
+        .float64 => |a| switch (right) {
+            .int64 => |b| orderFloat(a, @floatFromInt(b)),
+            .float64 => |b| orderFloat(a, b),
+            else => null,
+        },
+        .string => |a| switch (right) {
+            .string => |b| std.mem.order(u8, a, b),
+            else => null,
+        },
+        else => null,
+    };
+}
+
+fn orderInt(a: i64, b: i64) std.math.Order {
+    if (a < b) return .lt;
+    if (a > b) return .gt;
+    return .eq;
+}
+
+fn orderFloat(a: f64, b: f64) ?std.math.Order {
+    if (std.math.isNan(a) or std.math.isNan(b)) return null;
+    if (a < b) return .lt;
+    if (a > b) return .gt;
+    return .eq;
 }
 
 fn multiplyValues(left: Value, right: Value) Value {
@@ -1477,6 +1604,16 @@ fn jsonForTest(result: ResultSet) ![]u8 {
     defer buf.deinit();
     try result.writeJson(&buf.writer);
     return try buf.toOwnedSlice();
+}
+
+fn resultContainsString(result: ResultSet, column: usize, expected: []const u8) bool {
+    for (result.rows) |row| {
+        if (row.values[column] != .scalar) continue;
+        const scalar = row.values[column].scalar;
+        if (scalar != .string) continue;
+        if (std.mem.eql(u8, scalar.string, expected)) return true;
+    }
+    return false;
 }
 
 test "return arithmetic" {
@@ -1565,6 +1702,36 @@ test "match return limit" {
         try std.testing.expectEqual(@as(usize, 2), result.rows.len);
         try std.testing.expectEqual(@as(usize, 1), result.columns.len);
         try std.testing.expectEqualStrings("p.name", result.columns[0]);
+    }
+}
+
+test "match where filters with comparisons and boolean operators" {
+    var tmp = @import("test_helpers.zig").tmp();
+    defer tmp.cleanup();
+    const store = try tmp.store("test.db");
+    defer store.db.close();
+
+    {
+        var result = try execForTest(store,
+            \\INSERT (:Person {name: 'Ada', age: 30, active: true}),
+            \\       (:Person {name: 'Bert', age: 41, active: false}),
+            \\       (:Person {name: 'Cara', age: 42, active: true})
+        );
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(?usize, 3), result.rows_affected);
+    }
+    {
+        var result = try execForTest(store, "MATCH (p:Person) WHERE p.age > 30 AND p.active = true RETURN p.name");
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 1), result.rows.len);
+        try std.testing.expectEqualStrings("Cara", result.rows[0].values[0].scalar.string);
+    }
+    {
+        var result = try execForTest(store, "MATCH (p:Person) WHERE NOT p.active OR p.age <= 30 RETURN p.name");
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 2), result.rows.len);
+        try std.testing.expect(resultContainsString(result, 0, "Ada"));
+        try std.testing.expect(resultContainsString(result, 0, "Bert"));
     }
 }
 
