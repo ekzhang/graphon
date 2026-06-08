@@ -446,6 +446,8 @@ fn appendAggregateProjection(planner: *Planner, ret: Ast.ReturnClause) Error!voi
     for (ret.items) |item| {
         switch (item.expr) {
             .aggregate => |call| {
+                if (call.function != .count and call.argument == null) return error.Unsupported;
+                if (call.distinct and call.argument == null) return error.Unsupported;
                 if (call.argument) |argument| {
                     if (exprHasAggregate(argument)) return error.Unsupported;
                 }
@@ -457,6 +459,7 @@ fn appendAggregateProjection(planner: *Planner, ret: Ast.ReturnClause) Error!voi
                 try aggregate.items.append(planner.gpa, .{
                     .ident = ident,
                     .function = call.function,
+                    .distinct = call.distinct,
                     .argument = argument,
                 });
                 argument = null;

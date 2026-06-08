@@ -153,7 +153,7 @@ pub fn runDistinct(op: std.ArrayList(u16), state: *DistinctState, exec: *executo
 }
 
 pub const AggregateState = struct {
-    rows: std.ArrayList(SortRow) = .empty,
+    rows: std.ArrayList(AggregateRow) = .empty,
     index: usize = 0,
     loaded: bool = false,
 
@@ -164,22 +164,45 @@ pub const AggregateState = struct {
     }
 };
 
+const AggregateRow = struct {
+    assignments: []Value,
+    states: []AggregateItemState,
+
+    fn deinit(self: *AggregateRow, allocator: Allocator) void {
+        for (self.assignments) |*value| value.deinit(allocator);
+        allocator.free(self.assignments);
+        for (self.states) |*state| state.deinit(allocator);
+        allocator.free(self.states);
+        self.* = undefined;
+    }
+};
+
+const AggregateItemState = struct {
+    count: i64 = 0,
+    sum: Value = .null,
+    value: Value = .null,
+    seen: std.ArrayList(Value) = .empty,
+
+    fn deinit(self: *AggregateItemState, allocator: Allocator) void {
+        self.sum.deinit(allocator);
+        self.value.deinit(allocator);
+        for (self.seen.items) |*value| value.deinit(allocator);
+        self.seen.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
 pub fn runAggregate(op: Plan.Aggregate, state: *AggregateState, exec: *executor.Executor, op_index: u32) !bool {
     if (!state.loaded) {
         while (try exec.next(op_index)) {
             const row = try aggregateRow(op, state, exec);
-            try applyAggregates(op, row.assignments, exec);
+            try applyAggregates(op, row, exec);
         }
 
         if (state.rows.items.len == 0 and op.groups.items.len == 0) {
-            const assignments = try cloneAssignments(exec.txn.allocator, exec.assignments);
-            errdefer {
-                for (assignments) |*value| value.deinit(exec.txn.allocator);
-                exec.txn.allocator.free(assignments);
-            }
-            initAggregateValues(op, assignments, exec.txn.allocator);
-            try state.rows.append(exec.txn.allocator, .{ .assignments = assignments });
+            _ = try appendAggregateRow(op, state, exec);
         }
+        for (state.rows.items) |*row| try finalizeAggregates(op, row, exec.txn.allocator);
         state.loaded = true;
     }
 
@@ -193,43 +216,114 @@ pub fn runAggregate(op: Plan.Aggregate, state: *AggregateState, exec: *executor.
     return true;
 }
 
-fn aggregateRow(op: Plan.Aggregate, state: *AggregateState, exec: *executor.Executor) !*SortRow {
+fn aggregateRow(op: Plan.Aggregate, state: *AggregateState, exec: *executor.Executor) !*AggregateRow {
     for (state.rows.items) |*row| {
         if (distinctRowEqual(op.groups.items, row.assignments, exec.assignments)) return row;
     }
+    return appendAggregateRow(op, state, exec);
+}
 
+fn appendAggregateRow(op: Plan.Aggregate, state: *AggregateState, exec: *executor.Executor) !*AggregateRow {
     const assignments = try cloneAssignments(exec.txn.allocator, exec.assignments);
     errdefer {
         for (assignments) |*value| value.deinit(exec.txn.allocator);
         exec.txn.allocator.free(assignments);
     }
-    initAggregateValues(op, assignments, exec.txn.allocator);
-    try state.rows.append(exec.txn.allocator, .{ .assignments = assignments });
+
+    const states = try exec.txn.allocator.alloc(AggregateItemState, op.items.items.len);
+    errdefer exec.txn.allocator.free(states);
+    for (states) |*item_state| item_state.* = .{};
+    errdefer for (states) |*item_state| item_state.deinit(exec.txn.allocator);
+
+    try state.rows.append(exec.txn.allocator, .{ .assignments = assignments, .states = states });
     return &state.rows.items[state.rows.items.len - 1];
 }
 
-fn initAggregateValues(op: Plan.Aggregate, assignments: []Value, allocator: Allocator) void {
-    for (op.items.items) |item| {
-        assignments[item.ident].deinit(allocator);
-        assignments[item.ident] = switch (item.function) {
-            .count => .{ .int64 = 0 },
+fn applyAggregates(op: Plan.Aggregate, row: *AggregateRow, exec: *executor.Executor) !void {
+    for (op.items.items, row.states) |item, *state| {
+        var value: ?Value = null;
+        defer if (value) |*v| v.deinit(exec.txn.allocator);
+        if (item.argument) |argument| {
+            value = try executor.evaluate(argument, exec.assignments, exec.txn);
+            if (value.? == .null) continue;
+            if (item.distinct) {
+                if (aggregateSeenContains(state.seen.items, value.?)) continue;
+                try state.seen.append(exec.txn.allocator, try value.?.dupe(exec.txn.allocator));
+            }
+        }
+
+        switch (item.function) {
+            .count => {
+                state.count += 1;
+            },
+            .sum => try addAggregateNumeric(state, value.?, exec.txn.allocator),
+            .avg => {
+                try addAggregateNumeric(state, value.?, exec.txn.allocator);
+                state.count += 1;
+            },
+            .min => try applyAggregateOrder(state, value.?, .lt, exec.txn.allocator),
+            .max => try applyAggregateOrder(state, value.?, .gt, exec.txn.allocator),
+        }
+    }
+}
+
+fn finalizeAggregates(op: Plan.Aggregate, row: *AggregateRow, allocator: Allocator) !void {
+    for (op.items.items, row.states) |item, state| {
+        row.assignments[item.ident].deinit(allocator);
+        row.assignments[item.ident] = switch (item.function) {
+            .count => .{ .int64 = state.count },
+            .sum => try state.sum.dupe(allocator),
+            .avg => averageValue(state),
+            .min, .max => try state.value.dupe(allocator),
         };
     }
 }
 
-fn applyAggregates(op: Plan.Aggregate, assignments: []Value, exec: *executor.Executor) !void {
-    for (op.items.items) |item| {
-        switch (item.function) {
-            .count => {
-                if (item.argument) |argument| {
-                    var value = try executor.evaluate(argument, exec.assignments, exec.txn);
-                    defer value.deinit(exec.txn.allocator);
-                    if (value == .null) continue;
-                }
-                assignments[item.ident].int64 += 1;
-            },
-        }
+fn aggregateSeenContains(seen: []const Value, value: Value) bool {
+    for (seen) |seen_value| {
+        if (seen_value.eql(value)) return true;
     }
+    return false;
+}
+
+fn addAggregateNumeric(state: *AggregateItemState, value: Value, allocator: Allocator) !void {
+    switch (value) {
+        .int64, .float64 => {},
+        else => return executor.Error.WrongType,
+    }
+
+    if (state.sum == .null) {
+        state.sum = value;
+        return;
+    }
+
+    var next = try state.sum.add(value, allocator);
+    errdefer next.deinit(allocator);
+    if (next == .null) return executor.Error.WrongType;
+    state.sum.deinit(allocator);
+    state.sum = next;
+}
+
+fn applyAggregateOrder(state: *AggregateItemState, value: Value, want: std.math.Order, allocator: Allocator) !void {
+    if (state.value == .null) {
+        state.value = try value.dupe(allocator);
+        return;
+    }
+    const order = value.compare(state.value) orelse return executor.Error.WrongType;
+    if (order == want) {
+        state.value.deinit(allocator);
+        state.value = try value.dupe(allocator);
+    }
+}
+
+fn averageValue(state: AggregateItemState) Value {
+    if (state.count == 0) return .null;
+    return switch (state.sum) {
+        .int64 => |sum| .{ .float64 = @as(f64, @floatFromInt(sum)) / @as(f64, @floatFromInt(state.count)) },
+        .float64 => |sum| .{ .float64 = sum / @as(f64, @floatFromInt(state.count)) },
+        .null => .null,
+        else => unreachable,
+    };
 }
 
 pub const SortState = struct {

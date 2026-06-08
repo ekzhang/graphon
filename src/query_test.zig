@@ -163,6 +163,16 @@ test "compile return aggregate query plan snapshot" {
     ));
 }
 
+test "compile numeric aggregate query plan snapshot" {
+    try checkQueryPlanSnapshot("MATCH (p:Person) RETURN p.team AS team, COUNT(DISTINCT p.age) AS ages, SUM(p.score) AS total, AVG(p.score) AS avg, MIN(p.name) AS first, MAX(p.score) AS max ORDER BY team", snap(@src(),
+        \\Plan{%1, %2, %3, %4, %5, %6}
+        \\  Sort %1 asc
+        \\  Aggregate %2: count(distinct %0.age), %3: sum(%0.score), %4: avg(%0.score), %5: min(%0.name), %6: max(%0.score) BY %1
+        \\  Project %1: %0.team
+        \\  NodeScan (%0:Person)
+    ));
+}
+
 test "prepare query cleans up across allocation failures" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, prepareForAllocationFailureTest, .{});
 }
@@ -679,6 +689,69 @@ test "return count aggregates matched rows" {
         try std.testing.expectEqual(@as(usize, 1), result.rows.len);
         try std.testing.expectEqual(Value{ .int64 = 0 }, result.rows[0].values[0].scalar);
     }
+}
+
+test "return numeric aggregates by group" {
+    var tmp = @import("test_helpers.zig").tmp();
+    defer tmp.cleanup();
+    const store = try tmp.store("test.db");
+    defer store.db.close();
+
+    {
+        var result = try execForTest(store,
+            \\INSERT (:Person {name: 'Ada', team: 'A', age: 30, score: 10}),
+            \\       (:Person {name: 'Amy', team: 'A', age: 30, score: 20}),
+            \\       (:Person {name: 'Bert', team: 'B', age: 41, score: 7})
+        );
+        defer result.deinit(std.testing.allocator);
+    }
+    {
+        var result = try execForTest(store,
+            \\MATCH (p:Person)
+            \\RETURN p.team AS team,
+            \\       COUNT(*) AS people,
+            \\       COUNT(DISTINCT p.age) AS ages,
+            \\       SUM(p.score) AS total,
+            \\       AVG(p.score) AS avg,
+            \\       MIN(p.name) AS first,
+            \\       MAX(p.score) AS max_score
+            \\ORDER BY team
+        );
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 2), result.rows.len);
+
+        try std.testing.expectEqualStrings("A", result.rows[0].values[0].scalar.string);
+        try std.testing.expectEqual(Value{ .int64 = 2 }, result.rows[0].values[1].scalar);
+        try std.testing.expectEqual(Value{ .int64 = 1 }, result.rows[0].values[2].scalar);
+        try std.testing.expectEqual(Value{ .int64 = 30 }, result.rows[0].values[3].scalar);
+        try std.testing.expectEqual(Value{ .float64 = 15.0 }, result.rows[0].values[4].scalar);
+        try std.testing.expectEqualStrings("Ada", result.rows[0].values[5].scalar.string);
+        try std.testing.expectEqual(Value{ .int64 = 20 }, result.rows[0].values[6].scalar);
+
+        try std.testing.expectEqualStrings("B", result.rows[1].values[0].scalar.string);
+        try std.testing.expectEqual(Value{ .int64 = 1 }, result.rows[1].values[1].scalar);
+        try std.testing.expectEqual(Value{ .int64 = 1 }, result.rows[1].values[2].scalar);
+        try std.testing.expectEqual(Value{ .int64 = 7 }, result.rows[1].values[3].scalar);
+        try std.testing.expectEqual(Value{ .float64 = 7.0 }, result.rows[1].values[4].scalar);
+        try std.testing.expectEqualStrings("Bert", result.rows[1].values[5].scalar.string);
+        try std.testing.expectEqual(Value{ .int64 = 7 }, result.rows[1].values[6].scalar);
+    }
+}
+
+test "empty aggregates return null except count" {
+    var tmp = @import("test_helpers.zig").tmp();
+    defer tmp.cleanup();
+    const store = try tmp.store("test.db");
+    defer store.db.close();
+
+    var result = try execForTest(store, "MATCH (p:Missing) RETURN COUNT(p) AS n, SUM(p.score) AS total, AVG(p.score) AS avg, MIN(p.name) AS first, MAX(p.score) AS max_score");
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), result.rows.len);
+    try std.testing.expectEqual(Value{ .int64 = 0 }, result.rows[0].values[0].scalar);
+    try std.testing.expect(result.rows[0].values[1].scalar == .null);
+    try std.testing.expect(result.rows[0].values[2].scalar == .null);
+    try std.testing.expect(result.rows[0].values[3].scalar == .null);
+    try std.testing.expect(result.rows[0].values[4].scalar == .null);
 }
 
 test "match where filters with comparisons and boolean operators" {

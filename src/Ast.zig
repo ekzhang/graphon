@@ -264,6 +264,7 @@ pub const Expr = union(enum) {
 
 pub const AggregateCall = struct {
     function: Plan.AggregateFunction,
+    distinct: bool = false,
     argument: ?Expr,
 
     pub fn deinit(self: *AggregateCall, allocator: Allocator) void {

@@ -79,7 +79,7 @@ test "parse read query with with and optional match" {
 }
 
 test "parse count aggregate calls" {
-    var program = try Ast.parse(std.testing.allocator, "MATCH (p:Person) WITH p, count(*) AS total RETURN COUNT(p) AS people, total");
+    var program = try Ast.parse(std.testing.allocator, "MATCH (p:Person) WITH p, count(*) AS total RETURN COUNT(DISTINCT p) AS people, SUM(p.age), AVG(p.age), MIN(p.name), MAX(p.age), total");
     defer program.deinit(std.testing.allocator);
 
     try std.testing.expect(program.statements[0] == .read_query);
@@ -95,10 +95,26 @@ test "parse count aggregate calls" {
 
     const ret = read.ret;
     const count_p = try expectAggregate(ret.items[0].expr, .count);
+    try std.testing.expect(count_p.distinct);
     try std.testing.expect(count_p.argument != null);
     try expectVariable(count_p.argument.?, "p");
     try std.testing.expectEqualStrings("people", ret.items[0].alias.?);
-    try expectVariable(ret.items[1].expr, "total");
+
+    const sum_age = try expectAggregate(ret.items[1].expr, .sum);
+    try std.testing.expect(!sum_age.distinct);
+    try expectPropertyExpr(sum_age.argument.?, "p", "age");
+    const avg_age = try expectAggregate(ret.items[2].expr, .avg);
+    try expectPropertyExpr(avg_age.argument.?, "p", "age");
+    const min_name = try expectAggregate(ret.items[3].expr, .min);
+    try expectPropertyExpr(min_name.argument.?, "p", "name");
+    const max_age = try expectAggregate(ret.items[4].expr, .max);
+    try expectPropertyExpr(max_age.argument.?, "p", "age");
+    try expectVariable(ret.items[5].expr, "total");
+}
+
+test "parse rejects invalid aggregate star arguments" {
+    try std.testing.expectError(error.ParseError, Ast.parse(std.testing.allocator, "RETURN SUM(*)"));
+    try std.testing.expectError(error.ParseError, Ast.parse(std.testing.allocator, "RETURN COUNT(DISTINCT *)"));
 }
 
 test "parse match path with labels properties and directed edge" {

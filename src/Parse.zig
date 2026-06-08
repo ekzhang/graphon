@@ -493,12 +493,18 @@ fn parsePrimary(p: *Parse) Error!Ast.Expr {
 fn parseCall(p: *Parse, tag: Ast.Token.Tag) Error!Ast.Expr {
     const function: Plan.AggregateFunction = switch (tag) {
         .keyword_count => .count,
+        .keyword_sum => .sum,
+        .keyword_avg => .avg,
+        .keyword_min => .min,
+        .keyword_max => .max,
         else => return error.ParseError,
     };
 
+    const distinct = p.eat(.keyword_distinct);
     var argument: ?Ast.Expr = null;
     errdefer if (argument) |*arg| arg.deinit(p.gpa);
     if (p.eat(.asterisk)) {
+        if (function != .count or distinct) return error.ParseError;
         argument = null;
     } else {
         argument = try p.parseExpr(0);
@@ -506,7 +512,7 @@ fn parseCall(p: *Parse, tag: Ast.Token.Tag) Error!Ast.Expr {
     try p.expect(.r_paren);
 
     const aggregate = try p.gpa.create(Ast.AggregateCall);
-    aggregate.* = .{ .function = function, .argument = argument };
+    aggregate.* = .{ .function = function, .distinct = distinct, .argument = argument };
     argument = null;
     return .{ .aggregate = aggregate };
 }

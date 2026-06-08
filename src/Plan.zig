@@ -344,6 +344,7 @@ pub const Operator = union(enum) {
                         try writer.writeAll(", ");
                     }
                     try writer.print("%{}: {s}(", .{ c.ident, c.function.string() });
+                    if (c.distinct) try writer.writeAll("distinct ");
                     if (c.argument) |argument| try argument.print(writer) else try writer.writeByte('*');
                     try writer.writeByte(')');
                     first = false;
@@ -548,6 +549,7 @@ pub const Aggregate = struct {
 pub const AggregateClause = struct {
     ident: u16,
     function: AggregateFunction,
+    distinct: bool = false,
     argument: ?Exp,
 
     pub fn deinit(self: *AggregateClause, allocator: Allocator) void {
@@ -558,10 +560,18 @@ pub const AggregateClause = struct {
 
 pub const AggregateFunction = enum {
     count,
+    sum,
+    avg,
+    min,
+    max,
 
     pub fn string(self: AggregateFunction) []const u8 {
         return switch (self) {
             .count => "count",
+            .sum => "sum",
+            .avg => "avg",
+            .min => "min",
+            .max => "max",
         };
     }
 };
