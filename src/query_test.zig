@@ -540,15 +540,46 @@ test "returning a node includes labels and properties" {
         defer result.deinit(std.testing.allocator);
         try std.testing.expectEqual(@as(usize, 1), result.rows.len);
         const node = result.rows[0].values[0].node;
-        try std.testing.expectEqual(@as(usize, 1), node.labels.len);
-        try std.testing.expectEqualStrings("Person", node.labels[0]);
-        try std.testing.expectEqual(@as(usize, 2), node.properties.len);
+        try std.testing.expectEqual(@as(usize, 1), node.labels.count());
+        try std.testing.expect(node.labels.contains("Person"));
+        try std.testing.expectEqual(@as(usize, 2), node.properties.count());
 
         const json = try jsonForTest(result);
         defer std.testing.allocator.free(json);
         try std.testing.expect(std.mem.indexOf(u8, json, "\"labels\":[\"Person\"]") != null);
         try std.testing.expect(std.mem.indexOf(u8, json, "\"name\":\"Alice\"") != null);
         try std.testing.expect(std.mem.indexOf(u8, json, "\"age\":30") != null);
+    }
+}
+
+test "returning an edge includes labels endpoints and properties" {
+    var tmp = @import("test_helpers.zig").tmp();
+    defer tmp.cleanup();
+    const store = try tmp.store("test.db");
+    defer store.db.close();
+
+    {
+        var result = try execForTest(store, "INSERT (:Person {name: 'Alice'})-[:Knows {since: 2024}]->(:Person {name: 'Bob'})");
+        defer result.deinit(std.testing.allocator);
+    }
+    {
+        var result = try execForTest(store, "MATCH (a:Person {name: 'Alice'})-[e:Knows]->(b:Person {name: 'Bob'}) RETURN e");
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 1), result.rows.len);
+        const edge = result.rows[0].values[0].edge;
+        try std.testing.expect(edge.directed);
+        try std.testing.expectEqual(@as(usize, 1), edge.labels.count());
+        try std.testing.expect(edge.labels.contains("Knows"));
+        try std.testing.expectEqual(@as(usize, 1), edge.properties.count());
+        try std.testing.expectEqual(Value{ .int64 = 2024 }, edge.properties.get("since").?);
+
+        const json = try jsonForTest(result);
+        defer std.testing.allocator.free(json);
+        try std.testing.expect(std.mem.indexOf(u8, json, "\"labels\":[\"Knows\"]") != null);
+        try std.testing.expect(std.mem.indexOf(u8, json, "\"start\":") != null);
+        try std.testing.expect(std.mem.indexOf(u8, json, "\"end\":") != null);
+        try std.testing.expect(std.mem.indexOf(u8, json, "\"since\":2024") != null);
+        try std.testing.expect(std.mem.indexOf(u8, json, "\"directed\":true") != null);
     }
 }
 

@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const StringMap = std.array_hash_map.String;
 
 const Ast = @import("../Ast.zig");
 const Plan = @import("../Plan.zig");
@@ -129,7 +130,7 @@ const PlanBinding = struct {
 const Planner = struct {
     gpa: Allocator,
     plan: Plan = .{},
-    bindings: std.StringHashMapUnmanaged(PlanBinding) = .empty,
+    bindings: StringMap(PlanBinding) = .empty,
     next_ident: u16 = 0,
 
     fn deinit(self: *Planner) void {

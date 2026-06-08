@@ -16,15 +16,13 @@ const Allocator = std.mem.Allocator;
 const planner = @import("query/planner.zig");
 const runtime = @import("query/runtime.zig");
 const storage = @import("storage.zig");
+const types = @import("types.zig");
 
 pub const Error = planner.Error || runtime.Error;
 
 pub const ResultSet = runtime.ResultSet;
 pub const Row = runtime.Row;
 pub const ResultValue = runtime.ResultValue;
-pub const NodeObject = runtime.NodeObject;
-pub const EdgeObject = runtime.EdgeObject;
-pub const ResultProperty = runtime.ResultProperty;
 pub const StatementCursor = runtime.StatementCursor;
 pub const StatementResultKind = runtime.StatementResultKind;
 

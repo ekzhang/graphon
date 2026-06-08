@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const StringMap = std.array_hash_map.String;
 
 const executor = @import("../executor.zig");
 const Plan = @import("../Plan.zig");
@@ -110,7 +111,7 @@ pub fn runDelete(op: Plan.Delete, _: *void, exec: *executor.Executor, op_index: 
 
 fn putProperty(
     allocator: Allocator,
-    properties: *std.StringArrayHashMapUnmanaged(types.Value),
+    properties: *StringMap(types.Value),
     key: []const u8,
     value: types.Value,
 ) Allocator.Error!void {
@@ -157,9 +158,9 @@ fn evaluateProperties(
     properties: Plan.Properties,
     assignments: []const types.Value,
     txn: @import("../storage.zig").Transaction,
-) executor.Error!std.StringArrayHashMapUnmanaged(types.Value) {
+) executor.Error!StringMap(types.Value) {
     const allocator = txn.allocator;
-    var ret: std.StringArrayHashMapUnmanaged(types.Value) = .empty;
+    var ret: StringMap(types.Value) = .empty;
     errdefer types.freeProperties(allocator, &ret);
     for (properties.items(.key), properties.items(.value)) |k, v| {
         const key = try allocator.dupe(u8, k);
