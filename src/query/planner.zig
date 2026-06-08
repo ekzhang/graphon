@@ -490,6 +490,11 @@ fn appendOrderBy(planner: *Planner, ret: Ast.ReturnClause) Error!void {
     errdefer sort.deinit(planner.gpa);
 
     for (ret.order_by) |item| {
+        if (orderByBinding(planner, item.expr)) |ident| {
+            try sort.append(planner.gpa, .{ .ident = ident, .desc = item.desc });
+            continue;
+        }
+
         const ident = planner.allocIdent();
         var exp = try planExpr(planner, item.expr);
         errdefer exp.deinit(planner.gpa);
@@ -498,10 +503,19 @@ fn appendOrderBy(planner: *Planner, ret: Ast.ReturnClause) Error!void {
         try sort.append(planner.gpa, .{ .ident = ident, .desc = item.desc });
     }
 
-    try planner.plan.ops.append(planner.gpa, .{ .project = project });
-    project = .empty;
+    if (project.items.len > 0) {
+        try planner.plan.ops.append(planner.gpa, .{ .project = project });
+        project = .empty;
+    }
     try planner.plan.ops.append(planner.gpa, .{ .sort = sort });
     sort = .{};
+}
+
+fn orderByBinding(planner: *Planner, expr: Ast.Expr) ?u16 {
+    return switch (expr) {
+        .variable => |name| if (planner.bindings.get(name)) |binding| binding.ident else null,
+        else => null,
+    };
 }
 
 fn appendPathPattern(planner: *Planner, pattern: Ast.PathPattern) Error!void {

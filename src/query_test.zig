@@ -117,6 +117,16 @@ test "compile return distinct query plan snapshot" {
     ));
 }
 
+test "compile order by return alias query plan snapshot" {
+    try checkQueryPlanSnapshot("MATCH (p:Person) RETURN p.name AS name ORDER BY name DESC LIMIT 1", snap(@src(),
+        \\Plan{%1}
+        \\  Limit 1
+        \\  Sort %1 desc
+        \\  Project %1: %0.name
+        \\  NodeScan (%0:Person)
+    ));
+}
+
 test "compile with optional match query plan snapshot" {
     try checkQueryPlanSnapshot("MATCH (p:Person) WITH DISTINCT p OPTIONAL MATCH (p)-[:Likes]->(f:Food) RETURN p.name, f.name", snap(@src(),
         \\Plan{%2, %3}
@@ -496,6 +506,13 @@ test "match return order by" {
         defer result.deinit(std.testing.allocator);
         try std.testing.expectEqual(@as(usize, 1), result.rows.len);
         try std.testing.expectEqualStrings("Bert", result.rows[0].values[0].scalar.string);
+    }
+    {
+        var result = try execForTest(store, "MATCH (p:Person) RETURN p.name AS name ORDER BY name DESC SKIP 1 LIMIT 1");
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 1), result.rows.len);
+        try std.testing.expectEqualStrings("Bert", result.rows[0].values[0].scalar.string);
+        try std.testing.expectEqualStrings("name", result.columns[0]);
     }
 }
 
