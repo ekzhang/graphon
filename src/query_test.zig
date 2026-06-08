@@ -747,6 +747,29 @@ test "return numeric aggregates by group" {
     }
 }
 
+test "numeric distinct aggregates skip duplicate values" {
+    var tmp = @import("test_helpers.zig").tmp();
+    defer tmp.cleanup();
+    const store = try tmp.store("test.db");
+    defer store.db.close();
+
+    {
+        var result = try execForTest(store,
+            \\INSERT (:Person {age: 30}),
+            \\       (:Person {age: 30}),
+            \\       (:Person {age: 41})
+        );
+        defer result.deinit(std.testing.allocator);
+    }
+    {
+        var result = try execForTest(store, "MATCH (p:Person) RETURN SUM(DISTINCT p.age) AS total, AVG(DISTINCT p.age) AS avg");
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 1), result.rows.len);
+        try std.testing.expectEqual(Value{ .int64 = 71 }, result.rows[0].values[0].scalar);
+        try std.testing.expectEqual(Value{ .float64 = 35.5 }, result.rows[0].values[1].scalar);
+    }
+}
+
 test "empty aggregates return null except count" {
     var tmp = @import("test_helpers.zig").tmp();
     defer tmp.cleanup();
