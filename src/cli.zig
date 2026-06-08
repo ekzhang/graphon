@@ -3,24 +3,25 @@ const std = @import("std");
 const default_url = "http://127.0.0.1:7687/";
 
 pub fn main(init: std.process.Init) !void {
-    const allocator = std.heap.c_allocator;
+    const gpa = init.gpa;
+    const io = init.io;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     var stdout_buffer: [4096]u8 = undefined;
-    var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
 
     if (args.len > 1) {
-        const query = try std.mem.join(allocator, " ", args[1..]);
-        defer allocator.free(query);
-        try sendQuery(allocator, init.io, stdout, default_url, query);
+        const query = try std.mem.join(gpa, " ", args[1..]);
+        defer gpa.free(query);
+        try sendQuery(gpa, io, stdout, default_url, query);
         try stdout.flush();
         return;
     }
 
     try stdout.print("Connected to {s}\n", .{default_url});
     var stdin_buffer: [4096]u8 = undefined;
-    var stdin_reader = std.Io.File.stdin().reader(init.io, &stdin_buffer);
+    var stdin_reader = std.Io.File.stdin().reader(io, &stdin_buffer);
     const stdin = &stdin_reader.interface;
 
     while (true) {
@@ -30,7 +31,7 @@ pub fn main(init: std.process.Init) !void {
         const trimmed = std.mem.trim(u8, line, " \t\r\n");
         if (trimmed.len == 0) continue;
         if (std.mem.eql(u8, trimmed, ":quit") or std.mem.eql(u8, trimmed, ":exit")) break;
-        sendQuery(allocator, init.io, stdout, default_url, trimmed) catch |err| {
+        sendQuery(gpa, io, stdout, default_url, trimmed) catch |err| {
             try stdout.print("error: {s}\n", .{@errorName(err)});
             continue;
         };
@@ -38,14 +39,14 @@ pub fn main(init: std.process.Init) !void {
     try stdout.flush();
 }
 
-fn sendQuery(allocator: std.mem.Allocator, io: std.Io, stdout: *std.Io.Writer, base_url: []const u8, gql: []const u8) !void {
-    const url = try queryUrl(allocator, base_url, gql);
-    defer allocator.free(url);
+fn sendQuery(gpa: std.mem.Allocator, io: std.Io, stdout: *std.Io.Writer, base_url: []const u8, gql: []const u8) !void {
+    const url = try queryUrl(gpa, base_url, gql);
+    defer gpa.free(url);
 
-    var client: std.http.Client = .{ .allocator = allocator, .io = io };
+    var client: std.http.Client = .{ .allocator = gpa, .io = io };
     defer client.deinit();
 
-    var body = std.Io.Writer.Allocating.init(allocator);
+    var body = std.Io.Writer.Allocating.init(gpa);
     defer body.deinit();
     const response = try client.fetch(.{
         .location = .{ .url = url },
@@ -60,8 +61,8 @@ fn sendQuery(allocator: std.mem.Allocator, io: std.Io, stdout: *std.Io.Writer, b
     try stdout.writeByte('\n');
 }
 
-fn queryUrl(allocator: std.mem.Allocator, base_url: []const u8, gql: []const u8) ![]u8 {
-    var out = std.Io.Writer.Allocating.init(allocator);
+fn queryUrl(gpa: std.mem.Allocator, base_url: []const u8, gql: []const u8) ![]u8 {
+    var out = std.Io.Writer.Allocating.init(gpa);
     errdefer out.deinit();
     try out.writer.writeAll(base_url);
     if (std.mem.indexOfScalar(u8, base_url, '?') == null) {
@@ -69,31 +70,12 @@ fn queryUrl(allocator: std.mem.Allocator, base_url: []const u8, gql: []const u8)
     } else {
         try out.writer.writeAll("&query=");
     }
-    try percentEncode(&out.writer, gql);
+    try (std.Uri.Component{ .raw = gql }).formatQuery(&out.writer);
     return try out.toOwnedSlice();
-}
-
-fn percentEncode(writer: *std.Io.Writer, input: []const u8) !void {
-    const hex = "0123456789ABCDEF";
-    for (input) |c| {
-        if ((c >= 'a' and c <= 'z') or
-            (c >= 'A' and c <= 'Z') or
-            (c >= '0' and c <= '9') or
-            c == '-' or c == '_' or c == '.' or c == '~')
-        {
-            try writer.writeByte(c);
-        } else if (c == ' ') {
-            try writer.writeByte('+');
-        } else {
-            try writer.writeByte('%');
-            try writer.writeByte(hex[c >> 4]);
-            try writer.writeByte(hex[c & 0x0f]);
-        }
-    }
 }
 
 test "query URL encodes GQL" {
     const url = try queryUrl(std.testing.allocator, default_url, "RETURN 100 * 3");
     defer std.testing.allocator.free(url);
-    try std.testing.expectEqualStrings("http://127.0.0.1:7687/?query=RETURN+100+%2A+3", url);
+    try std.testing.expectEqualStrings("http://127.0.0.1:7687/?query=RETURN%20100%20*%203", url);
 }
