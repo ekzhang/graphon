@@ -10,7 +10,7 @@ const Value = types.Value;
 const Plan = @import("../Plan.zig");
 const executor = @import("../executor.zig");
 
-pub const Error = executor.Error || storage.Error || Allocator.Error || error{WrongResultKind};
+pub const Error = executor.Error || Allocator.Error || error{WrongResultKind};
 
 pub const ResultSet = struct {
     columns: []const []u8 = &.{},

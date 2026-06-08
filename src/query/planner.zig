@@ -7,7 +7,7 @@ const StringMap = std.array_hash_map.String;
 const Ast = @import("../Ast.zig");
 const Plan = @import("../Plan.zig");
 
-pub const Error = Ast.ParseError || error{
+pub const Error = @import("../Parse.zig").Error || error{
     Unsupported,
     UnknownIdentifier,
     WrongType,

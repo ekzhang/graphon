@@ -22,10 +22,8 @@ pub const TokenList = std.MultiArrayList(struct {
     start: ByteOffset,
 });
 
-pub const ParseError = Parse.Error;
-
 /// Parse a GQL query into an AST (list of statements).
-pub fn parse(gpa: Allocator, source: [:0]const u8) ParseError!Program {
+pub fn parse(gpa: Allocator, source: [:0]const u8) Parse.Error!Program {
     var parser: Parse = .{ .gpa = gpa, .source = source };
     return try parser.parse();
 }
