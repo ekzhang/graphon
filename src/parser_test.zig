@@ -18,13 +18,14 @@ test "parse object parses source into ast" {
 }
 
 test "parse return clause modifiers and expression precedence" {
-    var program = try Ast.parse(std.testing.allocator, "RETURN 1 + 2 * 3 AS total ORDER BY total DESC SKIP 4 LIMIT 5");
+    var program = try Ast.parse(std.testing.allocator, "RETURN DISTINCT 1 + 2 * 3 AS total ORDER BY total DESC SKIP 4 LIMIT 5");
     defer program.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(usize, 1), program.statements.len);
     try std.testing.expect(program.statements[0] == .return_only);
 
     const ret = &program.statements[0].return_only;
+    try std.testing.expect(ret.distinct);
     try std.testing.expectEqual(@as(usize, 1), ret.items.len);
     try std.testing.expectEqualStrings("total", ret.items[0].alias.?);
 
@@ -39,6 +40,42 @@ test "parse return clause modifiers and expression precedence" {
     try std.testing.expect(ret.order_by[0].desc);
     try std.testing.expectEqual(@as(usize, 4), ret.skip);
     try std.testing.expectEqual(@as(?usize, 5), ret.limit);
+}
+
+test "parse read query with with and optional match" {
+    var program = try Ast.parse(std.testing.allocator, "MATCH (p:Person) WITH DISTINCT p, p.name AS name OPTIONAL MATCH (p)-[:Likes]->(f:Food) RETURN name, f.name");
+    defer program.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), program.statements.len);
+    try std.testing.expect(program.statements[0] == .read_query);
+
+    const read = &program.statements[0].read_query;
+    try std.testing.expectEqual(@as(usize, 3), read.clauses.len);
+    try std.testing.expect(read.clauses[0] == .match);
+    try std.testing.expect(read.clauses[1] == .with);
+    try std.testing.expect(read.clauses[2] == .optional_match);
+
+    const first = read.clauses[0].match;
+    try std.testing.expectEqual(@as(usize, 1), first.patterns.len);
+    try expectOptionalName(first.patterns[0].start.variable, "p");
+    try expectOptionalName(first.patterns[0].start.label, "Person");
+
+    const with = read.clauses[1].with;
+    try std.testing.expect(with.distinct);
+    try std.testing.expectEqual(@as(usize, 2), with.items.len);
+    try expectVariable(with.items[0].expr, "p");
+    try expectPropertyExpr(with.items[1].expr, "p", "name");
+    try std.testing.expectEqualStrings("name", with.items[1].alias.?);
+
+    const optional = read.clauses[2].optional_match;
+    try std.testing.expectEqual(@as(usize, 1), optional.patterns.len);
+    try expectOptionalName(optional.patterns[0].start.variable, "p");
+    try std.testing.expectEqual(@as(usize, 1), optional.patterns[0].segments.len);
+    try expectOptionalName(optional.patterns[0].segments[0].node.variable, "f");
+
+    try std.testing.expectEqual(@as(usize, 2), read.ret.items.len);
+    try expectVariable(read.ret.items[0].expr, "name");
+    try expectPropertyExpr(read.ret.items[1].expr, "f", "name");
 }
 
 test "parse match path with labels properties and directed edge" {

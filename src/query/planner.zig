@@ -96,6 +96,7 @@ fn compileStatement(gpa: Allocator, statement: Ast.Statement) Error!CompiledStat
             try appendInsertPatterns(&planner, patterns);
             return appendMutationResult(&planner, .mutations);
         },
+        .read_query => |rq| return try appendReadQueryResult(gpa, &planner, rq),
         .match_query => |mq| {
             try appendMatchQuery(&planner, mq);
             return switch (mq.action) {
@@ -120,7 +121,7 @@ fn compileStatement(gpa: Allocator, statement: Ast.Statement) Error!CompiledStat
 
 // ------------------------------ Planner -----------------------------------
 
-const PlanBindingKind = enum { node, edge };
+const PlanBindingKind = enum { node, edge, scalar };
 
 const PlanBinding = struct {
     ident: u16,
@@ -132,6 +133,7 @@ const Planner = struct {
     plan: Plan = .{},
     bindings: StringMap(PlanBinding) = .empty,
     next_ident: u16 = 0,
+    optional_idents: ?*std.ArrayList(u16) = null,
 
     fn deinit(self: *Planner) void {
         self.plan.deinit(self.gpa);
@@ -147,6 +149,7 @@ const Planner = struct {
 
     fn bind(self: *Planner, name: []const u8, kind: PlanBindingKind, ident: u16) Error!void {
         try self.bindings.put(self.gpa, name, .{ .ident = ident, .kind = kind });
+        if (self.optional_idents) |idents| try idents.append(self.gpa, ident);
     }
 
     fn get(self: *Planner, name: []const u8, kind: PlanBindingKind) Error!PlanBinding {
@@ -158,15 +161,28 @@ const Planner = struct {
 
 fn appendReturnResult(gpa: Allocator, planner: *Planner, ret: Ast.ReturnClause) Error!CompiledStatement {
     try appendReturnProjection(planner, ret);
+    try appendReturnAliases(planner, ret);
+    try appendDistinct(planner, ret);
     try appendOrderBy(planner, ret);
     try appendSkipLimit(planner, ret);
 
-    const columns = try resultColumns(gpa, ret);
+    const columns = try resultColumns(gpa, planner, ret);
     errdefer deinitResultColumns(gpa, columns);
     return .{
         .plan = takePlan(planner),
         .result = .{ .rows = columns },
     };
+}
+
+fn appendReadQueryResult(gpa: Allocator, planner: *Planner, query: Ast.ReadQuery) Error!CompiledStatement {
+    for (query.clauses) |clause| {
+        switch (clause) {
+            .match => |match| try appendMatchClause(planner, match),
+            .optional_match => |match| try appendOptionalMatchClause(planner, match),
+            .with => |ret| try appendWithClause(planner, ret),
+        }
+    }
+    return try appendReturnResult(gpa, planner, query.ret);
 }
 
 fn appendMutationResult(planner: *Planner, count: MutationCount) CompiledStatement {
@@ -188,7 +204,7 @@ fn takePlan(planner: *Planner) Plan {
     return plan;
 }
 
-fn resultColumns(gpa: Allocator, ret: Ast.ReturnClause) Allocator.Error![]ResultColumn {
+fn resultColumns(gpa: Allocator, planner: *Planner, ret: Ast.ReturnClause) Error![]ResultColumn {
     const columns = try gpa.alloc(ResultColumn, ret.items.len);
     for (columns) |*column| column.* = .{ .name = &.{}, .graph_value = false };
     errdefer deinitResultColumns(gpa, columns);
@@ -196,7 +212,7 @@ fn resultColumns(gpa: Allocator, ret: Ast.ReturnClause) Allocator.Error![]Result
     for (ret.items, 0..) |item, i| {
         columns[i] = .{
             .name = try exprName(gpa, item),
-            .graph_value = item.expr == .variable,
+            .graph_value = try itemReturnsGraphValue(planner, item),
         };
     }
 
@@ -249,14 +265,36 @@ fn appendDelete(planner: *Planner, del: Ast.DeleteAction) Error!void {
 }
 
 fn appendMatchQuery(planner: *Planner, mq: Ast.MatchQuery) Error!void {
-    for (mq.patterns, 0..) |pattern, i| {
+    try appendMatchClause(planner, .{ .patterns = mq.patterns, .where = mq.where });
+}
+
+fn appendMatchClause(planner: *Planner, clause: Ast.MatchClause) Error!void {
+    try appendMatchPatterns(planner, clause.patterns);
+    if (clause.where) |where| {
+        try appendFilter(planner, .{ .bool_exp = try planExpr(planner, where) });
+    }
+}
+
+fn appendMatchPatterns(planner: *Planner, patterns: []Ast.PathPattern) Error!void {
+    for (patterns, 0..) |pattern, i| {
         if (i > 0) try planner.plan.ops.append(planner.gpa, .begin);
         try appendPathPattern(planner, pattern);
         if (i > 0) try planner.plan.ops.append(planner.gpa, .join);
     }
-    if (mq.where) |where| {
-        try appendFilter(planner, .{ .bool_exp = try planExpr(planner, where) });
-    }
+}
+
+fn appendOptionalMatchClause(planner: *Planner, clause: Ast.MatchClause) Error!void {
+    try planner.plan.ops.append(planner.gpa, .begin);
+
+    var optional_idents = std.ArrayList(u16).empty;
+    errdefer optional_idents.deinit(planner.gpa);
+    const previous = planner.optional_idents;
+    planner.optional_idents = &optional_idents;
+    defer planner.optional_idents = previous;
+
+    try appendMatchClause(planner, clause);
+    try planner.plan.ops.append(planner.gpa, .{ .optional_join = optional_idents });
+    optional_idents = .empty;
 }
 
 fn appendInsertPath(planner: *Planner, pattern: Ast.PathPattern) Error!void {
@@ -384,6 +422,50 @@ fn appendReturnProjection(planner: *Planner, ret: Ast.ReturnClause) Error!void {
         try planner.plan.ops.append(planner.gpa, .{ .project = project });
     } else {
         project.deinit(planner.gpa);
+    }
+}
+
+fn appendReturnAliases(planner: *Planner, ret: Ast.ReturnClause) Error!void {
+    for (ret.items, planner.plan.results.items[0..ret.items.len]) |item, ident| {
+        if (item.alias) |alias| {
+            try planner.bind(alias, try itemBindingKind(planner, item), ident);
+        }
+    }
+}
+
+fn appendDistinct(planner: *Planner, ret: Ast.ReturnClause) Error!void {
+    if (!ret.distinct) return;
+
+    var idents = std.ArrayList(u16).empty;
+    errdefer idents.deinit(planner.gpa);
+    try idents.appendSlice(planner.gpa, planner.plan.results.items[0..ret.items.len]);
+    try planner.plan.ops.append(planner.gpa, .{ .distinct = idents });
+    idents = .empty;
+}
+
+fn appendWithClause(planner: *Planner, ret: Ast.ReturnClause) Error!void {
+    std.debug.assert(planner.plan.results.items.len == 0);
+    try appendReturnProjection(planner, ret);
+    try appendReturnAliases(planner, ret);
+    try appendDistinct(planner, ret);
+    try appendOrderBy(planner, ret);
+    try appendSkipLimit(planner, ret);
+
+    const idents = try planner.gpa.dupe(u16, planner.plan.results.items[0..ret.items.len]);
+    defer planner.gpa.free(idents);
+    planner.plan.results.clearRetainingCapacity();
+
+    var bindings: StringMap(PlanBinding) = .empty;
+    defer bindings.deinit(planner.gpa);
+    for (ret.items, idents) |item, ident| {
+        const name = try withBindingName(item);
+        try bindings.put(planner.gpa, name, .{ .ident = ident, .kind = try itemBindingKind(planner, item) });
+    }
+
+    planner.bindings.clearRetainingCapacity();
+    var it = bindings.iterator();
+    while (it.next()) |entry| {
+        try planner.bindings.put(planner.gpa, entry.key_ptr.*, entry.value_ptr.*);
     }
 }
 
@@ -607,4 +689,25 @@ fn exprName(gpa: Allocator, item: Ast.ReturnItem) Allocator.Error![]u8 {
         .unary => gpa.dupe(u8, "expr"),
         .binary => gpa.dupe(u8, "expr"),
     };
+}
+
+fn withBindingName(item: Ast.ReturnItem) Error![]const u8 {
+    if (item.alias) |alias| return alias;
+    return switch (item.expr) {
+        .variable => |name| name,
+        else => error.Unsupported,
+    };
+}
+
+fn itemBindingKind(planner: *Planner, item: Ast.ReturnItem) Error!PlanBindingKind {
+    return switch (item.expr) {
+        .variable => |name| (planner.bindings.get(name) orelse return error.UnknownIdentifier).kind,
+        else => .scalar,
+    };
+}
+
+fn itemReturnsGraphValue(planner: *Planner, item: Ast.ReturnItem) Error!bool {
+    if (item.expr != .variable) return false;
+    const binding = planner.bindings.get(item.expr.variable) orelse return error.UnknownIdentifier;
+    return binding.kind == .node or binding.kind == .edge;
 }

@@ -119,6 +119,39 @@ pub fn runSkip(op: u64, state: *bool, exec: *executor.Executor, op_index: u32) !
     return try exec.next(op_index);
 }
 
+pub const DistinctState = struct {
+    rows: std.ArrayList(SortRow) = .empty,
+    index: usize = 0,
+    loaded: bool = false,
+
+    pub fn deinit(self: *DistinctState, allocator: Allocator) void {
+        for (self.rows.items) |*row| row.deinit(allocator);
+        self.rows.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+pub fn runDistinct(op: std.ArrayList(u16), state: *DistinctState, exec: *executor.Executor, op_index: u32) !bool {
+    if (!state.loaded) {
+        input: while (try exec.next(op_index)) {
+            for (state.rows.items) |row| {
+                if (distinctRowEqual(op.items, row.assignments, exec.assignments)) continue :input;
+            }
+            try state.rows.append(exec.txn.allocator, .{ .assignments = try cloneAssignments(exec.txn.allocator, exec.assignments) });
+        }
+        state.loaded = true;
+    }
+
+    if (state.index >= state.rows.items.len) return false;
+    const row = state.rows.items[state.index];
+    state.index += 1;
+    for (exec.assignments, row.assignments) |*dest, source| {
+        dest.deinit(exec.txn.allocator);
+        dest.* = try source.dupe(exec.txn.allocator);
+    }
+    return true;
+}
+
 pub const SortState = struct {
     rows: std.ArrayList(SortRow) = .empty,
     index: usize = 0,
@@ -175,6 +208,13 @@ fn cloneAssignments(allocator: Allocator, assignments: []const Value) Allocator.
         out[i] = try value.dupe(allocator);
     }
     return out;
+}
+
+fn distinctRowEqual(idents: []const u16, left: []const Value, right: []const Value) bool {
+    for (idents) |ident| {
+        if (!left[ident].eql(right[ident])) return false;
+    }
+    return true;
 }
 
 fn sortRowLessThan(ctx: SortContext, left: SortRow, right: SortRow) bool {

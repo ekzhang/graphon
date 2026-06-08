@@ -42,13 +42,52 @@ pub const Statement = union(enum) {
     return_only: ReturnClause,
     insert: []PathPattern,
     match_query: MatchQuery,
+    read_query: ReadQuery,
 
     pub fn deinit(self: *Statement, allocator: Allocator) void {
         switch (self.*) {
             .return_only => |*ret| ret.deinit(allocator),
             .insert => |patterns| deinitPatterns(patterns, allocator),
             .match_query => |*mq| mq.deinit(allocator),
+            .read_query => |*rq| rq.deinit(allocator),
         }
+        self.* = undefined;
+    }
+};
+
+pub const ReadQuery = struct {
+    clauses: []ReadClause,
+    ret: ReturnClause,
+
+    pub fn deinit(self: *ReadQuery, allocator: Allocator) void {
+        for (self.clauses) |*clause| clause.deinit(allocator);
+        allocator.free(self.clauses);
+        self.ret.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+pub const ReadClause = union(enum) {
+    match: MatchClause,
+    optional_match: MatchClause,
+    with: ReturnClause,
+
+    pub fn deinit(self: *ReadClause, allocator: Allocator) void {
+        switch (self.*) {
+            .match, .optional_match => |*clause| clause.deinit(allocator),
+            .with => |*ret| ret.deinit(allocator),
+        }
+        self.* = undefined;
+    }
+};
+
+pub const MatchClause = struct {
+    patterns: []PathPattern,
+    where: ?Expr = null,
+
+    pub fn deinit(self: *MatchClause, allocator: Allocator) void {
+        deinitPatterns(self.patterns, allocator);
+        if (self.where) |*where| where.deinit(allocator);
         self.* = undefined;
     }
 };
@@ -90,6 +129,7 @@ pub const MatchAction = union(enum) {
 
 pub const ReturnClause = struct {
     items: []ReturnItem,
+    distinct: bool = false,
     order_by: []SortItem = &.{},
     skip: usize = 0,
     limit: ?usize = null,

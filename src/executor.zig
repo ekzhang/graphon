@@ -28,11 +28,13 @@ const operator_impls = blk: {
         .{ Plan.Operator.begin, bool, null, join_ops.runBegin },
         .{ Plan.Operator.join, join_ops.JoinState, null, join_ops.runJoin },
         .{ Plan.Operator.semi_join, void, null, join_ops.runSemiJoin },
+        .{ Plan.Operator.optional_join, join_ops.OptionalJoinState, null, join_ops.runOptionalJoin },
         .{ Plan.Operator.anti, bool, null, simple_ops.runAnti },
         .{ Plan.Operator.project, void, null, simple_ops.runProject },
         .{ Plan.Operator.empty_result, void, null, simple_ops.runEmptyResult },
         .{ Plan.Operator.filter, void, null, simple_ops.runFilter },
         .{ Plan.Operator.limit, u64, null, simple_ops.runLimit },
+        .{ Plan.Operator.distinct, simple_ops.DistinctState, simple_ops.DistinctState.deinit, simple_ops.runDistinct },
         .{ Plan.Operator.skip, bool, null, simple_ops.runSkip },
         .{ Plan.Operator.sort, simple_ops.SortState, simple_ops.SortState.deinit, simple_ops.runSort },
         .{ Plan.Operator.union_all, bool, null, join_ops.runUnionAll },
@@ -330,6 +332,7 @@ fn evaluateProperty(p: Plan.PropertyExp, assignments: []const Value, txn: storag
             const value = edge.properties.get(p.key) orelse return .null;
             return try value.dupe(txn.allocator);
         },
+        .null => return .null,
         else => return Error.WrongType,
     };
 }

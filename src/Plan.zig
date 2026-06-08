@@ -144,13 +144,14 @@ pub const Operator = union(enum) {
     // shortest_path,
     join,
     semi_join,
+    optional_join: std.ArrayList(u16),
     anti,
     project: std.ArrayList(ProjectClause),
     // project_endpoints: ProjectEndpoints,
     empty_result,
     filter: std.ArrayList(FilterClause),
     limit: u64,
-    distinct: std.ArrayList(u16), // unimplemented
+    distinct: std.ArrayList(u16),
     skip: u64,
     sort: std.MultiArrayList(SortClause),
     top: u64, // unimplemented
@@ -174,6 +175,7 @@ pub const Operator = union(enum) {
             .repeat => {},
             .join => {},
             .semi_join => {},
+            .optional_join => |*n| n.deinit(allocator),
             .anti => {},
             .project => |*n| {
                 for (n.items) |*c| c.deinit(allocator);
@@ -211,6 +213,7 @@ pub const Operator = union(enum) {
             .repeat => "Repeat",
             .join => "Join",
             .semi_join => "SemiJoin",
+            .optional_join => "OptionalJoin",
             .anti => "Anti",
             .project => "Project",
             .empty_result => "EmptyResult",
@@ -255,6 +258,18 @@ pub const Operator = union(enum) {
             .repeat => std.debug.panic("repeat unimplemented", .{}),
             .join => {},
             .semi_join => {},
+            .optional_join => |n| {
+                var first = true;
+                for (n.items) |ident| {
+                    if (first) {
+                        try writer.writeByte(' ');
+                    } else {
+                        try writer.writeAll(", ");
+                    }
+                    try writer.print("%{}", .{ident});
+                    first = false;
+                }
+            },
             .anti => {},
             .project => |n| {
                 var first = true;
@@ -362,7 +377,7 @@ pub const Operator = union(enum) {
     /// Return if this operator type has a subquery.
     pub fn hasSubquery(self: Operator) bool {
         return switch (self) {
-            .repeat, .semi_join, .join, .union_all => true,
+            .repeat, .semi_join, .optional_join, .join, .union_all => true,
             else => false,
         };
     }

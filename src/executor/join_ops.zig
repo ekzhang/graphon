@@ -56,6 +56,41 @@ pub fn runSemiJoin(_: void, _: *void, exec: *executor.Executor, op_index: u32) !
     }
 }
 
+pub const OptionalJoinState = struct {
+    side: JoinState = .left,
+    matched: bool = false,
+};
+
+pub fn runOptionalJoin(op: std.ArrayList(u16), state: *OptionalJoinState, exec: *executor.Executor, op_index: u32) !bool {
+    const j = exec.plan.subqueryBegin(op_index) orelse return error.MalformedPlan;
+
+    while (true) {
+        switch (state.side) {
+            .left => {
+                if (!try exec.next(j)) return false;
+                try exec.resetStateRange(j, op_index);
+                state.matched = false;
+                state.side = .right;
+            },
+            .right => {
+                if (try exec.next(op_index)) {
+                    state.matched = true;
+                    return true;
+                }
+
+                state.side = .left;
+                if (!state.matched) {
+                    for (op.items) |ident| {
+                        exec.assignments[ident].deinit(exec.txn.allocator);
+                        exec.assignments[ident] = .null;
+                    }
+                    return true;
+                }
+            },
+        }
+    }
+}
+
 /// This returns all values from the left subquery, then all values from the
 /// right subquery.
 pub fn runUnionAll(_: void, state: *bool, exec: *executor.Executor, op_index: u32) !bool {

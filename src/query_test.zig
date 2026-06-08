@@ -108,6 +108,28 @@ test "compile repeated node path query plan snapshot" {
     ));
 }
 
+test "compile return distinct query plan snapshot" {
+    try checkQueryPlanSnapshot("MATCH (p:Person) RETURN DISTINCT p.name", snap(@src(),
+        \\Plan{%1}
+        \\  Distinct %1
+        \\  Project %1: %0.name
+        \\  NodeScan (%0:Person)
+    ));
+}
+
+test "compile with optional match query plan snapshot" {
+    try checkQueryPlanSnapshot("MATCH (p:Person) WITH DISTINCT p OPTIONAL MATCH (p)-[:Likes]->(f:Food) RETURN p.name, f.name", snap(@src(),
+        \\Plan{%2, %3}
+        \\  Project %2: %0.name, %3: %1.name
+        \\  OptionalJoin %1
+        \\    Filter %1: Food
+        \\    Step (%0)-[:Likes]->(%1)
+        \\  Begin
+        \\  Distinct %0
+        \\  NodeScan (%0:Person)
+    ));
+}
+
 test "prepare query cleans up across allocation failures" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, prepareForAllocationFailureTest, .{});
 }
@@ -474,6 +496,87 @@ test "match return order by" {
         defer result.deinit(std.testing.allocator);
         try std.testing.expectEqual(@as(usize, 1), result.rows.len);
         try std.testing.expectEqualStrings("Bert", result.rows[0].values[0].scalar.string);
+    }
+}
+
+test "match return distinct" {
+    var tmp = @import("test_helpers.zig").tmp();
+    defer tmp.cleanup();
+    const store = try tmp.store("test.db");
+    defer store.db.close();
+
+    {
+        var result = try execForTest(store,
+            \\INSERT (:Person {name: 'Ada'}),
+            \\       (:Food {name: 'Pizza'}),
+            \\       (:Food {name: 'Soup'})
+        );
+        defer result.deinit(std.testing.allocator);
+    }
+    {
+        var result = try execForTest(store, "MATCH (p:Person {name: 'Ada'}), (f:Food) INSERT (p)-[:Likes]->(f)");
+        defer result.deinit(std.testing.allocator);
+    }
+    {
+        var result = try execForTest(store, "MATCH (p:Person)-[:Likes]->(f:Food) RETURN DISTINCT p.name");
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 1), result.rows.len);
+        try std.testing.expectEqualStrings("Ada", result.rows[0].values[0].scalar.string);
+    }
+}
+
+test "with distinct carries scoped bindings" {
+    var tmp = @import("test_helpers.zig").tmp();
+    defer tmp.cleanup();
+    const store = try tmp.store("test.db");
+    defer store.db.close();
+
+    {
+        var result = try execForTest(store,
+            \\INSERT (:Person {name: 'Ada'}),
+            \\       (:Food {name: 'Pizza'}),
+            \\       (:Food {name: 'Soup'})
+        );
+        defer result.deinit(std.testing.allocator);
+    }
+    {
+        var result = try execForTest(store, "MATCH (p:Person {name: 'Ada'}), (f:Food) INSERT (p)-[:Likes]->(f)");
+        defer result.deinit(std.testing.allocator);
+    }
+    {
+        var result = try execForTest(store, "MATCH (p:Person)-[:Likes]->(f:Food) WITH DISTINCT p RETURN p.name");
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 1), result.rows.len);
+        try std.testing.expectEqualStrings("Ada", result.rows[0].values[0].scalar.string);
+    }
+}
+
+test "with optional match returns null extended rows" {
+    var tmp = @import("test_helpers.zig").tmp();
+    defer tmp.cleanup();
+    const store = try tmp.store("test.db");
+    defer store.db.close();
+
+    {
+        var result = try execForTest(store,
+            \\INSERT (:Person {name: 'Ada'}),
+            \\       (:Person {name: 'Bert'}),
+            \\       (:Food {name: 'Pizza'})
+        );
+        defer result.deinit(std.testing.allocator);
+    }
+    {
+        var result = try execForTest(store, "MATCH (p:Person {name: 'Ada'}), (f:Food {name: 'Pizza'}) INSERT (p)-[:Likes]->(f)");
+        defer result.deinit(std.testing.allocator);
+    }
+    {
+        var result = try execForTest(store, "MATCH (p:Person) WITH p, p.name AS name OPTIONAL MATCH (p)-[:Likes]->(f:Food) RETURN name, f.name ORDER BY name");
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 2), result.rows.len);
+        try std.testing.expectEqualStrings("Ada", result.rows[0].values[0].scalar.string);
+        try std.testing.expectEqualStrings("Pizza", result.rows[0].values[1].scalar.string);
+        try std.testing.expectEqualStrings("Bert", result.rows[1].values[0].scalar.string);
+        try std.testing.expect(result.rows[1].values[1].scalar == .null);
     }
 }
 

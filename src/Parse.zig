@@ -73,18 +73,98 @@ fn parseStatement(p: *Parse) Error!Ast.Statement {
     if (p.eat(.keyword_insert)) {
         return .{ .insert = try p.parsePatternListUntilAction() };
     }
+    if (p.eat(.keyword_optional)) {
+        try p.expect(.keyword_match);
+        var clause: ?Ast.MatchClause = try p.parseMatchClauseAfterKeyword();
+        errdefer if (clause) |*c| c.deinit(p.gpa);
+        var first: ?Ast.ReadClause = .{ .optional_match = clause.? };
+        clause = null;
+        errdefer if (first) |*c| c.deinit(p.gpa);
+        var read: ?Ast.ReadQuery = try p.parseReadQueryFromFirst(first.?);
+        first = null;
+        errdefer if (read) |*rq| rq.deinit(p.gpa);
+        const out = Ast.Statement{ .read_query = read.? };
+        read = null;
+        return out;
+    }
     if (p.eat(.keyword_match)) {
-        const patterns = try p.parsePatternListUntilAction();
-        errdefer Ast.deinitPatterns(patterns, p.gpa);
-        var where: ?Ast.Expr = null;
-        errdefer if (where) |*expr| expr.deinit(p.gpa);
-        if (p.eat(.keyword_where)) {
-            where = try p.parseExpr(0);
+        var clause: ?Ast.MatchClause = try p.parseMatchClauseAfterKeyword();
+        errdefer if (clause) |*c| c.deinit(p.gpa);
+        if (p.atReadContinuationKeyword()) {
+            var first: ?Ast.ReadClause = .{ .match = clause.? };
+            clause = null;
+            errdefer if (first) |*c| c.deinit(p.gpa);
+            var read: ?Ast.ReadQuery = try p.parseReadQueryFromFirst(first.?);
+            first = null;
+            errdefer if (read) |*rq| rq.deinit(p.gpa);
+            const out = Ast.Statement{ .read_query = read.? };
+            read = null;
+            return out;
         }
         const action = try p.parseMatchAction();
-        return .{ .match_query = .{ .patterns = patterns, .where = where, .action = action } };
+        const out = Ast.Statement{ .match_query = .{
+            .patterns = clause.?.patterns,
+            .where = clause.?.where,
+            .action = action,
+        } };
+        clause = null;
+        return out;
     }
     return error.ParseError;
+}
+
+fn parseReadQueryFromFirst(p: *Parse, first: Ast.ReadClause) Error!Ast.ReadQuery {
+    var clauses = std.ArrayList(Ast.ReadClause).empty;
+    errdefer {
+        for (clauses.items) |*clause| clause.deinit(p.gpa);
+        clauses.deinit(p.gpa);
+    }
+
+    var owned_first: ?Ast.ReadClause = first;
+    errdefer if (owned_first) |*clause| clause.deinit(p.gpa);
+    try clauses.append(p.gpa, owned_first.?);
+    owned_first = null;
+
+    while (true) {
+        if (p.eat(.keyword_with)) {
+            var ret: ?Ast.ReturnClause = try p.parseReturnClause();
+            errdefer if (ret) |*r| r.deinit(p.gpa);
+            try clauses.append(p.gpa, .{ .with = ret.? });
+            ret = null;
+        } else if (p.eat(.keyword_optional)) {
+            try p.expect(.keyword_match);
+            var clause: ?Ast.MatchClause = try p.parseMatchClauseAfterKeyword();
+            errdefer if (clause) |*c| c.deinit(p.gpa);
+            try clauses.append(p.gpa, .{ .optional_match = clause.? });
+            clause = null;
+        } else if (p.eat(.keyword_match)) {
+            var clause: ?Ast.MatchClause = try p.parseMatchClauseAfterKeyword();
+            errdefer if (clause) |*c| c.deinit(p.gpa);
+            try clauses.append(p.gpa, .{ .match = clause.? });
+            clause = null;
+        } else if (p.eat(.keyword_return)) {
+            var ret: ?Ast.ReturnClause = try p.parseReturnClause();
+            errdefer if (ret) |*r| r.deinit(p.gpa);
+            const owned_clauses = try clauses.toOwnedSlice(p.gpa);
+            clauses = .empty;
+            const out = Ast.ReadQuery{ .clauses = owned_clauses, .ret = ret.? };
+            ret = null;
+            return out;
+        } else {
+            return error.ParseError;
+        }
+    }
+}
+
+fn parseMatchClauseAfterKeyword(p: *Parse) Error!Ast.MatchClause {
+    const patterns = try p.parsePatternListUntilAction();
+    errdefer Ast.deinitPatterns(patterns, p.gpa);
+    var where: ?Ast.Expr = null;
+    errdefer if (where) |*expr| expr.deinit(p.gpa);
+    if (p.eat(.keyword_where)) {
+        where = try p.parseExpr(0);
+    }
+    return .{ .patterns = patterns, .where = where };
 }
 
 fn parseMatchAction(p: *Parse) Error!Ast.MatchAction {
@@ -128,8 +208,9 @@ fn parseSetClauses(p: *Parse) Error![]Ast.SetClause {
 }
 
 fn parseReturnClause(p: *Parse) Error!Ast.ReturnClause {
+    const distinct = p.eat(.keyword_distinct);
     const items = try p.parseReturnItems();
-    var ret = Ast.ReturnClause{ .items = items };
+    var ret = Ast.ReturnClause{ .items = items, .distinct = distinct };
     errdefer ret.deinit(p.gpa);
     if (p.eat(.keyword_order)) {
         try p.expect(.keyword_by);
@@ -155,7 +236,7 @@ fn parseSortItems(p: *Parse) Error![]Ast.SortItem {
         for (items.items) |*item| item.deinit(p.gpa);
         items.deinit(p.gpa);
     }
-    while (!p.at(.keyword_skip) and !p.at(.keyword_limit) and !p.at(.semicolon) and !p.at(.eof)) {
+    while (!p.atReturnModifierTerminator()) {
         var expr: ?Ast.Expr = try p.parseExpr(0);
         errdefer if (expr) |*e| e.deinit(p.gpa);
         const desc = if (p.eat(.keyword_desc) or p.eat(.keyword_descending))
@@ -178,7 +259,7 @@ fn parseReturnItems(p: *Parse) Error![]Ast.ReturnItem {
         for (items.items) |*item| item.deinit(p.gpa);
         items.deinit(p.gpa);
     }
-    while (!p.at(.keyword_order) and !p.at(.keyword_skip) and !p.at(.keyword_limit) and !p.at(.semicolon) and !p.at(.eof)) {
+    while (!p.atReturnItemTerminator()) {
         var expr: ?Ast.Expr = try p.parseExpr(0);
         errdefer if (expr) |*e| e.deinit(p.gpa);
         const alias = if (p.eat(.keyword_as)) try p.expectName() else null;
@@ -438,7 +519,28 @@ fn unquoteString(p: *Parse, s: []const u8) Error![]u8 {
 
 fn atActionKeyword(p: *Parse) bool {
     return switch (p.peek()) {
-        .keyword_return, .keyword_insert, .keyword_delete, .keyword_detach, .keyword_set, .keyword_finish, .keyword_where => true,
+        .keyword_return, .keyword_insert, .keyword_delete, .keyword_detach, .keyword_set, .keyword_finish, .keyword_where, .keyword_with, .keyword_optional, .keyword_match => true,
+        else => false,
+    };
+}
+
+fn atReadContinuationKeyword(p: *Parse) bool {
+    return switch (p.peek()) {
+        .keyword_with, .keyword_optional, .keyword_match => true,
+        else => false,
+    };
+}
+
+fn atReturnItemTerminator(p: *Parse) bool {
+    return switch (p.peek()) {
+        .keyword_order, .keyword_skip, .keyword_limit, .semicolon, .eof, .keyword_match, .keyword_optional, .keyword_return, .keyword_with => true,
+        else => false,
+    };
+}
+
+fn atReturnModifierTerminator(p: *Parse) bool {
+    return switch (p.peek()) {
+        .keyword_skip, .keyword_limit, .semicolon, .eof, .keyword_match, .keyword_optional, .keyword_return, .keyword_with => true,
         else => false,
     };
 }
