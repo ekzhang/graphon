@@ -303,13 +303,13 @@ pub fn evaluate(exp: Plan.Exp, assignments: []const Value, txn: storage.Transact
             return switch (binop.op) {
                 .add => try lhs.add(rhs, txn.allocator),
                 .sub => lhs.sub(rhs),
-                .mul => multiplyValues(lhs, rhs),
+                .mul => lhs.mul(rhs),
                 .eql => .{ .bool = lhs.eql(rhs) },
                 .neq => .{ .bool = !lhs.eql(rhs) },
-                .lt => .{ .bool = if (compareValues(lhs, rhs)) |order| order == .lt else false },
-                .lte => .{ .bool = if (compareValues(lhs, rhs)) |order| order == .lt or order == .eq else false },
-                .gt => .{ .bool = if (compareValues(lhs, rhs)) |order| order == .gt else false },
-                .gte => .{ .bool = if (compareValues(lhs, rhs)) |order| order == .gt or order == .eq else false },
+                .lt => .{ .bool = if (lhs.compare(rhs)) |order| order.compare(.lt) else false },
+                .lte => .{ .bool = if (lhs.compare(rhs)) |order| order.compare(.lte) else false },
+                .gt => .{ .bool = if (lhs.compare(rhs)) |order| order.compare(.gt) else false },
+                .gte => .{ .bool = if (lhs.compare(rhs)) |order| order.compare(.gte) else false },
                 .and_, .or_ => unreachable,
             };
         },
@@ -332,55 +332,6 @@ fn evaluateProperty(p: Plan.PropertyExp, assignments: []const Value, txn: storag
         },
         else => return Error.WrongType,
     };
-}
-
-fn multiplyValues(left: Value, right: Value) Value {
-    return switch (left) {
-        .int64 => |a| switch (right) {
-            .int64 => |b| .{ .int64 = a * b },
-            .float64 => |b| .{ .float64 = @as(f64, @floatFromInt(a)) * b },
-            else => .null,
-        },
-        .float64 => |a| switch (right) {
-            .int64 => |b| .{ .float64 = a * @as(f64, @floatFromInt(b)) },
-            .float64 => |b| .{ .float64 = a * b },
-            else => .null,
-        },
-        else => .null,
-    };
-}
-
-pub fn compareValues(left: Value, right: Value) ?std.math.Order {
-    return switch (left) {
-        .int64 => |a| switch (right) {
-            .int64 => |b| orderInt(a, b),
-            .float64 => |b| orderFloat(@floatFromInt(a), b),
-            else => null,
-        },
-        .float64 => |a| switch (right) {
-            .int64 => |b| orderFloat(a, @floatFromInt(b)),
-            .float64 => |b| orderFloat(a, b),
-            else => null,
-        },
-        .string => |a| switch (right) {
-            .string => |b| std.mem.order(u8, a, b),
-            else => null,
-        },
-        else => null,
-    };
-}
-
-fn orderInt(a: i64, b: i64) std.math.Order {
-    if (a < b) return .lt;
-    if (a > b) return .gt;
-    return .eq;
-}
-
-fn orderFloat(a: f64, b: f64) ?std.math.Order {
-    if (std.math.isNan(a) or std.math.isNan(b)) return null;
-    if (a < b) return .lt;
-    if (a > b) return .gt;
-    return .eq;
 }
 
 test evaluate {

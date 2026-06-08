@@ -366,6 +366,23 @@ pub const Value = union(ValueKind) {
         };
     }
 
+    /// Multiply two values.
+    pub fn mul(a: Value, b: Value) Value {
+        return switch (a) {
+            .int64 => |a_| switch (b) {
+                .int64 => |b_| .{ .int64 = a_ * b_ },
+                .float64 => |b_| .{ .float64 = @as(f64, @floatFromInt(a_)) * b_ },
+                else => .null,
+            },
+            .float64 => |a_| switch (b) {
+                .int64 => |b_| .{ .float64 = a_ * @as(f64, @floatFromInt(b_)) },
+                .float64 => |b_| .{ .float64 = a_ * b_ },
+                else => .null,
+            },
+            else => .null,
+        };
+    }
+
     /// Check if two values are equal.
     pub fn eql(a: Value, b: Value) bool {
         return switch (a) {
@@ -403,6 +420,27 @@ pub const Value = union(ValueKind) {
         };
     }
 
+    /// Compare two orderable values.
+    pub fn compare(a: Value, b: Value) ?std.math.Order {
+        return switch (a) {
+            .int64 => |a_| switch (b) {
+                .int64 => |b_| std.math.order(a_, b_),
+                .float64 => |b_| orderFloat(@floatFromInt(a_), b_),
+                else => null,
+            },
+            .float64 => |a_| switch (b) {
+                .int64 => |b_| orderFloat(a_, @floatFromInt(b_)),
+                .float64 => |b_| orderFloat(a_, b_),
+                else => null,
+            },
+            .string => |a_| switch (b) {
+                .string => |b_| std.mem.order(u8, a_, b_),
+                else => null,
+            },
+            else => null,
+        };
+    }
+
     /// Returns whether a value is truthy.
     ///
     /// All values are generally truthy, except for the following values: false,
@@ -418,6 +456,19 @@ pub const Value = union(ValueKind) {
         };
     }
 };
+
+fn orderFloat(a: f64, b: f64) ?std.math.Order {
+    if (std.math.isNan(a) or std.math.isNan(b)) return null;
+    return std.math.order(a, b);
+}
+
+test "Value arithmetic and comparison" {
+    try std.testing.expectEqual(Value{ .int64 = 12 }, (Value{ .int64 = 3 }).mul(.{ .int64 = 4 }));
+    try std.testing.expectEqual(Value{ .float64 = 10.0 }, (Value{ .float64 = 2.5 }).mul(.{ .int64 = 4 }));
+    try std.testing.expectEqual(@as(?std.math.Order, .lt), (Value{ .int64 = 3 }).compare(.{ .float64 = 4.0 }));
+    try std.testing.expectEqual(@as(?std.math.Order, .gt), (Value{ .string = "b" }).compare(.{ .string = "a" }));
+    try std.testing.expectEqual(@as(?std.math.Order, null), (Value{ .float64 = std.math.nan(f64) }).compare(.{ .float64 = 1.0 }));
+}
 
 /// A property graph node.
 ///

@@ -188,7 +188,7 @@ fn sortRowLessThan(ctx: SortContext, left: SortRow, right: SortRow) bool {
 }
 
 fn compareSortValues(left: Value, right: Value) std.math.Order {
-    if (executor.compareValues(left, right)) |order| return order;
+    if (left.compare(right)) |order| return order;
     if (left == .null and right != .null) return .gt;
     if (left != .null and right == .null) return .lt;
     return .eq;
