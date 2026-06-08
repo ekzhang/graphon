@@ -1863,6 +1863,7 @@ test "graph arrows" {
 test "line comment followed by statement" {
     try testTokenize(
         \\// line comment
+        \\-- another line comment
         \\MATCH ();
         \\
     , &.{
@@ -1870,6 +1871,26 @@ test "line comment followed by statement" {
         .l_paren,
         .r_paren,
         .semicolon,
+    });
+}
+
+test "block comment followed by statement" {
+    try testTokenize(
+        \\/* block
+        \\   comment */
+        \\RETURN '/* not a comment */';
+    , &.{
+        .keyword_return,
+        .string_literal,
+        .semicolon,
+    });
+}
+
+test "unterminated block comment" {
+    try testTokenize("RETURN 1 /* unterminated", &.{
+        .keyword_return,
+        .number_literal,
+        .invalid,
     });
 }
 

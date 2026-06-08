@@ -159,6 +159,39 @@ test "parse multiple mutation statements" {
     try std.testing.expect(program.statements[2].match_query.action == .finish);
 }
 
+test "parse ISO GQL comments" {
+    var program = try Ast.parse(std.testing.allocator,
+        \\// Insert a seed user.
+        \\INSERT (:Person {name: 'Ada'}) -- statement-local comment
+        \\/* Then read the user back. */
+        \\MATCH (p:Person {name: 'Ada'}) RETURN p.name
+    );
+    defer program.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), program.statements.len);
+    try std.testing.expect(program.statements[0] == .insert);
+    try std.testing.expect(program.statements[1] == .match_query);
+
+    const query = &program.statements[1].match_query;
+    try std.testing.expect(query.action == .ret);
+    try expectPropertyExpr(query.action.ret.items[0].expr, "p", "name");
+}
+
+test "parse keeps comment delimiters inside strings" {
+    var program = try Ast.parse(std.testing.allocator, "RETURN '// not a comment', '-- not a comment', '/* not a comment */'");
+    defer program.deinit(std.testing.allocator);
+
+    const ret = &program.statements[0].return_only;
+    try expectStringLiteral(ret.items[0].expr, "// not a comment");
+    try expectStringLiteral(ret.items[1].expr, "-- not a comment");
+    try expectStringLiteral(ret.items[2].expr, "/* not a comment */");
+}
+
+test "parse rejects invalid comment forms" {
+    try std.testing.expectError(error.ParseError, Ast.parse(std.testing.allocator, "RETURN 1 /* unterminated"));
+    try std.testing.expectError(error.ParseError, Ast.parse(std.testing.allocator, "MATCH (:User)<--(n:User) RETURN n"));
+}
+
 test "parse rejects fractional skip and limit counts" {
     try std.testing.expectError(error.ParseError, Ast.parse(std.testing.allocator, "RETURN 1 SKIP 1.5"));
     try std.testing.expectError(error.ParseError, Ast.parse(std.testing.allocator, "RETURN 1 LIMIT 2.5"));
