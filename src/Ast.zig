@@ -237,12 +237,17 @@ pub const Expr = union(enum) {
     literal: Value,
     variable: []const u8,
     property: struct { variable: []const u8, property: []const u8 },
+    aggregate: *AggregateCall,
     unary: *UnaryExpr,
     binary: *BinaryExpr,
 
     pub fn deinit(self: *Expr, allocator: Allocator) void {
         switch (self.*) {
             .literal => |*v| v.deinit(allocator),
+            .aggregate => |a| {
+                a.deinit(allocator);
+                allocator.destroy(a);
+            },
             .unary => |u| {
                 u.deinit(allocator);
                 allocator.destroy(u);
@@ -253,6 +258,16 @@ pub const Expr = union(enum) {
             },
             .variable, .property => {},
         }
+        self.* = undefined;
+    }
+};
+
+pub const AggregateCall = struct {
+    function: Plan.AggregateFunction,
+    argument: ?Expr,
+
+    pub fn deinit(self: *AggregateCall, allocator: Allocator) void {
+        if (self.argument) |*argument| argument.deinit(allocator);
         self.* = undefined;
     }
 };

@@ -37,6 +37,7 @@ const operator_impls = blk: {
         .{ Plan.Operator.distinct, simple_ops.DistinctState, simple_ops.DistinctState.deinit, simple_ops.runDistinct },
         .{ Plan.Operator.skip, bool, null, simple_ops.runSkip },
         .{ Plan.Operator.sort, simple_ops.SortState, simple_ops.SortState.deinit, simple_ops.runSort },
+        .{ Plan.Operator.aggregate, simple_ops.AggregateState, simple_ops.AggregateState.deinit, simple_ops.runAggregate },
         .{ Plan.Operator.union_all, bool, null, join_ops.runUnionAll },
         .{ Plan.Operator.update, void, null, modify_ops.runUpdate },
         .{ Plan.Operator.insert_node, void, null, modify_ops.runInsertNode },

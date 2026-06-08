@@ -78,6 +78,29 @@ test "parse read query with with and optional match" {
     try expectPropertyExpr(read.ret.items[1].expr, "f", "name");
 }
 
+test "parse count aggregate calls" {
+    var program = try Ast.parse(std.testing.allocator, "MATCH (p:Person) WITH p, count(*) AS total RETURN COUNT(p) AS people, total");
+    defer program.deinit(std.testing.allocator);
+
+    try std.testing.expect(program.statements[0] == .read_query);
+    const read = &program.statements[0].read_query;
+    try std.testing.expect(read.clauses[1] == .with);
+
+    const with = read.clauses[1].with;
+    try std.testing.expectEqual(@as(usize, 2), with.items.len);
+    try expectVariable(with.items[0].expr, "p");
+    const count_all = try expectAggregate(with.items[1].expr, .count);
+    try std.testing.expect(count_all.argument == null);
+    try std.testing.expectEqualStrings("total", with.items[1].alias.?);
+
+    const ret = read.ret;
+    const count_p = try expectAggregate(ret.items[0].expr, .count);
+    try std.testing.expect(count_p.argument != null);
+    try expectVariable(count_p.argument.?, "p");
+    try std.testing.expectEqualStrings("people", ret.items[0].alias.?);
+    try expectVariable(ret.items[1].expr, "total");
+}
+
 test "parse match path with labels properties and directed edge" {
     var program = try Ast.parse(std.testing.allocator, "MATCH (a:User {name: 'Ada'})-[e:Likes {since: 2024}]->(f:Food) RETURN f.name");
     defer program.deinit(std.testing.allocator);
@@ -212,6 +235,12 @@ fn expectUnary(expr: Ast.Expr, op: Plan.UnaryOp) !*Ast.UnaryExpr {
     try std.testing.expect(expr == .unary);
     try std.testing.expectEqual(op, expr.unary.op);
     return expr.unary;
+}
+
+fn expectAggregate(expr: Ast.Expr, function: Plan.AggregateFunction) !*Ast.AggregateCall {
+    try std.testing.expect(expr == .aggregate);
+    try std.testing.expectEqual(function, expr.aggregate.function);
+    return expr.aggregate;
 }
 
 fn expectVariable(expr: Ast.Expr, expected: []const u8) !void {

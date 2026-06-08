@@ -458,7 +458,8 @@ fn parseUnary(p: *Parse) Error!Ast.Expr {
 
 fn parsePrimary(p: *Parse) Error!Ast.Expr {
     const tok = p.next();
-    switch (p.tokenTag(tok)) {
+    const tag = p.tokenTag(tok);
+    switch (tag) {
         .number_literal => {
             const s = p.slice(tok);
             if (std.mem.indexOfScalar(u8, s, '.') != null) {
@@ -476,14 +477,38 @@ fn parsePrimary(p: *Parse) Error!Ast.Expr {
             return expr;
         },
         else => {
-            if (!isNameToken(p.tokenTag(tok))) return error.ParseError;
+            if (!isNameToken(tag)) return error.ParseError;
             const name = p.slice(tok);
+            if (p.eat(.l_paren)) {
+                return p.parseCall(tag);
+            }
             if (p.eat(.period)) {
                 return .{ .property = .{ .variable = name, .property = try p.expectName() } };
             }
             return .{ .variable = name };
         },
     }
+}
+
+fn parseCall(p: *Parse, tag: Ast.Token.Tag) Error!Ast.Expr {
+    const function: Plan.AggregateFunction = switch (tag) {
+        .keyword_count => .count,
+        else => return error.ParseError,
+    };
+
+    var argument: ?Ast.Expr = null;
+    errdefer if (argument) |*arg| arg.deinit(p.gpa);
+    if (p.eat(.asterisk)) {
+        argument = null;
+    } else {
+        argument = try p.parseExpr(0);
+    }
+    try p.expect(.r_paren);
+
+    const aggregate = try p.gpa.create(Ast.AggregateCall);
+    aggregate.* = .{ .function = function, .argument = argument };
+    argument = null;
+    return .{ .aggregate = aggregate };
 }
 
 fn unquoteString(p: *Parse, s: []const u8) Error![]u8 {

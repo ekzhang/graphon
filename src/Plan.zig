@@ -95,6 +95,10 @@ pub fn idents(self: Plan) u16 {
             .project => |n| {
                 for (n.items) |c| idents_chk(&ret, .{c.ident});
             },
+            .aggregate => |n| {
+                for (n.groups.items) |ident| idents_chk(&ret, .{ident});
+                for (n.items.items) |c| idents_chk(&ret, .{c.ident});
+            },
             .insert_node => |n| idents_chk(&ret, .{n.ident}),
             .insert_edge => |n| idents_chk(&ret, .{n.ident}),
             .update => |n| {
@@ -155,12 +159,12 @@ pub const Operator = union(enum) {
     skip: u64,
     sort: std.MultiArrayList(SortClause),
     top: u64, // unimplemented
+    aggregate: Aggregate,
     union_all,
     update: Update,
     insert_node: InsertNode,
     insert_edge: InsertEdge,
     delete: Delete,
-    // aggregate,
     // group_aggregate,
 
     pub fn deinit(self: *Operator, allocator: Allocator) void {
@@ -191,6 +195,7 @@ pub const Operator = union(enum) {
             .skip => {},
             .sort => |*n| n.deinit(allocator),
             .top => {},
+            .aggregate => |*n| n.deinit(allocator),
             .union_all => {},
             .update => |*n| n.deinit(allocator),
             .insert_node => |*n| n.deinit(allocator),
@@ -223,6 +228,7 @@ pub const Operator = union(enum) {
             .skip => "Skip",
             .sort => "Sort",
             .top => "Top",
+            .aggregate => "Aggregate",
             .union_all => "UnionAll",
             .update => "Update",
             .insert_node => "InsertNode",
@@ -328,6 +334,27 @@ pub const Operator = union(enum) {
             },
             .top => |n| {
                 try writer.print(" {}", .{n});
+            },
+            .aggregate => |n| {
+                var first = true;
+                for (n.items.items) |c| {
+                    if (first) {
+                        try writer.writeByte(' ');
+                    } else {
+                        try writer.writeAll(", ");
+                    }
+                    try writer.print("%{}: {s}(", .{ c.ident, c.function.string() });
+                    if (c.argument) |argument| try argument.print(writer) else try writer.writeByte('*');
+                    try writer.writeByte(')');
+                    first = false;
+                }
+                if (n.groups.items.len > 0) {
+                    try writer.writeAll(" BY ");
+                    for (n.groups.items, 0..) |ident, i| {
+                        if (i > 0) try writer.writeAll(", ");
+                        try writer.print("%{}", .{ident});
+                    }
+                }
             },
             .union_all => {},
             .update => |n| {
@@ -504,6 +531,39 @@ pub const FilterClause = union(enum) {
 pub const SortClause = struct {
     ident: u16,
     desc: bool,
+};
+
+pub const Aggregate = struct {
+    groups: std.ArrayList(u16) = .empty,
+    items: std.ArrayList(AggregateClause) = .empty,
+
+    pub fn deinit(self: *Aggregate, allocator: Allocator) void {
+        self.groups.deinit(allocator);
+        for (self.items.items) |*item| item.deinit(allocator);
+        self.items.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+pub const AggregateClause = struct {
+    ident: u16,
+    function: AggregateFunction,
+    argument: ?Exp,
+
+    pub fn deinit(self: *AggregateClause, allocator: Allocator) void {
+        if (self.argument) |*argument| argument.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+pub const AggregateFunction = enum {
+    count,
+
+    pub fn string(self: AggregateFunction) []const u8 {
+        return switch (self) {
+            .count => "count",
+        };
+    }
 };
 
 pub const InsertNode = struct {

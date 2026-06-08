@@ -160,7 +160,7 @@ const Planner = struct {
 };
 
 fn appendReturnResult(gpa: Allocator, planner: *Planner, ret: Ast.ReturnClause) Error!CompiledStatement {
-    try appendReturnProjection(planner, ret);
+    try appendResultProjection(planner, ret);
     try appendReturnAliases(planner, ret);
     try appendDistinct(planner, ret);
     try appendOrderBy(planner, ret);
@@ -425,6 +425,77 @@ fn appendReturnProjection(planner: *Planner, ret: Ast.ReturnClause) Error!void {
     }
 }
 
+fn appendResultProjection(planner: *Planner, ret: Ast.ReturnClause) Error!void {
+    if (returnHasAggregates(ret)) {
+        try appendAggregateProjection(planner, ret);
+    } else {
+        try appendReturnProjection(planner, ret);
+    }
+}
+
+fn appendAggregateProjection(planner: *Planner, ret: Ast.ReturnClause) Error!void {
+    var project = std.ArrayList(Plan.ProjectClause).empty;
+    errdefer {
+        for (project.items) |*clause| clause.deinit(planner.gpa);
+        project.deinit(planner.gpa);
+    }
+
+    var aggregate = Plan.Aggregate{};
+    errdefer aggregate.deinit(planner.gpa);
+
+    for (ret.items) |item| {
+        switch (item.expr) {
+            .aggregate => |call| {
+                if (call.argument) |argument| {
+                    if (exprHasAggregate(argument)) return error.Unsupported;
+                }
+
+                const ident = planner.allocIdent();
+                var argument: ?Plan.Exp = null;
+                errdefer if (argument) |*exp| exp.deinit(planner.gpa);
+                if (call.argument) |arg| argument = try planExpr(planner, arg);
+                try aggregate.items.append(planner.gpa, .{
+                    .ident = ident,
+                    .function = call.function,
+                    .argument = argument,
+                });
+                argument = null;
+                try planner.plan.results.append(planner.gpa, ident);
+            },
+            else => {
+                if (exprHasAggregate(item.expr)) return error.Unsupported;
+                const ident = try appendGroupKey(planner, &project, item.expr);
+                try aggregate.groups.append(planner.gpa, ident);
+                try planner.plan.results.append(planner.gpa, ident);
+            },
+        }
+    }
+
+    if (aggregate.items.items.len == 0) return error.Unsupported;
+
+    if (project.items.len > 0) {
+        try planner.plan.ops.append(planner.gpa, .{ .project = project });
+        project = .empty;
+    } else {
+        project.deinit(planner.gpa);
+    }
+    try planner.plan.ops.append(planner.gpa, .{ .aggregate = aggregate });
+    aggregate = .{};
+}
+
+fn appendGroupKey(planner: *Planner, project: *std.ArrayList(Plan.ProjectClause), expr: Ast.Expr) Error!u16 {
+    if (expr == .variable) {
+        if (planner.bindings.get(expr.variable)) |binding| return binding.ident;
+    }
+
+    const ident = planner.allocIdent();
+    var exp = try planExpr(planner, expr);
+    errdefer exp.deinit(planner.gpa);
+    try project.append(planner.gpa, .{ .ident = ident, .exp = exp });
+    exp = .{ .ident = 0 };
+    return ident;
+}
+
 fn appendReturnAliases(planner: *Planner, ret: Ast.ReturnClause) Error!void {
     for (ret.items, planner.plan.results.items[0..ret.items.len]) |item, ident| {
         if (item.alias) |alias| {
@@ -445,7 +516,7 @@ fn appendDistinct(planner: *Planner, ret: Ast.ReturnClause) Error!void {
 
 fn appendWithClause(planner: *Planner, ret: Ast.ReturnClause) Error!void {
     std.debug.assert(planner.plan.results.items.len == 0);
-    try appendReturnProjection(planner, ret);
+    try appendResultProjection(planner, ret);
     try appendReturnAliases(planner, ret);
     try appendDistinct(planner, ret);
     try appendOrderBy(planner, ret);
@@ -691,6 +762,7 @@ fn planExpr(planner: *Planner, expr: Ast.Expr) Error!Plan.Exp {
             right = .{ .ident = 0 };
             break :blk .{ .binop = planned };
         },
+        .aggregate => return error.Unsupported,
     };
 }
 
@@ -700,6 +772,7 @@ fn exprName(gpa: Allocator, item: Ast.ReturnItem) Allocator.Error![]u8 {
         .variable => |name| gpa.dupe(u8, name),
         .property => |p| std.fmt.allocPrint(gpa, "{s}.{s}", .{ p.variable, p.property }),
         .literal => gpa.dupe(u8, "value"),
+        .aggregate => |call| gpa.dupe(u8, call.function.string()),
         .unary => gpa.dupe(u8, "expr"),
         .binary => gpa.dupe(u8, "expr"),
     };
@@ -716,6 +789,7 @@ fn withBindingName(item: Ast.ReturnItem) Error![]const u8 {
 fn itemBindingKind(planner: *Planner, item: Ast.ReturnItem) Error!PlanBindingKind {
     return switch (item.expr) {
         .variable => |name| (planner.bindings.get(name) orelse return error.UnknownIdentifier).kind,
+        .aggregate => .scalar,
         else => .scalar,
     };
 }
@@ -724,4 +798,20 @@ fn itemReturnsGraphValue(planner: *Planner, item: Ast.ReturnItem) Error!bool {
     if (item.expr != .variable) return false;
     const binding = planner.bindings.get(item.expr.variable) orelse return error.UnknownIdentifier;
     return binding.kind == .node or binding.kind == .edge;
+}
+
+fn returnHasAggregates(ret: Ast.ReturnClause) bool {
+    for (ret.items) |item| {
+        if (exprHasAggregate(item.expr)) return true;
+    }
+    return false;
+}
+
+fn exprHasAggregate(expr: Ast.Expr) bool {
+    return switch (expr) {
+        .aggregate => true,
+        .unary => |unary| exprHasAggregate(unary.operand),
+        .binary => |binary| exprHasAggregate(binary.left) or exprHasAggregate(binary.right),
+        .literal, .variable, .property => false,
+    };
 }

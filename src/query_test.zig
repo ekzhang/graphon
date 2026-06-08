@@ -140,6 +140,29 @@ test "compile with optional match query plan snapshot" {
     ));
 }
 
+test "compile with aggregate query plan snapshot" {
+    try checkQueryPlanSnapshot("MATCH (p:Person) OPTIONAL MATCH (p)-[:Likes]->(f:Food) WITH p, COUNT(f) AS likes RETURN p.name, likes", snap(@src(),
+        \\Plan{%3, %2}
+        \\  Project %3: %0.name
+        \\  Aggregate %2: count(%1) BY %0
+        \\  OptionalJoin %1
+        \\    Filter %1: Food
+        \\    Step (%0)-[:Likes]->(%1)
+        \\  Begin
+        \\  NodeScan (%0:Person)
+    ));
+}
+
+test "compile return aggregate query plan snapshot" {
+    try checkQueryPlanSnapshot("MATCH (p:Person) RETURN p.name AS name, COUNT(*) AS total ORDER BY name", snap(@src(),
+        \\Plan{%1, %2}
+        \\  Sort %1 asc
+        \\  Aggregate %2: count(*) BY %1
+        \\  Project %1: %0.name
+        \\  NodeScan (%0:Person)
+    ));
+}
+
 test "prepare query cleans up across allocation failures" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, prepareForAllocationFailureTest, .{});
 }
@@ -594,6 +617,67 @@ test "with optional match returns null extended rows" {
         try std.testing.expectEqualStrings("Pizza", result.rows[0].values[1].scalar.string);
         try std.testing.expectEqualStrings("Bert", result.rows[1].values[0].scalar.string);
         try std.testing.expect(result.rows[1].values[1].scalar == .null);
+    }
+}
+
+test "with aggregate counts optional matches by group" {
+    var tmp = @import("test_helpers.zig").tmp();
+    defer tmp.cleanup();
+    const store = try tmp.store("test.db");
+    defer store.db.close();
+
+    {
+        var result = try execForTest(store,
+            \\INSERT (:Person {name: 'Ada'}),
+            \\       (:Person {name: 'Bert'}),
+            \\       (:Food {name: 'Pizza'}),
+            \\       (:Food {name: 'Soup'})
+        );
+        defer result.deinit(std.testing.allocator);
+    }
+    {
+        var result = try execForTest(store, "MATCH (p:Person {name: 'Ada'}), (f:Food) INSERT (p)-[:Likes]->(f)");
+        defer result.deinit(std.testing.allocator);
+    }
+    {
+        var result = try execForTest(store,
+            \\MATCH (p:Person)
+            \\OPTIONAL MATCH (p)-[:Likes]->(f:Food)
+            \\WITH p, COUNT(f) AS likes
+            \\RETURN p.name AS name, likes
+            \\ORDER BY name
+        );
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 2), result.rows.len);
+        try std.testing.expectEqualStrings("Ada", result.rows[0].values[0].scalar.string);
+        try std.testing.expectEqual(Value{ .int64 = 2 }, result.rows[0].values[1].scalar);
+        try std.testing.expectEqualStrings("Bert", result.rows[1].values[0].scalar.string);
+        try std.testing.expectEqual(Value{ .int64 = 0 }, result.rows[1].values[1].scalar);
+    }
+}
+
+test "return count aggregates matched rows" {
+    var tmp = @import("test_helpers.zig").tmp();
+    defer tmp.cleanup();
+    const store = try tmp.store("test.db");
+    defer store.db.close();
+
+    {
+        var result = try execForTest(store, "INSERT (:Person {name: 'Ada'}), (:Person {name: 'Bert'})");
+        defer result.deinit(std.testing.allocator);
+    }
+    {
+        var result = try execForTest(store, "MATCH (p:Person) RETURN COUNT(*) AS people");
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 1), result.rows.len);
+        try std.testing.expectEqualStrings("people", result.columns[0]);
+        try std.testing.expectEqual(Value{ .int64 = 2 }, result.rows[0].values[0].scalar);
+    }
+    {
+        var result = try execForTest(store, "MATCH (p:Missing) RETURN COUNT(*) AS people");
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 1), result.rows.len);
+        try std.testing.expectEqual(Value{ .int64 = 0 }, result.rows[0].values[0].scalar);
     }
 }
 
