@@ -34,9 +34,12 @@ const operator_impls = blk: {
         .{ Plan.Operator.filter, void, null, simple_ops.runFilter },
         .{ Plan.Operator.limit, u64, null, simple_ops.runLimit },
         .{ Plan.Operator.skip, bool, null, simple_ops.runSkip },
+        .{ Plan.Operator.sort, simple_ops.SortState, simple_ops.SortState.deinit, simple_ops.runSort },
         .{ Plan.Operator.union_all, bool, null, join_ops.runUnionAll },
+        .{ Plan.Operator.update, void, null, modify_ops.runUpdate },
         .{ Plan.Operator.insert_node, void, null, modify_ops.runInsertNode },
         .{ Plan.Operator.insert_edge, void, null, modify_ops.runInsertEdge },
+        .{ Plan.Operator.delete, void, null, modify_ops.runDelete },
     };
 
     var impls: std.EnumMap(std.meta.Tag(Plan.Operator), OperatorImpl) = .{};
@@ -111,6 +114,9 @@ pub const Executor = struct {
     /// Whether the implicit "initial operator" has returned yet.
     init_op: bool,
 
+    /// Number of graph storage mutations completed by this execution.
+    mutations: usize,
+
     /// Create a new executor for the given plan, within a storage transaction.
     pub fn init(plan: *const Plan, txn: storage.Transaction) !Executor {
         var exec = try init1(plan, txn);
@@ -138,6 +144,7 @@ pub const Executor = struct {
             .states = states,
             .assignments = assignments,
             .init_op = false,
+            .mutations = 0,
         };
     }
 
@@ -255,38 +262,94 @@ test Executor {
     try std.testing.expect(try exec.run() == null);
 }
 
-/// Evaluate an expression given assignments.
-pub fn evaluate(exp: Plan.Exp, assignments: []const Value, allocator: Allocator) Allocator.Error!Value {
+/// Evaluate an expression given assignments and storage-backed entity references.
+pub fn evaluate(exp: Plan.Exp, assignments: []const Value, txn: storage.Transaction) Error!Value {
     return switch (exp) {
-        .literal => |v| v.dupe(allocator),
-        .ident => |i| assignments[i].dupe(allocator),
+        .literal => |v| v.dupe(txn.allocator),
+        .ident => |i| assignments[i].dupe(txn.allocator),
+        .property => |p| evaluateProperty(p, assignments, txn),
         .parameter => std.debug.panic("parameters not implemented yet", .{}),
+        .unary => |unary| {
+            var operand = try evaluate(unary.operand, assignments, txn);
+            defer operand.deinit(txn.allocator);
+            return switch (unary.op) {
+                .not => .{ .bool = !operand.truthy() },
+            };
+        },
         .binop => |binop| {
-            var lhs = try evaluate(binop.left, assignments, allocator);
-            defer lhs.deinit(allocator);
-            var rhs = try evaluate(binop.right, assignments, allocator);
-            defer rhs.deinit(allocator);
+            switch (binop.op) {
+                .and_ => {
+                    var lhs = try evaluate(binop.left, assignments, txn);
+                    defer lhs.deinit(txn.allocator);
+                    if (!lhs.truthy()) return .{ .bool = false };
+                    var rhs = try evaluate(binop.right, assignments, txn);
+                    defer rhs.deinit(txn.allocator);
+                    return .{ .bool = rhs.truthy() };
+                },
+                .or_ => {
+                    var lhs = try evaluate(binop.left, assignments, txn);
+                    defer lhs.deinit(txn.allocator);
+                    if (lhs.truthy()) return .{ .bool = true };
+                    var rhs = try evaluate(binop.right, assignments, txn);
+                    defer rhs.deinit(txn.allocator);
+                    return .{ .bool = rhs.truthy() };
+                },
+                else => {},
+            }
+            var lhs = try evaluate(binop.left, assignments, txn);
+            defer lhs.deinit(txn.allocator);
+            var rhs = try evaluate(binop.right, assignments, txn);
+            defer rhs.deinit(txn.allocator);
             return switch (binop.op) {
-                .add => try lhs.add(rhs, allocator),
+                .add => try lhs.add(rhs, txn.allocator),
                 .sub => lhs.sub(rhs),
+                .mul => lhs.mul(rhs),
                 .eql => .{ .bool = lhs.eql(rhs) },
                 .neq => .{ .bool = !lhs.eql(rhs) },
+                .lt => .{ .bool = if (lhs.compare(rhs)) |order| order.compare(.lt) else false },
+                .lte => .{ .bool = if (lhs.compare(rhs)) |order| order.compare(.lte) else false },
+                .gt => .{ .bool = if (lhs.compare(rhs)) |order| order.compare(.gt) else false },
+                .gte => .{ .bool = if (lhs.compare(rhs)) |order| order.compare(.gte) else false },
+                .and_, .or_ => unreachable,
             };
         },
     };
 }
 
+fn evaluateProperty(p: Plan.PropertyExp, assignments: []const Value, txn: storage.Transaction) Error!Value {
+    return switch (assignments[p.ident]) {
+        .node_ref => |id| {
+            var node = try txn.getNode(id) orelse return .null;
+            defer node.deinit(txn.allocator);
+            const value = node.properties.get(p.key) orelse return .null;
+            return try value.dupe(txn.allocator);
+        },
+        .edge_ref => |id| {
+            var edge = try txn.getEdge(id) orelse return .null;
+            defer edge.deinit(txn.allocator);
+            const value = edge.properties.get(p.key) orelse return .null;
+            return try value.dupe(txn.allocator);
+        },
+        else => return Error.WrongType,
+    };
+}
+
 test evaluate {
-    const allocator = std.testing.allocator;
+    var tmp = test_helpers.tmp();
+    defer tmp.cleanup();
+    const store = try tmp.store("test.db");
+    defer store.db.close();
+    const txn = store.txn();
+    defer txn.close();
 
     try std.testing.expectEqual(
         Value{ .int64 = 12 },
-        try evaluate(Plan.Exp{ .literal = Value{ .int64 = 12 } }, &.{}, allocator),
+        try evaluate(Plan.Exp{ .literal = Value{ .int64 = 12 } }, &.{}, txn),
     );
 
     try std.testing.expectEqual(
         Value{ .int64 = 13 },
-        try evaluate(Plan.Exp{ .ident = 0 }, &.{Value{ .int64 = 13 }}, allocator),
+        try evaluate(Plan.Exp{ .ident = 0 }, &.{Value{ .int64 = 13 }}, txn),
     );
 
     var bop = Plan.BinopExp{
@@ -296,6 +359,27 @@ test evaluate {
     };
     try std.testing.expectEqual(
         Value{ .int64 = 420 },
-        try evaluate(Plan.Exp{ .binop = &bop }, &.{Value{ .int64 = 80 }}, allocator),
+        try evaluate(Plan.Exp{ .binop = &bop }, &.{Value{ .int64 = 80 }}, txn),
     );
+
+    var cmp = Plan.BinopExp{
+        .op = Plan.Binop.gte,
+        .left = Plan.Exp{ .ident = 0 },
+        .right = Plan.Exp{ .literal = Value{ .int64 = 80 } },
+    };
+    try std.testing.expectEqual(
+        Value{ .bool = true },
+        try evaluate(Plan.Exp{ .binop = &cmp }, &.{Value{ .int64 = 80 }}, txn),
+    );
+
+    var node = types.Node{ .id = .{ .value = 99 } };
+    defer node.deinit(txn.allocator);
+    try node.properties.put(txn.allocator, try txn.allocator.dupe(u8, "age"), Value{ .int64 = 42 });
+    try txn.putNode(node);
+
+    var property_exp = Plan.Exp{ .property = .{ .ident = 0, .key = try txn.allocator.dupe(u8, "age") } };
+    defer property_exp.deinit(txn.allocator);
+    var property_value = try evaluate(property_exp, &.{Value{ .node_ref = node.id }}, txn);
+    defer property_value.deinit(txn.allocator);
+    try std.testing.expectEqual(Value{ .int64 = 42 }, property_value);
 }

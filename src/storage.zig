@@ -27,7 +27,7 @@ pub const Error = rocksdb.Error || Allocator.Error || std.Io.Reader.Error || std
 pub const Storage = struct {
     db: rocksdb.DB,
     allocator: Allocator = if (builtin.is_test) std.testing.allocator else std.heap.c_allocator,
-    io: std.Io = if (builtin.is_test) std.testing.io else std.Io.Threaded.init(std.heap.c_allocator, .{}),
+    io: std.Io = if (builtin.is_test) std.testing.io else undefined,
 
     pub fn txn(self: Storage) Transaction {
         return .{ .inner = self.db.begin(), .allocator = self.allocator, .io = self.io };
@@ -80,6 +80,10 @@ pub const Transaction = struct {
 
     pub fn commit(self: Transaction) !void {
         try self.inner.commit();
+    }
+
+    pub fn rollback(self: Transaction) !void {
+        try self.inner.rollback();
     }
 
     /// Get a node from the storage engine. Returns `null` if not found.
@@ -344,6 +348,34 @@ test "put node and edge" {
     try txn.deleteEdge(e.id);
     try std.testing.expectEqual(null, try txn.getNode(n.id));
     try std.testing.expectEqual(null, try txn.getEdge(e.id));
+}
+
+test "committed nodes persist after reopening database" {
+    var tmp = test_helpers.tmp();
+    defer tmp.cleanup();
+    const path = tmp.path("persist.db");
+
+    const id = ElementId{ .value = 42 };
+    {
+        const db = try rocksdb.DB.open(path);
+        defer db.close();
+        const store = Storage{ .db = db };
+        const txn = store.txn();
+        defer txn.close();
+        try txn.putNode(Node{ .id = id });
+        try txn.commit();
+    }
+
+    {
+        const db = try rocksdb.DB.open(path);
+        defer db.close();
+        const store = Storage{ .db = db };
+        const txn = store.txn();
+        defer txn.close();
+        var node = try txn.getNode(id) orelse return error.TestFailed;
+        defer node.deinit(txn.allocator);
+        try std.testing.expectEqual(id, node.id);
+    }
 }
 
 test "iterate adjacency" {

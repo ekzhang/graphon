@@ -97,6 +97,12 @@ pub fn idents(self: Plan) u16 {
             },
             .insert_node => |n| idents_chk(&ret, .{n.ident}),
             .insert_edge => |n| idents_chk(&ret, .{n.ident}),
+            .update => |n| {
+                for (n.items.items) |c| idents_chk(&ret, .{c.ident});
+            },
+            .delete => |n| {
+                for (n.idents.items) |ident| idents_chk(&ret, .{ident});
+            },
             else => {},
         }
     }
@@ -108,8 +114,9 @@ pub fn idents(self: Plan) u16 {
 pub fn subqueryBegin(self: Plan, op_index: u32) ?u32 {
     std.debug.assert(self.ops.items[op_index].hasSubquery());
     var level: u32 = 1;
-    var i = op_index + 1;
-    while (i < self.ops.items.len) : (i += 1) {
+    var i = op_index;
+    while (i > 0) {
+        i -= 1;
         const op = self.ops.items[i];
         if (op == .begin) {
             if (level == 1) {
@@ -145,13 +152,13 @@ pub const Operator = union(enum) {
     limit: u64,
     distinct: std.ArrayList(u16), // unimplemented
     skip: u64,
-    sort: std.MultiArrayList(SortClause), // unimplemented
+    sort: std.MultiArrayList(SortClause),
     top: u64, // unimplemented
     union_all,
-    // update,
+    update: Update,
     insert_node: InsertNode,
     insert_edge: InsertEdge,
-    // delete,
+    delete: Delete,
     // aggregate,
     // group_aggregate,
 
@@ -183,8 +190,10 @@ pub const Operator = union(enum) {
             .sort => |*n| n.deinit(allocator),
             .top => {},
             .union_all => {},
+            .update => |*n| n.deinit(allocator),
             .insert_node => |*n| n.deinit(allocator),
             .insert_edge => |*n| n.deinit(allocator),
+            .delete => |*n| n.deinit(allocator),
         }
         self.* = undefined;
     }
@@ -212,8 +221,10 @@ pub const Operator = union(enum) {
             .sort => "Sort",
             .top => "Top",
             .union_all => "UnionAll",
+            .update => "Update",
             .insert_node => "InsertNode",
             .insert_edge => "InsertEdge",
+            .delete => "Delete",
         };
         try writer.writeAll(node_name);
         switch (self) {
@@ -242,8 +253,8 @@ pub const Operator = union(enum) {
                 try writer.print(" %{}", .{n});
             },
             .repeat => std.debug.panic("repeat unimplemented", .{}),
-            .join => std.debug.panic("join unimplemented", .{}),
-            .semi_join => std.debug.panic("semi_join unimplemented", .{}),
+            .join => {},
+            .semi_join => {},
             .anti => {},
             .project => |n| {
                 var first = true;
@@ -304,6 +315,19 @@ pub const Operator = union(enum) {
                 try writer.print(" {}", .{n});
             },
             .union_all => {},
+            .update => |n| {
+                var first = true;
+                for (n.items.items) |c| {
+                    if (first) {
+                        try writer.writeByte(' ');
+                    } else {
+                        try writer.writeAll(", ");
+                    }
+                    try writer.print("%{}.{s} = ", .{ c.ident, c.key });
+                    try c.value.print(writer);
+                    first = false;
+                }
+            },
             .insert_node => |n| {
                 try writer.writeAll(" (");
                 if (n.ident) |i| {
@@ -325,6 +349,12 @@ pub const Operator = union(enum) {
                 try print_properties(writer, n.properties);
                 try writer.writeAll(direction.rightPart());
                 try print_node_spec(writer, n.ident_dest, null);
+            },
+            .delete => |n| {
+                try writer.print(" {s}", .{if (n.detach) "Detach" else "NoDetach"});
+                for (n.idents.items) |ident| {
+                    try writer.print(" %{}", .{ident});
+                }
             },
         }
     }
@@ -494,6 +524,37 @@ pub const InsertEdge = struct {
     }
 };
 
+pub const Update = struct {
+    items: std.ArrayList(UpdateClause),
+
+    pub fn deinit(self: *Update, allocator: Allocator) void {
+        for (self.items.items) |*item| item.deinit(allocator);
+        self.items.deinit(allocator);
+    }
+};
+
+pub const UpdateClause = struct {
+    ident: u16,
+    key: []u8,
+    value: Exp,
+
+    pub fn deinit(self: *UpdateClause, allocator: Allocator) void {
+        allocator.free(self.key);
+        self.value.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+pub const Delete = struct {
+    detach: bool,
+    idents: std.ArrayList(u16),
+
+    pub fn deinit(self: *Delete, allocator: Allocator) void {
+        self.idents.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
 /// A list of properties for a node or edge.
 pub const Properties = std.MultiArrayList(struct { key: []u8, value: Exp });
 
@@ -501,12 +562,19 @@ pub const Properties = std.MultiArrayList(struct { key: []u8, value: Exp });
 pub const Exp = union(enum) {
     literal: Value,
     ident: u32,
+    property: PropertyExp,
     parameter: u32,
+    unary: *UnaryExp,
     binop: *BinopExp,
 
     pub fn deinit(self: *Exp, allocator: Allocator) void {
         switch (self.*) {
             .literal => |*v| v.deinit(allocator),
+            .property => |*p| p.deinit(allocator),
+            .unary => |u| {
+                u.deinit(allocator);
+                allocator.destroy(u);
+            },
             .binop => |b| {
                 b.deinit(allocator);
                 allocator.destroy(b); // Needed because binop is a pointer.
@@ -521,7 +589,12 @@ pub const Exp = union(enum) {
         switch (self) {
             .literal => |v| try v.print(writer),
             .ident => |i| try writer.print("%{}", .{i}),
+            .property => |p| try writer.print("%{}.{s}", .{ p.ident, p.key }),
             .parameter => |n| try writer.print("${}", .{n}),
+            .unary => |u| {
+                try writer.print("{s} ", .{u.op.string()});
+                try u.operand.print(writer);
+            },
             .binop => |b| {
                 try writer.writeByte('(');
                 try b.left.print(writer);
@@ -530,6 +603,36 @@ pub const Exp = union(enum) {
                 try writer.writeByte(')');
             },
         }
+    }
+};
+
+pub const PropertyExp = struct {
+    ident: u32,
+    key: []u8,
+
+    pub fn deinit(self: *PropertyExp, allocator: Allocator) void {
+        allocator.free(self.key);
+        self.* = undefined;
+    }
+};
+
+pub const UnaryExp = struct {
+    op: UnaryOp,
+    operand: Exp,
+
+    pub fn deinit(self: *UnaryExp, allocator: Allocator) void {
+        self.operand.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+pub const UnaryOp = enum {
+    not,
+
+    fn string(self: UnaryOp) []const u8 {
+        return switch (self) {
+            .not => "NOT",
+        };
     }
 };
 
@@ -548,15 +651,29 @@ pub const BinopExp = struct {
 pub const Binop = enum {
     add,
     sub,
+    mul,
     eql,
     neq,
+    lt,
+    lte,
+    gt,
+    gte,
+    and_,
+    or_,
 
     fn string(self: Binop) []const u8 {
         return switch (self) {
             .add => "+",
             .sub => "-",
+            .mul => "*",
             .eql => "=",
             .neq => "<>",
+            .lt => "<",
+            .lte => "<=",
+            .gt => ">",
+            .gte => ">=",
+            .and_ => "AND",
+            .or_ => "OR",
         };
     }
 };
@@ -610,4 +727,27 @@ test "can create, free and print plan" {
     ));
 
     try std.testing.expectEqual(3, plan.idents());
+}
+
+test "subquery begin searches backward from join" {
+    const allocator = std.testing.allocator;
+    var plan = Plan{};
+    defer plan.deinit(allocator);
+
+    try plan.ops.append(allocator, .{
+        .node_scan = .{
+            .ident = 0,
+            .label = null,
+        },
+    });
+    try plan.ops.append(allocator, .begin);
+    try plan.ops.append(allocator, .{
+        .node_scan = .{
+            .ident = 1,
+            .label = null,
+        },
+    });
+    try plan.ops.append(allocator, .join);
+
+    try std.testing.expectEqual(@as(?u32, 1), plan.subqueryBegin(3));
 }

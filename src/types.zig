@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const StringMap = std.array_hash_map.String;
 
 /// Unique element ID for a node or edge. Element IDs are random 96-bit integers.
 pub const ElementId = struct {
@@ -146,16 +147,16 @@ pub fn decodeBytes(allocator: Allocator, reader: anytype) ![]const u8 {
     return buf;
 }
 
-pub fn encodeLabels(labels: std.StringArrayHashMapUnmanaged(void), writer: anytype) !void {
+pub fn encodeLabels(labels: StringMap(void), writer: anytype) !void {
     try writer.writeInt(u32, @intCast(labels.count()), .big);
     for (labels.keys()) |label| {
         try encodeBytes(label, writer);
     }
 }
 
-pub fn decodeLabels(allocator: Allocator, reader: anytype) !std.StringArrayHashMapUnmanaged(void) {
+pub fn decodeLabels(allocator: Allocator, reader: anytype) !StringMap(void) {
     const len: usize = @intCast(try reader.takeInt(u32, .big));
-    var labels: std.StringArrayHashMapUnmanaged(void) = .empty;
+    var labels: StringMap(void) = .empty;
     errdefer freeLabels(allocator, &labels);
     for (0..len) |_| {
         const label = try decodeBytes(allocator, reader);
@@ -164,14 +165,14 @@ pub fn decodeLabels(allocator: Allocator, reader: anytype) !std.StringArrayHashM
     return labels;
 }
 
-pub fn freeLabels(allocator: Allocator, labels: *std.StringArrayHashMapUnmanaged(void)) void {
+pub fn freeLabels(allocator: Allocator, labels: *StringMap(void)) void {
     for (labels.keys()) |label| {
         allocator.free(label);
     }
     labels.deinit(allocator);
 }
 
-pub fn encodeProperties(properties: std.StringArrayHashMapUnmanaged(Value), writer: anytype) !void {
+pub fn encodeProperties(properties: StringMap(Value), writer: anytype) !void {
     try writer.writeInt(u32, @intCast(properties.count()), .big);
     var it = properties.iterator();
     while (it.next()) |entry| {
@@ -180,9 +181,9 @@ pub fn encodeProperties(properties: std.StringArrayHashMapUnmanaged(Value), writ
     }
 }
 
-pub fn decodeProperties(allocator: Allocator, reader: anytype) !std.StringArrayHashMapUnmanaged(Value) {
+pub fn decodeProperties(allocator: Allocator, reader: anytype) !StringMap(Value) {
     const len: usize = @intCast(try reader.takeInt(u32, .big));
-    var properties: std.StringArrayHashMapUnmanaged(Value) = .empty;
+    var properties: StringMap(Value) = .empty;
     errdefer freeProperties(allocator, &properties);
     for (0..len) |_| {
         const key = try decodeBytes(allocator, reader);
@@ -194,7 +195,7 @@ pub fn decodeProperties(allocator: Allocator, reader: anytype) !std.StringArrayH
     return properties;
 }
 
-pub fn freeProperties(allocator: Allocator, properties: *std.StringArrayHashMapUnmanaged(Value)) void {
+pub fn freeProperties(allocator: Allocator, properties: *StringMap(Value)) void {
     for (properties.values()) |*value| {
         value.deinit(allocator);
     }
@@ -230,11 +231,25 @@ pub const Value = union(ValueKind) {
     }
 
     /// Duplicate a value, using the provided allocator.
-    pub fn dupe(self: Value, allocator: Allocator) !Value {
+    pub fn dupe(self: Value, allocator: Allocator) Allocator.Error!Value {
         return switch (self) {
             .string => |s| .{ .string = try allocator.dupe(u8, s) },
             else => self,
         };
+    }
+
+    pub fn writeJson(self: Value, json: *std.json.Stringify) !void {
+        switch (self) {
+            .string => |s| try json.write(s),
+            .int64 => |n| try json.write(n),
+            .float64 => |f| try json.write(f),
+            .bool => |b| try json.write(b),
+            .null => try json.write(null),
+            .node_ref, .edge_ref, .id => |id| {
+                const id_string = id.toString();
+                try json.write(id_string[0..]);
+            },
+        }
     }
 
     /// Pretty-print a value to a writer.
@@ -351,6 +366,23 @@ pub const Value = union(ValueKind) {
         };
     }
 
+    /// Multiply two values.
+    pub fn mul(a: Value, b: Value) Value {
+        return switch (a) {
+            .int64 => |a_| switch (b) {
+                .int64 => |b_| .{ .int64 = a_ * b_ },
+                .float64 => |b_| .{ .float64 = @as(f64, @floatFromInt(a_)) * b_ },
+                else => .null,
+            },
+            .float64 => |a_| switch (b) {
+                .int64 => |b_| .{ .float64 = a_ * @as(f64, @floatFromInt(b_)) },
+                .float64 => |b_| .{ .float64 = a_ * b_ },
+                else => .null,
+            },
+            else => .null,
+        };
+    }
+
     /// Check if two values are equal.
     pub fn eql(a: Value, b: Value) bool {
         return switch (a) {
@@ -388,6 +420,27 @@ pub const Value = union(ValueKind) {
         };
     }
 
+    /// Compare two orderable values.
+    pub fn compare(a: Value, b: Value) ?std.math.Order {
+        return switch (a) {
+            .int64 => |a_| switch (b) {
+                .int64 => |b_| std.math.order(a_, b_),
+                .float64 => |b_| orderFloat(@floatFromInt(a_), b_),
+                else => null,
+            },
+            .float64 => |a_| switch (b) {
+                .int64 => |b_| orderFloat(a_, @floatFromInt(b_)),
+                .float64 => |b_| orderFloat(a_, b_),
+                else => null,
+            },
+            .string => |a_| switch (b) {
+                .string => |b_| std.mem.order(u8, a_, b_),
+                else => null,
+            },
+            else => null,
+        };
+    }
+
     /// Returns whether a value is truthy.
     ///
     /// All values are generally truthy, except for the following values: false,
@@ -404,18 +457,55 @@ pub const Value = union(ValueKind) {
     }
 };
 
+fn orderFloat(a: f64, b: f64) ?std.math.Order {
+    if (std.math.isNan(a) or std.math.isNan(b)) return null;
+    return std.math.order(a, b);
+}
+
+test "Value arithmetic and comparison" {
+    try std.testing.expectEqual(Value{ .int64 = 12 }, (Value{ .int64 = 3 }).mul(.{ .int64 = 4 }));
+    try std.testing.expectEqual(Value{ .float64 = 10.0 }, (Value{ .float64 = 2.5 }).mul(.{ .int64 = 4 }));
+    try std.testing.expectEqual(@as(?std.math.Order, .lt), (Value{ .int64 = 3 }).compare(.{ .float64 = 4.0 }));
+    try std.testing.expectEqual(@as(?std.math.Order, .gt), (Value{ .string = "b" }).compare(.{ .string = "a" }));
+    try std.testing.expectEqual(@as(?std.math.Order, null), (Value{ .float64 = std.math.nan(f64) }).compare(.{ .float64 = 1.0 }));
+}
+
 /// A property graph node.
 ///
 /// Reference: ISO/IEC 39075:2024, Section 4.3.5.1.
 pub const Node = struct {
     id: ElementId,
-    labels: std.StringArrayHashMapUnmanaged(void) = .empty,
-    properties: std.StringArrayHashMapUnmanaged(Value) = .empty,
+    labels: StringMap(void) = .empty,
+    properties: StringMap(Value) = .empty,
+
+    pub fn dupe(self: Node, allocator: Allocator) Allocator.Error!Node {
+        var labels = try dupeLabels(allocator, self.labels.keys());
+        errdefer freeLabels(allocator, &labels);
+        var properties = try dupeProperties(allocator, self.properties);
+        errdefer freeProperties(allocator, &properties);
+        return .{
+            .id = self.id,
+            .labels = labels,
+            .properties = properties,
+        };
+    }
 
     pub fn deinit(self: *Node, allocator: Allocator) void {
         freeLabels(allocator, &self.labels);
         freeProperties(allocator, &self.properties);
         self.* = undefined;
+    }
+
+    pub fn writeJson(self: Node, json: *std.json.Stringify) !void {
+        try json.beginObject();
+        try json.objectField("id");
+        const id = self.id.toString();
+        try json.write(id[0..]);
+        try json.objectField("labels");
+        try json.write(self.labels.keys());
+        try json.objectField("properties");
+        try writePropertiesJson(json, self.properties);
+        try json.endObject();
     }
 };
 
@@ -426,12 +516,89 @@ pub const Edge = struct {
     id: ElementId,
     endpoints: [2]ElementId,
     directed: bool,
-    labels: std.StringArrayHashMapUnmanaged(void) = .empty,
-    properties: std.StringArrayHashMapUnmanaged(Value) = .empty,
+    labels: StringMap(void) = .empty,
+    properties: StringMap(Value) = .empty,
+
+    pub fn dupe(self: Edge, allocator: Allocator) Allocator.Error!Edge {
+        var labels = try dupeLabels(allocator, self.labels.keys());
+        errdefer freeLabels(allocator, &labels);
+        var properties = try dupeProperties(allocator, self.properties);
+        errdefer freeProperties(allocator, &properties);
+        return .{
+            .id = self.id,
+            .endpoints = self.endpoints,
+            .directed = self.directed,
+            .labels = labels,
+            .properties = properties,
+        };
+    }
 
     pub fn deinit(self: *Edge, allocator: Allocator) void {
         freeLabels(allocator, &self.labels);
         freeProperties(allocator, &self.properties);
         self.* = undefined;
     }
+
+    pub fn writeJson(self: Edge, json: *std.json.Stringify) !void {
+        try json.beginObject();
+        try json.objectField("id");
+        const id = self.id.toString();
+        try json.write(id[0..]);
+        try json.objectField("start");
+        const start = self.endpoints[0].toString();
+        try json.write(start[0..]);
+        try json.objectField("end");
+        const end = self.endpoints[1].toString();
+        try json.write(end[0..]);
+        try json.objectField("directed");
+        try json.write(self.directed);
+        try json.objectField("labels");
+        try json.write(self.labels.keys());
+        try json.objectField("properties");
+        try writePropertiesJson(json, self.properties);
+        try json.endObject();
+    }
 };
+
+fn dupeLabels(allocator: Allocator, labels: []const []const u8) Allocator.Error!StringMap(void) {
+    var out: StringMap(void) = .empty;
+    errdefer freeLabels(allocator, &out);
+
+    for (labels) |label| {
+        var owned_label: ?[]u8 = try allocator.dupe(u8, label);
+        errdefer if (owned_label) |s| allocator.free(s);
+        try out.put(allocator, owned_label.?, void{});
+        owned_label = null;
+    }
+
+    return out;
+}
+
+fn dupeProperties(
+    allocator: Allocator,
+    properties: StringMap(Value),
+) Allocator.Error!StringMap(Value) {
+    var out: StringMap(Value) = .empty;
+    errdefer freeProperties(allocator, &out);
+
+    for (properties.keys(), properties.values()) |key, value| {
+        var owned_key: ?[]u8 = try allocator.dupe(u8, key);
+        errdefer if (owned_key) |k| allocator.free(k);
+        var owned_value = try value.dupe(allocator);
+        errdefer owned_value.deinit(allocator);
+        try out.put(allocator, owned_key.?, owned_value);
+        owned_key = null;
+        owned_value = .null;
+    }
+
+    return out;
+}
+
+fn writePropertiesJson(json: *std.json.Stringify, properties: StringMap(Value)) !void {
+    try json.beginObject();
+    for (properties.keys(), properties.values()) |key, value| {
+        try json.objectField(key);
+        try value.writeJson(json);
+    }
+    try json.endObject();
+}

@@ -29,7 +29,8 @@ pub fn runNodeScan(op: Plan.Scan, state: *NodeScanState, exec: *executor.Executo
         defer next_node.deinit(exec.txn.allocator);
 
         if (op.label == null or next_node.labels.get(op.label.?) != null) {
-            exec.assignments[op_index] = types.Value{ .node_ref = next_node.id };
+            exec.assignments[op.ident].deinit(exec.txn.allocator);
+            exec.assignments[op.ident] = types.Value{ .node_ref = next_node.id };
             return true;
         }
     }
@@ -56,7 +57,8 @@ pub fn runEdgeScan(op: Plan.Scan, state: *EdgeScanState, exec: *executor.Executo
         defer next_edge.deinit(exec.txn.allocator);
 
         if (op.label == null or next_edge.labels.get(op.label.?) != null) {
-            exec.assignments[op_index] = types.Value{ .edge_ref = next_edge.id };
+            exec.assignments[op.ident].deinit(exec.txn.allocator);
+            exec.assignments[op.ident] = types.Value{ .edge_ref = next_edge.id };
             return true;
         }
     }

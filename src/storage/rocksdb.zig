@@ -148,9 +148,9 @@ pub const DB = struct {
             c.rocksdb_options_set_block_based_table_factory(options, table_options);
         }
 
-        // pre-create options to avoid repeated allocations
+        // Pre-create options to avoid repeated allocations. Keep the write-ahead log
+        // enabled so committed graph mutations survive process restarts.
         const write_opts = c.rocksdb_writeoptions_create().?;
-        c.rocksdb_writeoptions_disable_WAL(write_opts, 1);
         errdefer c.rocksdb_writeoptions_destroy(write_opts);
 
         const read_opts = c.rocksdb_readoptions_create().?;
