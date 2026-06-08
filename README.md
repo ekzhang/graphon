@@ -70,9 +70,9 @@ You can also insert, modify, and delete graph data.
 
 ```gql
 // Insert nodes and edges
-INSERT (a:Building {address: '285 Fulton St', city: 'New York', state: 'NY', zipcode: 10007})
-INSERT (a)-[:Nearby]-(:Geography {name: 'Hudson River', type: 'water'})
-INSERT (a)-[:Nearby]-(:Geography {name: 'The Battery', type: 'park'})
+INSERT (a:Building {address: '285 Fulton St', city: 'New York', state: 'NY', zipcode: 10007}),
+       (a)-[:Nearby]-(:Geography {name: 'Hudson River', type: 'water'}),
+       (a)-[:Nearby]-(:Geography {name: 'The Battery', type: 'park'})
 
 // Modify properties
 MATCH (p:Person {name: 'Eric'}) SET p.age = 23
