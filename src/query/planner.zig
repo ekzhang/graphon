@@ -434,56 +434,58 @@ fn appendResultProjection(planner: *Planner, ret: Ast.ReturnClause) Error!void {
 }
 
 fn appendAggregateProjection(planner: *Planner, ret: Ast.ReturnClause) Error!void {
-    var project = std.ArrayList(Plan.ProjectClause).empty;
+    var before_project = std.ArrayList(Plan.ProjectClause).empty;
     errdefer {
-        for (project.items) |*clause| clause.deinit(planner.gpa);
-        project.deinit(planner.gpa);
+        for (before_project.items) |*clause| clause.deinit(planner.gpa);
+        before_project.deinit(planner.gpa);
+    }
+
+    var after_project = std.ArrayList(Plan.ProjectClause).empty;
+    errdefer {
+        for (after_project.items) |*clause| clause.deinit(planner.gpa);
+        after_project.deinit(planner.gpa);
     }
 
     var aggregate = Plan.Aggregate{};
     errdefer aggregate.deinit(planner.gpa);
 
     for (ret.items) |item| {
-        switch (item.expr) {
-            .aggregate => |call| {
-                if (call.function != .count and call.argument == null) return error.Unsupported;
-                if (call.distinct and call.argument == null) return error.Unsupported;
-                if (call.argument) |argument| {
-                    if (exprHasAggregate(argument)) return error.Unsupported;
-                }
+        if (exprHasAggregate(item.expr)) {
+            if (exprHasRowValueOutsideAggregate(item.expr)) return error.Unsupported;
 
+            var exp = try planAggregateExpr(planner, item.expr, &aggregate);
+            errdefer exp.deinit(planner.gpa);
+            if (exp == .ident) {
+                try planner.plan.results.append(planner.gpa, @intCast(exp.ident));
+            } else {
                 const ident = planner.allocIdent();
-                var argument: ?Plan.Exp = null;
-                errdefer if (argument) |*exp| exp.deinit(planner.gpa);
-                if (call.argument) |arg| argument = try planExpr(planner, arg);
-                try aggregate.items.append(planner.gpa, .{
-                    .ident = ident,
-                    .function = call.function,
-                    .distinct = call.distinct,
-                    .argument = argument,
-                });
-                argument = null;
+                try after_project.append(planner.gpa, .{ .ident = ident, .exp = exp });
+                exp = .{ .ident = 0 };
                 try planner.plan.results.append(planner.gpa, ident);
-            },
-            else => {
-                if (exprHasAggregate(item.expr)) return error.Unsupported;
-                const ident = try appendGroupKey(planner, &project, item.expr);
-                try aggregate.groups.append(planner.gpa, ident);
-                try planner.plan.results.append(planner.gpa, ident);
-            },
+            }
+        } else {
+            const ident = try appendGroupKey(planner, &before_project, item.expr);
+            try aggregate.groups.append(planner.gpa, ident);
+            try planner.plan.results.append(planner.gpa, ident);
         }
     }
 
     if (aggregate.items.items.len == 0) return error.Unsupported;
 
-    if (project.items.len > 0) {
-        try planner.plan.ops.append(planner.gpa, .{ .project = project });
-        project = .empty;
+    if (before_project.items.len > 0) {
+        try planner.plan.ops.append(planner.gpa, .{ .project = before_project });
+        before_project = .empty;
     } else {
-        project.deinit(planner.gpa);
+        before_project.deinit(planner.gpa);
     }
     try planner.plan.ops.append(planner.gpa, .{ .aggregate = aggregate });
     aggregate = .{};
+    if (after_project.items.len > 0) {
+        try planner.plan.ops.append(planner.gpa, .{ .project = after_project });
+        after_project = .empty;
+    } else {
+        after_project.deinit(planner.gpa);
+    }
 }
 
 fn appendGroupKey(planner: *Planner, project: *std.ArrayList(Plan.ProjectClause), expr: Ast.Expr) Error!u16 {
@@ -497,6 +499,60 @@ fn appendGroupKey(planner: *Planner, project: *std.ArrayList(Plan.ProjectClause)
     try project.append(planner.gpa, .{ .ident = ident, .exp = exp });
     exp = .{ .ident = 0 };
     return ident;
+}
+
+fn planAggregateExpr(planner: *Planner, expr: Ast.Expr, aggregate: *Plan.Aggregate) Error!Plan.Exp {
+    return switch (expr) {
+        .aggregate => |call| try appendAggregateCall(planner, call, aggregate),
+        .literal => |value| .{ .literal = try value.dupe(planner.gpa) },
+        .unary => |unary| blk: {
+            const planned = try planner.gpa.create(Plan.UnaryExp);
+            errdefer planner.gpa.destroy(planned);
+            var operand = try planAggregateExpr(planner, unary.operand, aggregate);
+            errdefer operand.deinit(planner.gpa);
+            planned.* = .{ .op = unary.op, .operand = operand };
+            operand = .{ .ident = 0 };
+            break :blk .{ .unary = planned };
+        },
+        .binary => |bin| blk: {
+            const planned = try planner.gpa.create(Plan.BinopExp);
+            errdefer planner.gpa.destroy(planned);
+            var left = try planAggregateExpr(planner, bin.left, aggregate);
+            errdefer left.deinit(planner.gpa);
+            var right = try planAggregateExpr(planner, bin.right, aggregate);
+            errdefer right.deinit(planner.gpa);
+            planned.* = .{
+                .op = bin.op,
+                .left = left,
+                .right = right,
+            };
+            left = .{ .ident = 0 };
+            right = .{ .ident = 0 };
+            break :blk .{ .binop = planned };
+        },
+        .variable, .property => return error.Unsupported,
+    };
+}
+
+fn appendAggregateCall(planner: *Planner, call: *Ast.AggregateCall, aggregate: *Plan.Aggregate) Error!Plan.Exp {
+    if (call.function != .count and call.argument == null) return error.Unsupported;
+    if (call.distinct and call.argument == null) return error.Unsupported;
+    if (call.argument) |argument| {
+        if (exprHasAggregate(argument)) return error.Unsupported;
+    }
+
+    const ident = planner.allocIdent();
+    var argument: ?Plan.Exp = null;
+    errdefer if (argument) |*exp| exp.deinit(planner.gpa);
+    if (call.argument) |arg| argument = try planExpr(planner, arg);
+    try aggregate.items.append(planner.gpa, .{
+        .ident = ident,
+        .function = call.function,
+        .distinct = call.distinct,
+        .argument = argument,
+    });
+    argument = null;
+    return .{ .ident = ident };
 }
 
 fn appendReturnAliases(planner: *Planner, ret: Ast.ReturnClause) Error!void {
@@ -816,5 +872,15 @@ fn exprHasAggregate(expr: Ast.Expr) bool {
         .unary => |unary| exprHasAggregate(unary.operand),
         .binary => |binary| exprHasAggregate(binary.left) or exprHasAggregate(binary.right),
         .literal, .variable, .property => false,
+    };
+}
+
+fn exprHasRowValueOutsideAggregate(expr: Ast.Expr) bool {
+    return switch (expr) {
+        .aggregate => false,
+        .unary => |unary| exprHasRowValueOutsideAggregate(unary.operand),
+        .binary => |binary| exprHasRowValueOutsideAggregate(binary.left) or exprHasRowValueOutsideAggregate(binary.right),
+        .variable, .property => true,
+        .literal => false,
     };
 }

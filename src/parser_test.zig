@@ -117,6 +117,17 @@ test "parse rejects invalid aggregate star arguments" {
     try std.testing.expectError(error.ParseError, Ast.parse(std.testing.allocator, "RETURN COUNT(DISTINCT *)"));
 }
 
+test "parse aggregate expressions" {
+    var program = try Ast.parse(std.testing.allocator, "MATCH (p:Person) RETURN COUNT(p) + 1 AS adjusted");
+    defer program.deinit(std.testing.allocator);
+
+    const ret = program.statements[0].match_query.action.ret;
+    const add = try expectBinary(ret.items[0].expr, .add);
+    _ = try expectAggregate(add.left, .count);
+    try expectIntLiteral(add.right, 1);
+    try std.testing.expectEqualStrings("adjusted", ret.items[0].alias.?);
+}
+
 test "parse match path with labels properties and directed edge" {
     var program = try Ast.parse(std.testing.allocator, "MATCH (a:User {name: 'Ada'})-[e:Likes {since: 2024}]->(f:Food) RETURN f.name");
     defer program.deinit(std.testing.allocator);

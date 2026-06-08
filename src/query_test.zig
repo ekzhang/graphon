@@ -173,6 +173,15 @@ test "compile numeric aggregate query plan snapshot" {
     ));
 }
 
+test "compile aggregate expression query plan snapshot" {
+    try checkQueryPlanSnapshot("MATCH (p:Person) RETURN COUNT(p) + 1 AS adjusted", snap(@src(),
+        \\Plan{%2}
+        \\  Project %2: (%1 + 1)
+        \\  Aggregate %1: count(%0)
+        \\  NodeScan (%0:Person)
+    ));
+}
+
 test "prepare query cleans up across allocation failures" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, prepareForAllocationFailureTest, .{});
 }
@@ -752,6 +761,45 @@ test "empty aggregates return null except count" {
     try std.testing.expect(result.rows[0].values[2].scalar == .null);
     try std.testing.expect(result.rows[0].values[3].scalar == .null);
     try std.testing.expect(result.rows[0].values[4].scalar == .null);
+}
+
+test "aggregate expressions execute after aggregation" {
+    var tmp = @import("test_helpers.zig").tmp();
+    defer tmp.cleanup();
+    const store = try tmp.store("test.db");
+    defer store.db.close();
+
+    {
+        var result = try execForTest(store, "INSERT (:Person {score: 10}), (:Person {score: 20})");
+        defer result.deinit(std.testing.allocator);
+    }
+    {
+        var result = try execForTest(store,
+            \\MATCH (p:Person)
+            \\RETURN COUNT(*) + 1 AS adjusted,
+            \\       MAX(p.score) - MIN(p.score) AS spread,
+            \\       SUM(p.score) + COUNT(*) AS totalish
+        );
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 1), result.rows.len);
+        try std.testing.expectEqual(Value{ .int64 = 3 }, result.rows[0].values[0].scalar);
+        try std.testing.expectEqual(Value{ .int64 = 10 }, result.rows[0].values[1].scalar);
+        try std.testing.expectEqual(Value{ .int64 = 32 }, result.rows[0].values[2].scalar);
+    }
+    {
+        var result = try execForTest(store, "MATCH (p:Person) WITH COUNT(*) + 1 AS adjusted RETURN adjusted");
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(Value{ .int64 = 3 }, result.rows[0].values[0].scalar);
+    }
+}
+
+test "aggregate expressions reject row values outside aggregate calls" {
+    var tmp = @import("test_helpers.zig").tmp();
+    defer tmp.cleanup();
+    const store = try tmp.store("test.db");
+    defer store.db.close();
+
+    try std.testing.expectError(error.Unsupported, execForTest(store, "MATCH (p:Person) RETURN COUNT(*) + p.score AS bad"));
 }
 
 test "match where filters with comparisons and boolean operators" {
