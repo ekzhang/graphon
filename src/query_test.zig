@@ -221,7 +221,7 @@ test "compile edge-only match query plan snapshot" {
     try checkQueryPlanSnapshot("MATCH -[]- RETURN COUNT(*)", snap(@src(),
         \\Plan{%2}
         \\  Aggregate %2: count(*)
-        \\  Step (%0)~[]~(%1)
+        \\  Step (%0)-[]-(%1)
         \\  NodeScan (%0)
     ));
 }
@@ -871,6 +871,30 @@ test "return count aggregates matched rows" {
         defer result.deinit(std.testing.allocator);
         try std.testing.expectEqual(@as(usize, 1), result.rows.len);
         try std.testing.expectEqual(Value{ .int64 = 0 }, result.rows[0].values[0].scalar);
+    }
+}
+
+test "directionless edge match counts oriented GQL paths" {
+    var tmp = @import("test_helpers.zig").tmp();
+    defer tmp.cleanup();
+    const store = try tmp.store("test.db");
+    defer store.db.close();
+
+    {
+        var result = try execForTest(store, "INSERT (:Node)-[:R]->(:Node)");
+        defer result.deinit(std.testing.allocator);
+    }
+    {
+        var result = try execForTest(store, "MATCH -[]- RETURN COUNT(*) AS paths");
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 1), result.rows.len);
+        try std.testing.expectEqual(Value{ .int64 = 2 }, result.rows[0].values[0].scalar);
+    }
+    {
+        var result = try execForTest(store, "MATCH -[]-> RETURN COUNT(*) AS paths");
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 1), result.rows.len);
+        try std.testing.expectEqual(Value{ .int64 = 1 }, result.rows[0].values[0].scalar);
     }
 }
 

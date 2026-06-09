@@ -107,7 +107,7 @@ fn parseSingleStatement(p: *Parse) Error!Ast.Statement {
         return .{ .query = .{ .single = .{ .return_only = try p.parseReturnClause() } } };
     }
     if (p.eat(.keyword_insert)) {
-        return .{ .mutation = .{ .insert = try p.parsePatternListUntilAction() } };
+        return .{ .mutation = .{ .insert = try p.parseInsertPatternListUntilAction() } };
     }
     if (p.eat(.keyword_optional)) {
         try p.expect(.keyword_match);
@@ -346,13 +346,25 @@ fn parseCount(p: *Parse) Error!usize {
 }
 
 fn parsePatternListUntilAction(p: *Parse) Error![]Ast.PathPattern {
+    return p.parsePatternListUntilActionWith(.{});
+}
+
+fn parseInsertPatternListUntilAction(p: *Parse) Error![]Ast.PathPattern {
+    return p.parsePatternListUntilActionWith(.{
+        .require_explicit_start_node = true,
+        .require_explicit_end_node = true,
+        .require_insert_edge_directions = true,
+    });
+}
+
+fn parsePatternListUntilActionWith(p: *Parse, options: PathPatternOptions) Error![]Ast.PathPattern {
     var patterns = std.ArrayList(Ast.PathPattern).empty;
     errdefer {
         for (patterns.items) |*pattern| pattern.deinit(p.gpa);
         patterns.deinit(p.gpa);
     }
     while (!p.at(.semicolon) and !p.at(.eof) and !p.atActionKeyword()) {
-        var pattern: ?Ast.PathPattern = try p.parsePathPattern();
+        var pattern: ?Ast.PathPattern = try p.parsePathPatternWith(options);
         errdefer if (pattern) |*patt| patt.deinit(p.gpa);
         try patterns.append(p.gpa, pattern.?);
         pattern = null;
@@ -368,31 +380,56 @@ fn parsePathPattern(p: *Parse) Error!Ast.PathPattern {
 
 const PathPatternOptions = struct {
     require_edge: bool = false,
+    require_explicit_start_node: bool = false,
+    require_explicit_end_node: bool = false,
+    require_insert_edge_directions: bool = false,
 };
 
 fn parsePathPatternWith(p: *Parse, options: PathPatternOptions) Error!Ast.PathPattern {
     var start = Ast.NodePattern{};
     var start_owned = false;
     errdefer if (start_owned) start.deinit(p.gpa);
+    const explicit_start_node = !p.edgeStartsHere();
 
-    if (!p.edgeStartsHere()) {
+    if (explicit_start_node) {
         start = try p.parseNodePattern();
         start_owned = true;
+    } else if (options.require_explicit_start_node) {
+        return error.ParseError;
     }
 
-    var segments: ?[]Ast.PathSegment = try p.parsePathSegments();
-    errdefer if (segments) |items| deinitPathSegments(items, p.gpa);
+    var parsed_segments = try p.parsePathSegments();
+    errdefer deinitPathSegments(parsed_segments.segments, p.gpa);
 
-    if (options.require_edge and segments.?.len == 0) return error.ParseError;
+    if (options.require_edge and parsed_segments.segments.len == 0) return error.ParseError;
+    if (options.require_explicit_end_node and !parsed_segments.explicit_end_node) return error.ParseError;
+    if (options.require_insert_edge_directions) {
+        for (parsed_segments.segments) |segment| {
+            if (!isInsertEdgeDirection(segment.edge.direction)) return error.ParseError;
+        }
+    }
 
-    const out = Ast.PathPattern{ .start = start, .segments = segments.? };
+    const out = Ast.PathPattern{ .start = start, .segments = parsed_segments.segments };
     start_owned = false;
-    segments = null;
+    parsed_segments.segments = &.{};
     return out;
 }
 
-fn parsePathSegments(p: *Parse) Error![]Ast.PathSegment {
+fn isInsertEdgeDirection(direction: EdgeDirection) bool {
+    return switch (direction) {
+        .left, .right, .undirected => true,
+        .any, .left_or_right, .left_or_undirected, .right_or_undirected => false,
+    };
+}
+
+const ParsedPathSegments = struct {
+    segments: []Ast.PathSegment,
+    explicit_end_node: bool,
+};
+
+fn parsePathSegments(p: *Parse) Error!ParsedPathSegments {
     var segments = std.ArrayList(Ast.PathSegment).empty;
+    var explicit_end_node = true;
     errdefer {
         for (segments.items) |*segment| segment.deinit(p.gpa);
         segments.deinit(p.gpa);
@@ -404,11 +441,15 @@ fn parsePathSegments(p: *Parse) Error![]Ast.PathSegment {
         var node: ?Ast.NodePattern = if (explicit_node) try p.parseNodePattern() else Ast.NodePattern{};
         errdefer if (node) |*n| n.deinit(p.gpa);
         try segments.append(p.gpa, .{ .edge = edge.?, .node = node.? });
+        explicit_end_node = explicit_node;
         edge = null;
         node = null;
         if (!explicit_node) break;
     }
-    return try segments.toOwnedSlice(p.gpa);
+    return .{
+        .segments = try segments.toOwnedSlice(p.gpa),
+        .explicit_end_node = explicit_end_node,
+    };
 }
 
 fn deinitPathSegments(segments: []Ast.PathSegment, gpa: Allocator) void {
@@ -452,17 +493,32 @@ fn parseNodePattern(p: *Parse) Error!Ast.NodePattern {
 }
 
 fn parseEdgePattern(p: *Parse) Error!Ast.EdgePattern {
-    var direction: EdgeDirection = .undirected;
+    const EdgeStart = enum { minus, left_arrow, tilde, left_arrow_tilde };
+
+    var direction: EdgeDirection = .any;
+    var start: EdgeStart = .minus;
     var bracketed = true;
 
     switch (p.peek()) {
         .minus_left_bracket => {
             _ = p.next();
-            direction = .undirected;
+            start = .minus;
+            direction = .any;
         },
         .left_arrow_bracket => {
             _ = p.next();
+            start = .left_arrow;
             direction = .left;
+        },
+        .tilde_left_bracket => {
+            _ = p.next();
+            start = .tilde;
+            direction = .undirected;
+        },
+        .left_arrow_tilde_bracket => {
+            _ = p.next();
+            start = .left_arrow_tilde;
+            direction = .left_or_undirected;
         },
         .right_arrow => {
             _ = p.next();
@@ -479,6 +535,26 @@ fn parseEdgePattern(p: *Parse) Error!Ast.EdgePattern {
             bracketed = false;
         },
         .left_minus_right => {
+            _ = p.next();
+            direction = .left_or_right;
+            bracketed = false;
+        },
+        .tilde => {
+            _ = p.next();
+            direction = .undirected;
+            bracketed = false;
+        },
+        .left_arrow_tilde => {
+            _ = p.next();
+            direction = .left_or_undirected;
+            bracketed = false;
+        },
+        .tilde_right_arrow => {
+            _ = p.next();
+            direction = .right_or_undirected;
+            bracketed = false;
+        },
+        .minus => {
             _ = p.next();
             direction = .any;
             bracketed = false;
@@ -503,12 +579,34 @@ fn parseEdgePattern(p: *Parse) Error!Ast.EdgePattern {
         switch (close) {
             .bracket_right_arrow => {
                 _ = p.next();
-                edge.direction = .right;
+                edge.direction = switch (start) {
+                    .minus => .right,
+                    .left_arrow => .left_or_right,
+                    .tilde, .left_arrow_tilde => return error.ParseError,
+                };
             },
             .right_bracket_minus => {
                 _ = p.next();
-                // Keep explicit left arrows left; otherwise `-[]-` is undirected.
-                if (direction != .left) edge.direction = .undirected;
+                edge.direction = switch (start) {
+                    .minus => .any,
+                    .left_arrow => .left,
+                    .tilde, .left_arrow_tilde => return error.ParseError,
+                };
+            },
+            .right_bracket_tilde => {
+                _ = p.next();
+                edge.direction = switch (start) {
+                    .tilde => .undirected,
+                    .left_arrow_tilde => .left_or_undirected,
+                    .minus, .left_arrow => return error.ParseError,
+                };
+            },
+            .bracket_tilde_right_arrow => {
+                _ = p.next();
+                edge.direction = switch (start) {
+                    .tilde => .right_or_undirected,
+                    .minus, .left_arrow, .left_arrow_tilde => return error.ParseError,
+                };
             },
             .r_bracket => {
                 _ = p.next();
@@ -693,7 +791,18 @@ fn atReturnModifierTerminator(p: *Parse) bool {
 
 fn edgeStartsHere(p: *Parse) bool {
     return switch (p.peek()) {
-        .minus_left_bracket, .left_arrow_bracket, .right_arrow, .left_arrow, .left_minus_right => true,
+        .minus,
+        .minus_left_bracket,
+        .left_arrow,
+        .left_arrow_bracket,
+        .left_arrow_tilde,
+        .left_arrow_tilde_bracket,
+        .left_minus_right,
+        .right_arrow,
+        .tilde,
+        .tilde_left_bracket,
+        .tilde_right_arrow,
+        => true,
         else => false,
     };
 }

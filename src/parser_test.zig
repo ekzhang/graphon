@@ -242,6 +242,14 @@ test "parse match edge patterns with implicit endpoints" {
     try std.testing.expect(pattern.segments[0].node.label == null);
 }
 
+test "parse GQL edge direction variants" {
+    try expectSingleEdgeDirection("MATCH ()-[]-() RETURN COUNT(*)", .any);
+    try expectSingleEdgeDirection("MATCH ()~[]~() RETURN COUNT(*)", .undirected);
+    try expectSingleEdgeDirection("MATCH ()<-[]->() RETURN COUNT(*)", .left_or_right);
+    try expectSingleEdgeDirection("MATCH ()<~[]~() RETURN COUNT(*)", .left_or_undirected);
+    try expectSingleEdgeDirection("MATCH ()~[]~>() RETURN COUNT(*)", .right_or_undirected);
+}
+
 test "parse match path patterns with implicit leading and trailing endpoints" {
     var program = try Ast.parse(std.testing.allocator, "MATCH -[:From]->(n:Node)-[:To]-> RETURN n");
     defer program.deinit(std.testing.allocator);
@@ -298,6 +306,27 @@ test "parse multiple mutation statements" {
     try std.testing.expect(finish_mutation.match.action == .finish);
 }
 
+test "parse insert requires explicit edge endpoints" {
+    var program = try Ast.parse(std.testing.allocator, "INSERT ()-[]->()");
+    defer program.deinit(std.testing.allocator);
+
+    const insert = try expectMutation(&program.statements[0]);
+    try std.testing.expect(insert.* == .insert);
+    try std.testing.expectEqual(@as(usize, 1), insert.insert.len);
+    try std.testing.expectEqual(@as(usize, 1), insert.insert[0].segments.len);
+    try std.testing.expectEqual(EdgeDirection.right, insert.insert[0].segments[0].edge.direction);
+
+    var undirected_program = try Ast.parse(std.testing.allocator, "INSERT ()~[]~()");
+    defer undirected_program.deinit(std.testing.allocator);
+    const undirected_insert = try expectMutation(&undirected_program.statements[0]);
+    try std.testing.expectEqual(EdgeDirection.undirected, undirected_insert.insert[0].segments[0].edge.direction);
+
+    try std.testing.expectError(error.ParseError, Ast.parse(std.testing.allocator, "INSERT -[]-"));
+    try std.testing.expectError(error.ParseError, Ast.parse(std.testing.allocator, "INSERT ()-[]-()"));
+    try std.testing.expectError(error.ParseError, Ast.parse(std.testing.allocator, "INSERT ()-[]->"));
+    try std.testing.expectError(error.ParseError, Ast.parse(std.testing.allocator, "INSERT -[]->()"));
+}
+
 test "parse ISO GQL comments" {
     var program = try Ast.parse(std.testing.allocator,
         \\// Insert a seed user.
@@ -341,6 +370,17 @@ test "parse rejects fractional skip and limit counts" {
 fn expectOptionalName(actual: ?[]const u8, expected: []const u8) !void {
     try std.testing.expect(actual != null);
     try std.testing.expectEqualStrings(expected, actual.?);
+}
+
+fn expectSingleEdgeDirection(source: [:0]const u8, expected: EdgeDirection) !void {
+    var program = try Ast.parse(std.testing.allocator, source);
+    defer program.deinit(std.testing.allocator);
+
+    const body = try expectSingleQuery(&program.statements[0]);
+    try std.testing.expect(body.* == .match_query);
+    try std.testing.expectEqual(@as(usize, 1), body.match_query.patterns.len);
+    try std.testing.expectEqual(@as(usize, 1), body.match_query.patterns[0].segments.len);
+    try std.testing.expectEqual(expected, body.match_query.patterns[0].segments[0].edge.direction);
 }
 
 fn expectSingleQuery(statement: *Ast.Statement) !*Ast.QueryBody {
