@@ -67,11 +67,47 @@ fn deinitTokens(p: *Parse) void {
 }
 
 fn parseStatement(p: *Parse) Error!Ast.Statement {
+    var statement: ?Ast.Statement = try p.parseSingleStatement();
+    errdefer if (statement) |*s| s.deinit(p.gpa);
+
+    if (!p.at(.keyword_union)) {
+        const out = statement.?;
+        statement = null;
+        return out;
+    }
+
+    const first_statement = statement.?;
+    statement = null;
+    var first: ?Ast.QueryBody = try p.takeQueryBody(first_statement);
+    errdefer if (first) |*query| query.deinit(p.gpa);
+
+    var parts = std.ArrayList(Ast.UnionPart).empty;
+    errdefer {
+        for (parts.items) |*part| part.deinit(p.gpa);
+        parts.deinit(p.gpa);
+    }
+
+    while (p.eat(.keyword_union)) {
+        const all = p.eat(.keyword_all);
+        var query: ?Ast.QueryBody = try p.parseQueryBody();
+        errdefer if (query) |*q| q.deinit(p.gpa);
+        try parts.append(p.gpa, .{ .all = all, .query = query.? });
+        query = null;
+    }
+
+    const owned_parts = try parts.toOwnedSlice(p.gpa);
+    parts = .empty;
+    const out = Ast.Statement{ .query = .{ .union_query = .{ .first = first.?, .parts = owned_parts } } };
+    first = null;
+    return out;
+}
+
+fn parseSingleStatement(p: *Parse) Error!Ast.Statement {
     if (p.eat(.keyword_return)) {
-        return .{ .return_only = try p.parseReturnClause() };
+        return .{ .query = .{ .single = .{ .return_only = try p.parseReturnClause() } } };
     }
     if (p.eat(.keyword_insert)) {
-        return .{ .insert = try p.parsePatternListUntilAction() };
+        return .{ .mutation = .{ .insert = try p.parsePatternListUntilAction() } };
     }
     if (p.eat(.keyword_optional)) {
         try p.expect(.keyword_match);
@@ -83,7 +119,7 @@ fn parseStatement(p: *Parse) Error!Ast.Statement {
         var read: ?Ast.ReadQuery = try p.parseReadQueryFromFirst(first.?);
         first = null;
         errdefer if (read) |*rq| rq.deinit(p.gpa);
-        const out = Ast.Statement{ .read_query = read.? };
+        const out = Ast.Statement{ .query = .{ .single = .{ .read_query = read.? } } };
         read = null;
         return out;
     }
@@ -97,20 +133,50 @@ fn parseStatement(p: *Parse) Error!Ast.Statement {
             var read: ?Ast.ReadQuery = try p.parseReadQueryFromFirst(first.?);
             first = null;
             errdefer if (read) |*rq| rq.deinit(p.gpa);
-            const out = Ast.Statement{ .read_query = read.? };
+            const out = Ast.Statement{ .query = .{ .single = .{ .read_query = read.? } } };
             read = null;
             return out;
         }
         const action = try p.parseMatchAction();
-        const out = Ast.Statement{ .match_query = .{
+        const query = Ast.MatchQuery{
             .patterns = clause.?.patterns,
             .where = clause.?.where,
             .action = action,
-        } };
+        };
         clause = null;
-        return out;
+        return switch (query.action) {
+            .ret => .{ .query = .{ .single = .{ .match_query = query } } },
+            else => .{ .mutation = .{ .match = query } },
+        };
     }
     return error.ParseError;
+}
+
+fn parseQueryBody(p: *Parse) Error!Ast.QueryBody {
+    var statement: ?Ast.Statement = try p.parseSingleStatement();
+    errdefer if (statement) |*s| s.deinit(p.gpa);
+    const owned_statement = statement.?;
+    statement = null;
+    const row = try p.takeQueryBody(owned_statement);
+    return row;
+}
+
+fn takeQueryBody(p: *Parse, statement: Ast.Statement) Error!Ast.QueryBody {
+    switch (statement) {
+        .query => |query| switch (query) {
+            .single => |body| return body,
+            .union_query => {
+                var owned = query;
+                owned.deinit(p.gpa);
+                return error.ParseError;
+            },
+        },
+        .mutation => |mutation| {
+            var owned = mutation;
+            owned.deinit(p.gpa);
+            return error.ParseError;
+        },
+    }
 }
 
 fn parseReadQueryFromFirst(p: *Parse, first: Ast.ReadClause) Error!Ast.ReadQuery {
@@ -564,14 +630,14 @@ fn atReadContinuationKeyword(p: *Parse) bool {
 
 fn atReturnItemTerminator(p: *Parse) bool {
     return switch (p.peek()) {
-        .keyword_order, .keyword_skip, .keyword_limit, .semicolon, .eof, .keyword_match, .keyword_optional, .keyword_return, .keyword_with => true,
+        .keyword_order, .keyword_skip, .keyword_limit, .keyword_union, .semicolon, .eof, .keyword_match, .keyword_optional, .keyword_return, .keyword_with => true,
         else => false,
     };
 }
 
 fn atReturnModifierTerminator(p: *Parse) bool {
     return switch (p.peek()) {
-        .keyword_skip, .keyword_limit, .semicolon, .eof, .keyword_match, .keyword_optional, .keyword_return, .keyword_with => true,
+        .keyword_skip, .keyword_limit, .keyword_union, .semicolon, .eof, .keyword_match, .keyword_optional, .keyword_return, .keyword_with => true,
         else => false,
     };
 }

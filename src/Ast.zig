@@ -39,18 +39,77 @@ pub const Program = struct {
 };
 
 pub const Statement = union(enum) {
-    return_only: ReturnClause,
-    insert: []PathPattern,
-    match_query: MatchQuery,
-    read_query: ReadQuery,
+    query: RowQuery,
+    mutation: MutationQuery,
 
     pub fn deinit(self: *Statement, allocator: Allocator) void {
         switch (self.*) {
-            .return_only => |*ret| ret.deinit(allocator),
+            .query => |*query| query.deinit(allocator),
+            .mutation => |*mutation| mutation.deinit(allocator),
+        }
+        self.* = undefined;
+    }
+};
+
+pub const MutationQuery = union(enum) {
+    insert: []PathPattern,
+    match: MatchQuery,
+
+    pub fn deinit(self: *MutationQuery, allocator: Allocator) void {
+        switch (self.*) {
             .insert => |patterns| deinitPatterns(patterns, allocator),
+            .match => |*mq| mq.deinit(allocator),
+        }
+        self.* = undefined;
+    }
+};
+
+pub const QueryBody = union(enum) {
+    return_only: ReturnClause,
+    match_query: MatchQuery,
+    read_query: ReadQuery,
+
+    pub fn deinit(self: *QueryBody, allocator: Allocator) void {
+        switch (self.*) {
+            .return_only => |*ret| ret.deinit(allocator),
             .match_query => |*mq| mq.deinit(allocator),
             .read_query => |*rq| rq.deinit(allocator),
         }
+        self.* = undefined;
+    }
+};
+
+pub const RowQuery = union(enum) {
+    single: QueryBody,
+    union_query: UnionQuery,
+
+    pub fn deinit(self: *RowQuery, allocator: Allocator) void {
+        switch (self.*) {
+            .single => |*query| query.deinit(allocator),
+            .union_query => |*query| query.deinit(allocator),
+        }
+        self.* = undefined;
+    }
+};
+
+pub const UnionQuery = struct {
+    first: QueryBody,
+    parts: []UnionPart,
+
+    pub fn deinit(self: *UnionQuery, allocator: Allocator) void {
+        self.first.deinit(allocator);
+        for (self.parts) |*part| part.deinit(allocator);
+        allocator.free(self.parts);
+        self.* = undefined;
+    }
+};
+
+pub const UnionPart = struct {
+    all: bool,
+    query: QueryBody,
+
+    pub fn deinit(self: *UnionPart, allocator: Allocator) void {
+        self.query.deinit(allocator);
         self.* = undefined;
     }
 };

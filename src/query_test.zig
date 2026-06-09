@@ -59,6 +59,21 @@ fn resultContainsString(result: ResultSet, column: usize, expected: []const u8) 
     return false;
 }
 
+fn resultContainsStringInt(result: ResultSet, string_column: usize, expected_string: []const u8, int_column: usize, expected_int: i64) bool {
+    for (result.rows) |row| {
+        if (row.values[string_column] != .scalar) continue;
+        const string_scalar = row.values[string_column].scalar;
+        if (string_scalar != .string) continue;
+        if (!std.mem.eql(u8, string_scalar.string, expected_string)) continue;
+
+        if (row.values[int_column] != .scalar) continue;
+        const int_scalar = row.values[int_column].scalar;
+        if (int_scalar != .int64) continue;
+        if (int_scalar.int64 == expected_int) return true;
+    }
+    return false;
+}
+
 fn prepareForAllocationFailureTest(allocator: Allocator) !void {
     var compiled = try prepare(allocator, "MATCH (p:Person {name: 'Ada'}) WHERE NOT (p.age > 30 AND p.active = true) RETURN p.name ORDER BY p.age DESC LIMIT 1");
     defer compiled.deinit(allocator);
@@ -182,6 +197,29 @@ test "compile aggregate expression query plan snapshot" {
     ));
 }
 
+test "compile union all query plan snapshot" {
+    try checkQueryPlanSnapshot("RETURN 1 AS n UNION ALL RETURN 2 AS n", snap(@src(),
+        \\Plan{%0}
+        \\  UnionAll
+        \\    Project %0: %1
+        \\    Project %1: 2
+        \\  Begin
+        \\  Project %0: 1
+    ));
+}
+
+test "compile union query plan snapshot" {
+    try checkQueryPlanSnapshot("RETURN 1 AS n UNION RETURN 1 AS n", snap(@src(),
+        \\Plan{%0}
+        \\  Distinct %0
+        \\  UnionAll
+        \\    Project %0: %1
+        \\    Project %1: 1
+        \\  Begin
+        \\  Project %0: 1
+    ));
+}
+
 test "prepare query cleans up across allocation failures" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, prepareForAllocationFailureTest, .{});
 }
@@ -235,6 +273,39 @@ test "return skip one" {
     try std.testing.expectEqual(@as(usize, 0), result.rows.len);
     try std.testing.expectEqual(@as(usize, 1), result.columns.len);
     try std.testing.expectEqualStrings("expr", result.columns[0]);
+}
+
+test "union all keeps duplicate rows" {
+    var tmp = @import("test_helpers.zig").tmp();
+    defer tmp.cleanup();
+    const store = try tmp.store("test.db");
+    defer store.db.close();
+
+    var result = try execForTest(store, "RETURN 1 AS n UNION ALL RETURN 1 AS n");
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), result.rows.len);
+    try std.testing.expectEqualStrings("n", result.columns[0]);
+    try std.testing.expectEqual(Value{ .int64 = 1 }, result.rows[0].values[0].scalar);
+    try std.testing.expectEqual(Value{ .int64 = 1 }, result.rows[1].values[0].scalar);
+}
+
+test "union removes duplicate rows" {
+    var tmp = @import("test_helpers.zig").tmp();
+    defer tmp.cleanup();
+    const store = try tmp.store("test.db");
+    defer store.db.close();
+
+    var result = try execForTest(store, "RETURN 1 AS n UNION RETURN 1 AS n");
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), result.rows.len);
+    try std.testing.expectEqualStrings("n", result.columns[0]);
+    try std.testing.expectEqual(Value{ .int64 = 1 }, result.rows[0].values[0].scalar);
+}
+
+test "union rejects mismatched result column counts" {
+    try std.testing.expectError(error.Unsupported, prepare(std.testing.allocator, "RETURN 1 UNION RETURN 1, 2"));
 }
 
 test "execute cleans prior result when later statement fails" {
@@ -744,6 +815,36 @@ test "return numeric aggregates by group" {
         try std.testing.expectEqual(Value{ .float64 = 7.0 }, result.rows[1].values[4].scalar);
         try std.testing.expectEqualStrings("Bert", result.rows[1].values[5].scalar.string);
         try std.testing.expectEqual(Value{ .int64 = 7 }, result.rows[1].values[6].scalar);
+    }
+}
+
+test "union can combine grouped aggregate branch results" {
+    var tmp = @import("test_helpers.zig").tmp();
+    defer tmp.cleanup();
+    const store = try tmp.store("test.db");
+    defer store.db.close();
+
+    {
+        var result = try execForTest(store,
+            \\INSERT (:Person {team: 'A'}),
+            \\       (:Person {team: 'A'}),
+            \\       (:Person {team: 'B'})
+        );
+        defer result.deinit(std.testing.allocator);
+    }
+    {
+        var result = try execForTest(store,
+            \\MATCH (p:Person)
+            \\RETURN p.team AS team, COUNT(*) AS people
+            \\UNION ALL
+            \\RETURN 'all' AS team, 0 AS people
+        );
+        defer result.deinit(std.testing.allocator);
+
+        try std.testing.expectEqual(@as(usize, 3), result.rows.len);
+        try std.testing.expect(resultContainsStringInt(result, 0, "A", 1, 2));
+        try std.testing.expect(resultContainsStringInt(result, 0, "B", 1, 1));
+        try std.testing.expect(resultContainsStringInt(result, 0, "all", 1, 0));
     }
 }
 

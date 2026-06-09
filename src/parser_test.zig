@@ -13,8 +13,9 @@ test "parse object parses source into ast" {
     defer program.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(usize, 1), program.statements.len);
-    try std.testing.expect(program.statements[0] == .return_only);
-    try expectIntLiteral(program.statements[0].return_only.items[0].expr, 42);
+    const body = try expectSingleQuery(&program.statements[0]);
+    try std.testing.expect(body.* == .return_only);
+    try expectIntLiteral(body.return_only.items[0].expr, 42);
 }
 
 test "parse return clause modifiers and expression precedence" {
@@ -22,9 +23,10 @@ test "parse return clause modifiers and expression precedence" {
     defer program.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(usize, 1), program.statements.len);
-    try std.testing.expect(program.statements[0] == .return_only);
+    const body = try expectSingleQuery(&program.statements[0]);
+    try std.testing.expect(body.* == .return_only);
 
-    const ret = &program.statements[0].return_only;
+    const ret = &body.return_only;
     try std.testing.expect(ret.distinct);
     try std.testing.expectEqual(@as(usize, 1), ret.items.len);
     try std.testing.expectEqualStrings("total", ret.items[0].alias.?);
@@ -47,9 +49,10 @@ test "parse read query with with and optional match" {
     defer program.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(usize, 1), program.statements.len);
-    try std.testing.expect(program.statements[0] == .read_query);
+    const body = try expectSingleQuery(&program.statements[0]);
+    try std.testing.expect(body.* == .read_query);
 
-    const read = &program.statements[0].read_query;
+    const read = &body.read_query;
     try std.testing.expectEqual(@as(usize, 3), read.clauses.len);
     try std.testing.expect(read.clauses[0] == .match);
     try std.testing.expect(read.clauses[1] == .with);
@@ -78,12 +81,33 @@ test "parse read query with with and optional match" {
     try expectPropertyExpr(read.ret.items[1].expr, "f", "name");
 }
 
+test "parse union query" {
+    var program = try Ast.parse(std.testing.allocator, "RETURN 1 AS n UNION MATCH (p:Person) RETURN p.age UNION ALL RETURN 2");
+    defer program.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), program.statements.len);
+    try std.testing.expect(program.statements[0] == .query);
+    try std.testing.expect(program.statements[0].query == .union_query);
+
+    const union_query = &program.statements[0].query.union_query;
+    try std.testing.expect(union_query.first == .return_only);
+    try expectIntLiteral(union_query.first.return_only.items[0].expr, 1);
+    try std.testing.expectEqual(@as(usize, 2), union_query.parts.len);
+    try std.testing.expect(!union_query.parts[0].all);
+    try std.testing.expect(union_query.parts[0].query == .match_query);
+    try expectPropertyExpr(union_query.parts[0].query.match_query.action.ret.items[0].expr, "p", "age");
+    try std.testing.expect(union_query.parts[1].all);
+    try std.testing.expect(union_query.parts[1].query == .return_only);
+    try expectIntLiteral(union_query.parts[1].query.return_only.items[0].expr, 2);
+}
+
 test "parse count aggregate calls" {
     var program = try Ast.parse(std.testing.allocator, "MATCH (p:Person) WITH p, count(*) AS total RETURN COUNT(DISTINCT p) AS people, SUM(p.age), AVG(p.age), MIN(p.name), MAX(p.age), total");
     defer program.deinit(std.testing.allocator);
 
-    try std.testing.expect(program.statements[0] == .read_query);
-    const read = &program.statements[0].read_query;
+    const body = try expectSingleQuery(&program.statements[0]);
+    try std.testing.expect(body.* == .read_query);
+    const read = &body.read_query;
     try std.testing.expect(read.clauses[1] == .with);
 
     const with = read.clauses[1].with;
@@ -121,7 +145,8 @@ test "parse aggregate expressions" {
     var program = try Ast.parse(std.testing.allocator, "MATCH (p:Person) RETURN COUNT(p) + 1 AS adjusted");
     defer program.deinit(std.testing.allocator);
 
-    const ret = program.statements[0].match_query.action.ret;
+    const body = try expectSingleQuery(&program.statements[0]);
+    const ret = body.match_query.action.ret;
     const add = try expectBinary(ret.items[0].expr, .add);
     _ = try expectAggregate(add.left, .count);
     try expectIntLiteral(add.right, 1);
@@ -133,9 +158,10 @@ test "parse match path with labels properties and directed edge" {
     defer program.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(usize, 1), program.statements.len);
-    try std.testing.expect(program.statements[0] == .match_query);
+    const body = try expectSingleQuery(&program.statements[0]);
+    try std.testing.expect(body.* == .match_query);
 
-    const query = &program.statements[0].match_query;
+    const query = &body.match_query;
     try std.testing.expectEqual(@as(usize, 1), query.patterns.len);
     try expectOptionalName(query.patterns[0].start.variable, "a");
     try expectOptionalName(query.patterns[0].start.label, "User");
@@ -159,9 +185,10 @@ test "parse match where and set clauses" {
     defer program.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(usize, 1), program.statements.len);
-    try std.testing.expect(program.statements[0] == .match_query);
+    const mutation = try expectMutation(&program.statements[0]);
+    try std.testing.expect(mutation.* == .match);
 
-    const query = &program.statements[0].match_query;
+    const query = &mutation.match;
     try std.testing.expectEqual(@as(usize, 2), query.patterns.len);
     try expectOptionalName(query.patterns[0].start.variable, "p");
     try expectOptionalName(query.patterns[1].start.variable, "f");
@@ -192,21 +219,24 @@ test "parse multiple mutation statements" {
 
     try std.testing.expectEqual(@as(usize, 3), program.statements.len);
 
-    try std.testing.expect(program.statements[0] == .insert);
-    const insert_patterns = program.statements[0].insert;
+    const insert_mutation = try expectMutation(&program.statements[0]);
+    try std.testing.expect(insert_mutation.* == .insert);
+    const insert_patterns = insert_mutation.insert;
     try std.testing.expectEqual(@as(usize, 1), insert_patterns.len);
     try expectOptionalName(insert_patterns[0].start.label, "Person");
     try expectPropertyString(insert_patterns[0].start.properties[0], "name", "Ada");
 
-    try std.testing.expect(program.statements[1] == .match_query);
-    const delete_query = &program.statements[1].match_query;
+    const delete_mutation = try expectMutation(&program.statements[1]);
+    try std.testing.expect(delete_mutation.* == .match);
+    const delete_query = &delete_mutation.match;
     try std.testing.expect(delete_query.action == .delete);
     try std.testing.expect(delete_query.action.delete.detach);
     try std.testing.expectEqual(@as(usize, 1), delete_query.action.delete.variables.len);
     try std.testing.expectEqualStrings("p", delete_query.action.delete.variables[0]);
 
-    try std.testing.expect(program.statements[2] == .match_query);
-    try std.testing.expect(program.statements[2].match_query.action == .finish);
+    const finish_mutation = try expectMutation(&program.statements[2]);
+    try std.testing.expect(finish_mutation.* == .match);
+    try std.testing.expect(finish_mutation.match.action == .finish);
 }
 
 test "parse ISO GQL comments" {
@@ -219,10 +249,11 @@ test "parse ISO GQL comments" {
     defer program.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(usize, 2), program.statements.len);
-    try std.testing.expect(program.statements[0] == .insert);
-    try std.testing.expect(program.statements[1] == .match_query);
+    try std.testing.expect((try expectMutation(&program.statements[0])).* == .insert);
+    const body = try expectSingleQuery(&program.statements[1]);
+    try std.testing.expect(body.* == .match_query);
 
-    const query = &program.statements[1].match_query;
+    const query = &body.match_query;
     try std.testing.expect(query.action == .ret);
     try expectPropertyExpr(query.action.ret.items[0].expr, "p", "name");
 }
@@ -231,7 +262,8 @@ test "parse keeps comment delimiters inside strings" {
     var program = try Ast.parse(std.testing.allocator, "RETURN '// not a comment', '-- not a comment', '/* not a comment */'");
     defer program.deinit(std.testing.allocator);
 
-    const ret = &program.statements[0].return_only;
+    const body = try expectSingleQuery(&program.statements[0]);
+    const ret = &body.return_only;
     try expectStringLiteral(ret.items[0].expr, "// not a comment");
     try expectStringLiteral(ret.items[1].expr, "-- not a comment");
     try expectStringLiteral(ret.items[2].expr, "/* not a comment */");
@@ -250,6 +282,17 @@ test "parse rejects fractional skip and limit counts" {
 fn expectOptionalName(actual: ?[]const u8, expected: []const u8) !void {
     try std.testing.expect(actual != null);
     try std.testing.expectEqualStrings(expected, actual.?);
+}
+
+fn expectSingleQuery(statement: *Ast.Statement) !*Ast.QueryBody {
+    try std.testing.expect(statement.* == .query);
+    try std.testing.expect(statement.query == .single);
+    return &statement.query.single;
+}
+
+fn expectMutation(statement: *Ast.Statement) !*Ast.MutationQuery {
+    try std.testing.expect(statement.* == .mutation);
+    return &statement.mutation;
 }
 
 fn expectBinary(expr: Ast.Expr, op: Plan.Binop) !*Ast.BinaryExpr {

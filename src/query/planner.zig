@@ -91,32 +91,35 @@ fn compileStatement(gpa: Allocator, statement: Ast.Statement) Error!CompiledStat
     defer planner.deinit();
 
     switch (statement) {
-        .return_only => |ret| return try appendReturnResult(gpa, &planner, ret),
-        .insert => |patterns| {
-            try appendInsertPatterns(&planner, patterns);
-            return appendMutationResult(&planner, .mutations);
-        },
-        .read_query => |rq| return try appendReadQueryResult(gpa, &planner, rq),
-        .match_query => |mq| {
-            try appendMatchQuery(&planner, mq);
-            return switch (mq.action) {
-                .ret => |ret| try appendReturnResult(gpa, &planner, ret),
-                .insert => |patterns| blk: {
-                    try appendInsertPatterns(&planner, patterns);
-                    break :blk appendMutationResult(&planner, .mutations);
-                },
-                .set => |sets| blk: {
-                    try appendUpdate(&planner, sets);
-                    break :blk appendMutationResult(&planner, .mutations);
-                },
-                .delete => |del| blk: {
-                    try appendDelete(&planner, del);
-                    break :blk appendMutationResult(&planner, .mutations);
-                },
-                .finish => appendMutationResult(&planner, .rows),
-            };
+        .query => |query| return try appendRowQueryResult(gpa, &planner, query),
+        .mutation => |mutation| switch (mutation) {
+            .insert => |patterns| {
+                try appendInsertPatterns(&planner, patterns);
+                return appendMutationResult(&planner, .mutations);
+            },
+            .match => |mq| return try appendMatchStatementResult(gpa, &planner, mq),
         },
     }
+}
+
+fn appendMatchStatementResult(gpa: Allocator, planner: *Planner, mq: Ast.MatchQuery) Error!CompiledStatement {
+    try appendMatchQuery(planner, mq);
+    return switch (mq.action) {
+        .ret => |ret| try appendReturnResult(gpa, planner, ret),
+        .insert => |patterns| blk: {
+            try appendInsertPatterns(planner, patterns);
+            break :blk appendMutationResult(planner, .mutations);
+        },
+        .set => |sets| blk: {
+            try appendUpdate(planner, sets);
+            break :blk appendMutationResult(planner, .mutations);
+        },
+        .delete => |del| blk: {
+            try appendDelete(planner, del);
+            break :blk appendMutationResult(planner, .mutations);
+        },
+        .finish => appendMutationResult(planner, .rows),
+    };
 }
 
 // ------------------------------ Planner -----------------------------------
@@ -158,11 +161,7 @@ const Planner = struct {
 };
 
 fn appendReturnResult(gpa: Allocator, planner: *Planner, ret: Ast.ReturnClause) Error!CompiledStatement {
-    try appendResultProjection(planner, ret);
-    try appendReturnAliases(planner, ret);
-    try appendDistinct(planner, ret);
-    try appendOrderBy(planner, ret);
-    try appendSkipLimit(planner, ret);
+    try appendReturnClause(planner, ret);
 
     const columns = try resultColumns(gpa, planner, ret);
     errdefer deinitResultColumns(gpa, columns);
@@ -172,7 +171,27 @@ fn appendReturnResult(gpa: Allocator, planner: *Planner, ret: Ast.ReturnClause) 
     };
 }
 
-fn appendReadQueryResult(gpa: Allocator, planner: *Planner, query: Ast.ReadQuery) Error!CompiledStatement {
+fn appendReturnClause(planner: *Planner, ret: Ast.ReturnClause) Error!void {
+    try appendResultProjection(planner, ret);
+    try appendReturnAliases(planner, ret);
+    try appendDistinct(planner, ret);
+    try appendOrderBy(planner, ret);
+    try appendSkipLimit(planner, ret);
+}
+
+fn appendRowQueryResult(gpa: Allocator, planner: *Planner, query: Ast.RowQuery) Error!CompiledStatement {
+    try appendRowQuery(planner, query);
+
+    const ret = rowQueryReturn(query);
+    const columns = try resultColumns(gpa, planner, ret);
+    errdefer deinitResultColumns(gpa, columns);
+    return .{
+        .plan = takePlan(planner),
+        .result = .{ .rows = columns },
+    };
+}
+
+fn appendReadQuery(planner: *Planner, query: Ast.ReadQuery) Error!void {
     for (query.clauses) |clause| {
         switch (clause) {
             .match => |match| try appendMatchClause(planner, match),
@@ -180,7 +199,62 @@ fn appendReadQueryResult(gpa: Allocator, planner: *Planner, query: Ast.ReadQuery
             .with => |ret| try appendWithClause(planner, ret),
         }
     }
-    return try appendReturnResult(gpa, planner, query.ret);
+    try appendReturnClause(planner, query.ret);
+}
+
+fn appendUnionQuery(planner: *Planner, query: Ast.UnionQuery) Error!void {
+    try appendQueryBody(planner, query.first);
+    const output_idents = try planner.gpa.dupe(u16, planner.plan.results.items);
+    defer planner.gpa.free(output_idents);
+    planner.plan.results.clearRetainingCapacity();
+
+    for (query.parts) |part| {
+        planner.bindings.clearRetainingCapacity();
+        try planner.plan.ops.append(planner.gpa, .begin);
+        try appendQueryBody(planner, part.query);
+        if (planner.plan.results.items.len != output_idents.len) return error.Unsupported;
+
+        try appendUnionOutputProjection(planner, output_idents, planner.plan.results.items);
+        planner.plan.results.clearRetainingCapacity();
+        try planner.plan.ops.append(planner.gpa, .union_all);
+        if (!part.all) try appendDistinctIdents(planner, output_idents);
+    }
+
+    try planner.plan.results.appendSlice(planner.gpa, output_idents);
+}
+
+fn appendRowQuery(planner: *Planner, query: Ast.RowQuery) Error!void {
+    switch (query) {
+        .single => |body| try appendQueryBody(planner, body),
+        .union_query => |union_query| try appendUnionQuery(planner, union_query),
+    }
+}
+
+fn appendQueryBody(planner: *Planner, query: Ast.QueryBody) Error!void {
+    switch (query) {
+        .return_only => |ret| try appendReturnClause(planner, ret),
+        .read_query => |rq| try appendReadQuery(planner, rq),
+        .match_query => |mq| {
+            try appendMatchQuery(planner, mq);
+            if (mq.action != .ret) return error.Unsupported;
+            try appendReturnClause(planner, mq.action.ret);
+        },
+    }
+}
+
+fn rowQueryReturn(query: Ast.RowQuery) Ast.ReturnClause {
+    return switch (query) {
+        .single => |body| queryBodyReturn(body),
+        .union_query => |union_query| queryBodyReturn(union_query.first),
+    };
+}
+
+fn queryBodyReturn(query: Ast.QueryBody) Ast.ReturnClause {
+    return switch (query) {
+        .return_only => |ret| ret,
+        .read_query => |rq| rq.ret,
+        .match_query => |mq| mq.action.ret,
+    };
 }
 
 fn appendMutationResult(planner: *Planner, count: MutationCount) CompiledStatement {
@@ -561,6 +635,37 @@ fn appendDistinct(planner: *Planner, ret: Ast.ReturnClause) Error!void {
     try idents.appendSlice(planner.gpa, planner.plan.results.items[0..ret.items.len]);
     try planner.plan.ops.append(planner.gpa, .{ .distinct = idents });
     idents = .empty;
+}
+
+fn appendDistinctIdents(planner: *Planner, idents: []const u16) Error!void {
+    var owned = std.ArrayList(u16).empty;
+    errdefer owned.deinit(planner.gpa);
+    try owned.appendSlice(planner.gpa, idents);
+    try planner.plan.ops.append(planner.gpa, .{ .distinct = owned });
+    owned = .empty;
+}
+
+fn appendUnionOutputProjection(planner: *Planner, output_idents: []const u16, branch_idents: []const u16) Error!void {
+    var project = std.ArrayList(Plan.ProjectClause).empty;
+    errdefer {
+        for (project.items) |*clause| clause.deinit(planner.gpa);
+        project.deinit(planner.gpa);
+    }
+
+    for (output_idents, branch_idents) |output_ident, branch_ident| {
+        if (output_ident == branch_ident) continue;
+        try project.append(planner.gpa, .{
+            .ident = output_ident,
+            .exp = .{ .ident = branch_ident },
+        });
+    }
+
+    if (project.items.len > 0) {
+        try planner.plan.ops.append(planner.gpa, .{ .project = project });
+        project = .empty;
+    } else {
+        project.deinit(planner.gpa);
+    }
 }
 
 fn appendWithClause(planner: *Planner, ret: Ast.ReturnClause) Error!void {
