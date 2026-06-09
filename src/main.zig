@@ -3,6 +3,7 @@ const std = @import("std");
 const rocksdb = @import("storage/rocksdb.zig");
 const storage = @import("storage.zig");
 const query = @import("query.zig");
+const bolt = @import("bolt.zig");
 const graphon = @import("graphon.zig");
 
 const default_db_path = "/tmp/graphon.db";
@@ -163,7 +164,10 @@ fn serve(io: std.Io, gpa: std.mem.Allocator, db_path: []const u8, host: []const 
     var server = try addr.listen(io, .{ .reuse_address = true });
     defer server.deinit(io);
 
-    std.debug.print("Graphon listening at http://{s}:{d}/ using {s}\n", .{ host, port, db_path });
+    std.debug.print(
+        "Graphon listening at http://{s}:{d}/ and bolt://{s}:{d}/ using {s}\n",
+        .{ host, port, host, port, db_path },
+    );
     while (true) {
         const stream = server.accept(io) catch |err| {
             std.debug.print("accept error: {s}\n", .{@errorName(err)});
@@ -182,6 +186,11 @@ fn handleConnection(gpa: std.mem.Allocator, io: std.Io, store: storage.Storage, 
     var send_buffer: [16 * 1024]u8 = undefined;
     var stream_reader = stream.reader(io, &recv_buffer);
     var stream_writer = stream.writer(io, &send_buffer);
+    if (bolt.isHandshake(try stream_reader.interface.peek(4))) {
+        try bolt.handleSession(gpa, store, &stream_reader.interface, &stream_writer.interface);
+        return;
+    }
+
     var http_server = std.http.Server.init(&stream_reader.interface, &stream_writer.interface);
 
     while (http_server.reader.state == .ready) {
