@@ -33,20 +33,20 @@ pub const Error = error{
 
 const log = std.log.scoped(.rocksdb);
 
-inline fn slice_starts_with(slice: []const u8, prefix: []const u8) bool {
+inline fn sliceStartsWith(slice: []const u8, prefix: []const u8) bool {
     if (slice.len < prefix.len) return false;
     return std.mem.eql(u8, slice[0..prefix.len], prefix);
 }
 
-test "slice_starts_with" {
+test "sliceStartsWith" {
     const slice = "hello, world!";
-    try std.testing.expect(slice_starts_with(slice, ""));
-    try std.testing.expect(slice_starts_with(slice, "hello"));
-    try std.testing.expect(!slice_starts_with(slice, "world"));
+    try std.testing.expect(sliceStartsWith(slice, ""));
+    try std.testing.expect(sliceStartsWith(slice, "hello"));
+    try std.testing.expect(!sliceStartsWith(slice, "world"));
 }
 
 /// Parse a RocksDB error string into a status, logging it. Consumes the string.
-fn parse_rocks_error(err: [*c]u8) Error {
+fn parseRocksError(err: [*c]u8) Error {
     defer c.rocksdb_free(err); // free the memory when done
     log.info("{s}", .{err});
 
@@ -54,33 +54,33 @@ fn parse_rocks_error(err: [*c]u8) Error {
     if (slice.len == 0) return Error.UnknownStatus;
     switch (slice[0]) {
         'C' => {
-            if (slice_starts_with(slice, "Corruption: ")) return Error.Corruption;
-            if (slice_starts_with(slice, "Compaction too large: ")) return Error.CompactionTooLarge;
-            if (slice_starts_with(slice, "Column family dropped: ")) return Error.ColumnFamilyDropped;
+            if (sliceStartsWith(slice, "Corruption: ")) return Error.Corruption;
+            if (sliceStartsWith(slice, "Compaction too large: ")) return Error.CompactionTooLarge;
+            if (sliceStartsWith(slice, "Column family dropped: ")) return Error.ColumnFamilyDropped;
         },
         'I' => {
-            if (slice_starts_with(slice, "Invalid argument: ")) return Error.InvalidArgument;
-            if (slice_starts_with(slice, "IO error: ")) return Error.IOError;
+            if (sliceStartsWith(slice, "Invalid argument: ")) return Error.InvalidArgument;
+            if (sliceStartsWith(slice, "IO error: ")) return Error.IOError;
         },
         'M' => {
-            if (slice_starts_with(slice, "Merge in progress: ")) return Error.MergeInProgress;
+            if (sliceStartsWith(slice, "Merge in progress: ")) return Error.MergeInProgress;
         },
         'N' => {
-            if (slice_starts_with(slice, "NotFound: ")) return Error.NotFound;
-            if (slice_starts_with(slice, "Not implemented: ")) return Error.NotSupported;
+            if (sliceStartsWith(slice, "NotFound: ")) return Error.NotFound;
+            if (sliceStartsWith(slice, "Not implemented: ")) return Error.NotSupported;
         },
         'O' => {
-            if (slice_starts_with(slice, "Operation timed out: ")) return Error.TimedOut;
-            if (slice_starts_with(slice, "Operation aborted: ")) return Error.Aborted;
-            if (slice_starts_with(slice, "Operation expired: ")) return Error.Expired;
-            if (slice_starts_with(slice, "Operation failed. Try again.: ")) return Error.TryAgain;
+            if (sliceStartsWith(slice, "Operation timed out: ")) return Error.TimedOut;
+            if (sliceStartsWith(slice, "Operation aborted: ")) return Error.Aborted;
+            if (sliceStartsWith(slice, "Operation expired: ")) return Error.Expired;
+            if (sliceStartsWith(slice, "Operation failed. Try again.: ")) return Error.TryAgain;
         },
         'R' => {
-            if (slice_starts_with(slice, "Result incomplete: ")) return Error.Incomplete;
-            if (slice_starts_with(slice, "Resource busy: ")) return Error.Busy;
+            if (sliceStartsWith(slice, "Result incomplete: ")) return Error.Incomplete;
+            if (sliceStartsWith(slice, "Resource busy: ")) return Error.Busy;
         },
         'S' => {
-            if (slice_starts_with(slice, "Shutdown in progress: ")) return Error.ShutdownInProgress;
+            if (sliceStartsWith(slice, "Shutdown in progress: ")) return Error.ShutdownInProgress;
         },
         else => {},
     }
@@ -96,7 +96,7 @@ test "parse error from rocksdb_open" {
     try std.testing.expectEqual(null, db);
     try std.testing.expect(err != null);
 
-    const status = parse_rocks_error(err);
+    const status = parseRocksError(err);
     try std.testing.expectEqual(Error.IOError, status);
 }
 
@@ -180,7 +180,7 @@ pub const DB = struct {
             @ptrCast(&cf_handles.values), // Cast the array type into a ?* pointer.
             &err,
         );
-        if (err != null) return parse_rocks_error(err);
+        if (err != null) return parseRocksError(err);
 
         // Should not be null because otxn_db is only null on error.
         const db = c.rocksdb_optimistictransactiondb_get_base_db(otxn_db);
@@ -219,7 +219,7 @@ pub const DB = struct {
             value.len,
             &err,
         );
-        if (err != null) return parse_rocks_error(err);
+        if (err != null) return parseRocksError(err);
     }
 
     /// Get a value from the database by key.
@@ -233,7 +233,7 @@ pub const DB = struct {
             key.len,
             &err,
         );
-        if (err != null) return parse_rocks_error(err);
+        if (err != null) return parseRocksError(err);
         const val = value orelse return null;
         return PinnableSlice{ .rep = val };
     }
@@ -259,7 +259,7 @@ pub const DB = struct {
     pub fn delete(self: DB, cf: ColumnFamily, key: []const u8) !void {
         var err: [*c]u8 = null;
         c.rocksdb_delete_cf(self.db, self.write_opts, self.cf_handles.get(cf), key.ptr, key.len, &err);
-        if (err != null) return parse_rocks_error(err);
+        if (err != null) return parseRocksError(err);
     }
 
     /// Delete a range of keys from the database. The range is inclusive-exclusive.
@@ -275,7 +275,7 @@ pub const DB = struct {
             upper_bound.len,
             &err,
         );
-        if (err != null) return parse_rocks_error(err);
+        if (err != null) return parseRocksError(err);
     }
 
     /// Begin a new optimistic transaction on the database.
@@ -311,7 +311,7 @@ pub const Transaction = struct {
             value.len,
             &err,
         );
-        if (err != null) return parse_rocks_error(err);
+        if (err != null) return parseRocksError(err);
     }
 
     /// See `RocksDB.get()`.
@@ -337,7 +337,7 @@ pub const Transaction = struct {
             @intFromBool(exclusive),
             &err,
         );
-        if (err != null) return parse_rocks_error(err);
+        if (err != null) return parseRocksError(err);
         const val = value orelse return null;
         return PinnableSlice{ .rep = val };
     }
@@ -360,7 +360,7 @@ pub const Transaction = struct {
     pub fn delete(self: Transaction, cf: ColumnFamily, key: []const u8) !void {
         var err: [*c]u8 = null;
         c.rocksdb_transaction_delete_cf(self.txn, self.cf_handles.get(cf), key.ptr, key.len, &err);
-        if (err != null) return parse_rocks_error(err);
+        if (err != null) return parseRocksError(err);
     }
 
     /// Commit the transaction and write all batched keys atomically.
@@ -371,26 +371,26 @@ pub const Transaction = struct {
     pub fn commit(self: Transaction) !void {
         var err: [*c]u8 = null;
         c.rocksdb_transaction_commit(self.txn, &err);
-        if (err != null) return parse_rocks_error(err);
+        if (err != null) return parseRocksError(err);
     }
 
     /// Rollback the transaction and discard all batched writes.
     pub fn rollback(self: Transaction) !void {
         var err: [*c]u8 = null;
         c.rocksdb_transaction_rollback(self.txn, &err);
-        if (err != null) return parse_rocks_error(err);
+        if (err != null) return parseRocksError(err);
     }
 
     /// Set the savepoint, allowing it to be rolled back to this point.
-    pub fn set_savepoint(self: Transaction) void {
+    pub fn setSavepoint(self: Transaction) void {
         c.rocksdb_transaction_set_savepoint(self.txn);
     }
 
     /// Rollback to the last savepoint, discarding all writes since then.
-    pub fn rollback_to_savepoint(self: Transaction) !void {
+    pub fn rollbackToSavepoint(self: Transaction) !void {
         var err: [*c]u8 = null;
         c.rocksdb_transaction_rollback_to_savepoint(self.txn, &err);
-        if (err != null) return parse_rocks_error(err);
+        if (err != null) return parseRocksError(err);
     }
 };
 

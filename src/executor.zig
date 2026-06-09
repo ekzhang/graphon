@@ -85,14 +85,14 @@ const OperatorState = struct {
         return .{
             .ptr = ptr,
             .destroy = &struct {
-                fn opaque_destroy(self: *anyopaque, allocator: Allocator) void {
+                fn opaqueDestroy(self: *anyopaque, allocator: Allocator) void {
                     const state: *T = @ptrCast(@alignCast(self));
                     if (deinit) |func| {
                         func(state, allocator);
                     }
                     allocator.destroy(state);
                 }
-            }.opaque_destroy,
+            }.opaqueDestroy,
         };
     }
 };

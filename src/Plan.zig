@@ -73,7 +73,7 @@ pub fn print(self: Plan, writer: anytype) !void {
     }
 }
 
-fn idents_chk(ret: *u16, values: anytype) void {
+fn identsChk(ret: *u16, values: anytype) void {
     inline for (values) |v| {
         if (@as(?u16, v)) |value| {
             if (value + 1 > ret.*) {
@@ -88,24 +88,24 @@ pub fn idents(self: Plan) u16 {
     var ret: u16 = 0;
     for (self.ops.items) |op| {
         switch (op) {
-            .node_scan => |n| idents_chk(&ret, .{n.ident}),
-            .edge_scan => |n| idents_chk(&ret, .{n.ident}),
-            .step => |n| idents_chk(&ret, .{ n.ident_edge, n.ident_dest }),
-            .argument => |n| idents_chk(&ret, .{n}),
+            .node_scan => |n| identsChk(&ret, .{n.ident}),
+            .edge_scan => |n| identsChk(&ret, .{n.ident}),
+            .step => |n| identsChk(&ret, .{ n.ident_edge, n.ident_dest }),
+            .argument => |n| identsChk(&ret, .{n}),
             .project => |n| {
-                for (n.items) |c| idents_chk(&ret, .{c.ident});
+                for (n.items) |c| identsChk(&ret, .{c.ident});
             },
             .aggregate => |n| {
-                for (n.groups.items) |ident| idents_chk(&ret, .{ident});
-                for (n.items.items) |c| idents_chk(&ret, .{c.ident});
+                for (n.groups.items) |ident| identsChk(&ret, .{ident});
+                for (n.items.items) |c| identsChk(&ret, .{c.ident});
             },
-            .insert_node => |n| idents_chk(&ret, .{n.ident}),
-            .insert_edge => |n| idents_chk(&ret, .{n.ident}),
+            .insert_node => |n| identsChk(&ret, .{n.ident}),
+            .insert_edge => |n| identsChk(&ret, .{n.ident}),
             .update => |n| {
-                for (n.items.items) |c| idents_chk(&ret, .{c.ident});
+                for (n.items.items) |c| identsChk(&ret, .{c.ident});
             },
             .delete => |n| {
-                for (n.idents.items) |ident| idents_chk(&ret, .{ident});
+                for (n.idents.items) |ident| identsChk(&ret, .{ident});
             },
             else => {},
         }
@@ -253,11 +253,11 @@ pub const Operator = union(enum) {
         switch (self) {
             .node_scan => |n| {
                 try writer.writeByte(' ');
-                try print_node_spec(writer, n.ident, n.label);
+                try printNodeSpec(writer, n.ident, n.label);
             },
             .edge_scan => |n| {
                 try writer.writeByte(' ');
-                try print_edge_spec(writer, .any, n.ident, n.label);
+                try printEdgeSpec(writer, .any, n.ident, n.label);
             },
             .node_by_id => |n| {
                 try writer.print(" %{} -> %{}", .{ n.ident_id, n.ident_ref });
@@ -267,9 +267,9 @@ pub const Operator = union(enum) {
             },
             .step => |n| {
                 try writer.writeByte(' ');
-                try print_node_spec(writer, n.ident_src, null);
-                try print_edge_spec(writer, n.direction, n.ident_edge, n.edge_label);
-                try print_node_spec(writer, n.ident_dest, null);
+                try printNodeSpec(writer, n.ident_src, null);
+                try printEdgeSpec(writer, n.direction, n.ident_edge, n.edge_label);
+                try printNodeSpec(writer, n.ident_dest, null);
             },
             .begin => {},
             .argument => |n| {
@@ -379,22 +379,22 @@ pub const Operator = union(enum) {
                 if (n.ident) |i| {
                     try writer.print("%{}", .{i});
                 }
-                try print_labels(writer, n.labels.items);
-                try print_properties(writer, n.properties);
+                try printLabels(writer, n.labels.items);
+                try printProperties(writer, n.properties);
                 try writer.writeByte(')');
             },
             .insert_edge => |n| {
                 try writer.writeByte(' ');
-                try print_node_spec(writer, n.ident_src, null);
+                try printNodeSpec(writer, n.ident_src, null);
                 const direction: EdgeDirection = if (n.directed) .right else .undirected;
                 try writer.writeAll(direction.leftPart());
                 if (n.ident) |i| {
                     try writer.print("%{}", .{i});
                 }
-                try print_labels(writer, n.labels.items);
-                try print_properties(writer, n.properties);
+                try printLabels(writer, n.labels.items);
+                try printProperties(writer, n.properties);
                 try writer.writeAll(direction.rightPart());
-                try print_node_spec(writer, n.ident_dest, null);
+                try printNodeSpec(writer, n.ident_dest, null);
             },
             .delete => |n| {
                 try writer.print(" {s}", .{if (n.detach) "Detach" else "NoDetach"});
@@ -438,7 +438,7 @@ pub const Operator = union(enum) {
     }
 };
 
-fn print_node_spec(writer: anytype, ident: ?u16, label: ?[]u8) !void {
+fn printNodeSpec(writer: anytype, ident: ?u16, label: ?[]u8) !void {
     try writer.writeByte('(');
     if (ident) |i| {
         try writer.print("%{}", .{i});
@@ -449,7 +449,7 @@ fn print_node_spec(writer: anytype, ident: ?u16, label: ?[]u8) !void {
     try writer.writeByte(')');
 }
 
-fn print_edge_spec(writer: anytype, direction: EdgeDirection, ident: ?u16, label: ?[]u8) !void {
+fn printEdgeSpec(writer: anytype, direction: EdgeDirection, ident: ?u16, label: ?[]u8) !void {
     try writer.writeAll(direction.leftPart());
     if (ident) |i| {
         try writer.print("%{}", .{i});
@@ -460,7 +460,7 @@ fn print_edge_spec(writer: anytype, direction: EdgeDirection, ident: ?u16, label
     try writer.writeAll(direction.rightPart());
 }
 
-fn print_labels(writer: anytype, labels: [][]u8) !void {
+fn printLabels(writer: anytype, labels: [][]u8) !void {
     var first = true;
     for (labels) |l| {
         if (first) {
@@ -473,7 +473,7 @@ fn print_labels(writer: anytype, labels: [][]u8) !void {
     }
 }
 
-pub fn print_properties(writer: anytype, properties: Properties) !void {
+pub fn printProperties(writer: anytype, properties: Properties) !void {
     if (properties.len > 0) {
         try writer.writeAll(" {");
         for (0..properties.len) |i| {
@@ -794,7 +794,7 @@ const Snap = @import("vendor/snaptest.zig").Snap;
 const snap = Snap.snap;
 
 /// Check the value of a query plan, for snapshot testing.
-fn check_plan_snapshot(plan: Plan, want: Snap) !void {
+fn checkPlanSnapshot(plan: Plan, want: Snap) !void {
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
     try plan.print(&out.writer);
@@ -815,7 +815,7 @@ test "can create, free and print plan" {
         },
     });
 
-    try check_plan_snapshot(plan, snap(@src(),
+    try checkPlanSnapshot(plan, snap(@src(),
         \\Plan{%0}
         \\  NodeScan (%0)
     ));
@@ -832,7 +832,7 @@ test "can create, free and print plan" {
     plan.results.items[0] = 1;
     try plan.results.append(allocator, 2);
 
-    try check_plan_snapshot(plan, snap(@src(),
+    try checkPlanSnapshot(plan, snap(@src(),
         \\Plan{%1, %2}
         \\  Step (%0)~[%1:Likes]~>(%2)
         \\  NodeScan (%0)
