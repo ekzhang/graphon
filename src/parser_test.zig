@@ -137,8 +137,8 @@ test "parse count aggregate calls" {
 }
 
 test "parse rejects invalid aggregate star arguments" {
-    try std.testing.expectError(error.ParseError, Ast.parse(std.testing.allocator, "RETURN SUM(*)"));
-    try std.testing.expectError(error.ParseError, Ast.parse(std.testing.allocator, "RETURN COUNT(DISTINCT *)"));
+    try expectParseError("RETURN SUM(*)", .invalid_aggregate_argument);
+    try expectParseError("RETURN COUNT(DISTINCT *)", .invalid_aggregate_argument);
 }
 
 test "parse aggregate expressions" {
@@ -321,10 +321,10 @@ test "parse insert requires explicit edge endpoints" {
     const undirected_insert = try expectMutation(&undirected_program.statements[0]);
     try std.testing.expectEqual(EdgeDirection.undirected, undirected_insert.insert[0].segments[0].edge.direction);
 
-    try std.testing.expectError(error.ParseError, Ast.parse(std.testing.allocator, "INSERT -[]-"));
-    try std.testing.expectError(error.ParseError, Ast.parse(std.testing.allocator, "INSERT ()-[]-()"));
-    try std.testing.expectError(error.ParseError, Ast.parse(std.testing.allocator, "INSERT ()-[]->"));
-    try std.testing.expectError(error.ParseError, Ast.parse(std.testing.allocator, "INSERT -[]->()"));
+    try expectParseError("INSERT -[]-", .expected_insert_edge_endpoint);
+    try expectParseError("INSERT ()-[]-()", .expected_insert_edge_direction);
+    try expectParseError("INSERT ()-[]->", .expected_insert_edge_endpoint);
+    try expectParseError("INSERT -[]->()", .expected_insert_edge_endpoint);
 }
 
 test "parse ISO GQL comments" {
@@ -358,13 +358,30 @@ test "parse keeps comment delimiters inside strings" {
 }
 
 test "parse rejects invalid comment forms" {
-    try std.testing.expectError(error.ParseError, Ast.parse(std.testing.allocator, "RETURN 1 /* unterminated"));
-    try std.testing.expectError(error.ParseError, Ast.parse(std.testing.allocator, "MATCH (:User)<--(n:User) RETURN n"));
+    try expectParseError("RETURN 1 /* unterminated", .invalid_token);
+    try expectParseError("MATCH (:User)<--(n:User) RETURN n", .expected_match_action);
 }
 
 test "parse rejects fractional skip and limit counts" {
-    try std.testing.expectError(error.ParseError, Ast.parse(std.testing.allocator, "RETURN 1 SKIP 1.5"));
-    try std.testing.expectError(error.ParseError, Ast.parse(std.testing.allocator, "RETURN 1 LIMIT 2.5"));
+    try expectParseError("RETURN 1 SKIP 1.5", .expected_count);
+    try expectParseError("RETURN 1 LIMIT 2.5", .expected_count);
+}
+
+test "parse errors render human readable diagnostics" {
+    var program = try Ast.parse(std.testing.allocator, "RETURN 1 LIMIT 2.5");
+    defer program.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), program.errors.len);
+
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    try program.errors[0].render(program.source, &out.writer);
+    try std.testing.expectEqualStrings(
+        \\1:16: error: expected an integer count, found a number literal
+        \\RETURN 1 LIMIT 2.5
+        \\               ^
+        \\
+    , out.written());
 }
 
 fn expectOptionalName(actual: ?[]const u8, expected: []const u8) !void {
@@ -372,10 +389,19 @@ fn expectOptionalName(actual: ?[]const u8, expected: []const u8) !void {
     try std.testing.expectEqualStrings(expected, actual.?);
 }
 
+fn expectParseError(source: [:0]const u8, expected: Ast.Error.Tag) !void {
+    var program = try Ast.parse(std.testing.allocator, source);
+    defer program.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 0), program.statements.len);
+    try std.testing.expectEqual(@as(usize, 1), program.errors.len);
+    try std.testing.expectEqual(expected, program.errors[0].tag);
+}
+
 fn expectSingleEdgeDirection(source: [:0]const u8, expected: EdgeDirection) !void {
     var program = try Ast.parse(std.testing.allocator, source);
     defer program.deinit(std.testing.allocator);
 
+    try std.testing.expectEqual(@as(usize, 0), program.errors.len);
     const body = try expectSingleQuery(&program.statements[0]);
     try std.testing.expect(body.* == .match_query);
     try std.testing.expectEqual(@as(usize, 1), body.match_query.patterns.len);

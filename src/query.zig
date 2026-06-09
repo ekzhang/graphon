@@ -45,13 +45,14 @@ pub fn prepare(gpa: Allocator, source: [:0]const u8) Error!CompiledProgram {
 /// Execute a prepared program inside a caller-owned transaction.
 ///
 /// The caller owns transaction lifetime and must commit or roll back after this
-/// returns. For streaming use cases, call `StatementCursor.init` directly for
-/// each `program.statements` entry instead of collecting a full `ResultSet`.
+/// returns. For streaming use cases, call `StatementCursor.init` directly over
+/// `program.statements()` instead of collecting a full `ResultSet`.
 pub fn execute(gpa: Allocator, txn: storage.Transaction, program: *const CompiledProgram) Error!ResultSet {
+    const statements = try program.statements();
     var result = ResultSet{ .rows_affected = 0 };
     errdefer result.deinit(gpa);
 
-    for (program.statements) |*statement| {
+    for (statements) |*statement| {
         var cursor = try StatementCursor.init(gpa, txn, statement);
         const next_result = blk: {
             defer cursor.deinit();

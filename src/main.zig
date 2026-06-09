@@ -2,6 +2,7 @@ const std = @import("std");
 
 const rocksdb = @import("storage/rocksdb.zig");
 const storage = @import("storage.zig");
+const Ast = @import("Ast.zig");
 const query = @import("query.zig");
 const bolt = @import("bolt.zig");
 const graphon = @import("graphon.zig");
@@ -10,6 +11,19 @@ const default_db_path = "/tmp/graphon.db";
 const default_host = "127.0.0.1";
 const default_port: u16 = 7687;
 const json_headers = [_]std.http.Header{.{ .name = "content-type", .value = "application/json" }};
+
+const QueryOutcome = union(enum) {
+    result: query.ResultSet,
+    parse_errors: Ast.ErrorList,
+
+    fn deinit(self: *QueryOutcome, gpa: std.mem.Allocator) void {
+        switch (self.*) {
+            .result => |*result| result.deinit(gpa),
+            .parse_errors => |*errors| errors.deinit(gpa),
+        }
+        self.* = undefined;
+    }
+};
 
 fn rocksdbInsertPerf(io: std.Io) !void {
     const db = try rocksdb.DB.open("/tmp/graphon-perf");
@@ -77,14 +91,25 @@ pub fn main(init: std.process.Init) !void {
             }
             const source = try std.mem.joinZ(gpa, " ", args[2..]);
             defer gpa.free(source);
-            var result = try executeLocal(gpa, io, default_db_path, source);
-            defer result.deinit(gpa);
+            var outcome = try executeLocal(gpa, io, default_db_path, source);
+            defer outcome.deinit(gpa);
             var stdout_buffer: [4096]u8 = undefined;
             var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
-            var json: std.json.Stringify = .{ .writer = &stdout_writer.interface, .options = .{} };
-            try result.writeJson(&json);
-            try stdout_writer.interface.writeByte('\n');
-            try stdout_writer.interface.flush();
+            switch (outcome) {
+                .result => |*result| {
+                    var json: std.json.Stringify = .{ .writer = &stdout_writer.interface, .options = .{} };
+                    try result.writeJson(&json);
+                    try stdout_writer.interface.writeByte('\n');
+                    try stdout_writer.interface.flush();
+                },
+                .parse_errors => |errors| {
+                    var stderr_buffer: [4096]u8 = undefined;
+                    var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buffer);
+                    try errors.render(&stderr_writer.interface);
+                    try stderr_writer.interface.flush();
+                    std.process.exit(1);
+                },
+            }
         },
         .shell => try localShell(gpa, io, default_db_path),
         .rocksdb_insert_perf => try rocksdbInsertPerf(io),
@@ -105,16 +130,17 @@ fn usage() void {
     , .{});
 }
 
-fn executeLocal(gpa: std.mem.Allocator, io: std.Io, db_path: []const u8, source: [:0]const u8) !query.ResultSet {
+fn executeLocal(gpa: std.mem.Allocator, io: std.Io, db_path: []const u8, source: [:0]const u8) !QueryOutcome {
     const db = try rocksdb.DB.open(db_path);
     defer db.close();
     const store = storage.Storage{ .db = db, .allocator = std.heap.c_allocator, .io = io };
     return try executeQuery(gpa, store, source);
 }
 
-fn executeQuery(gpa: std.mem.Allocator, store: storage.Storage, source: [:0]const u8) !query.ResultSet {
+fn executeQuery(gpa: std.mem.Allocator, store: storage.Storage, source: [:0]const u8) !QueryOutcome {
     var prepared = try query.prepare(gpa, source);
     defer prepared.deinit(gpa);
+    if (prepared.takeParseErrors()) |errors| return .{ .parse_errors = errors };
 
     const txn = store.txn();
     defer txn.close();
@@ -123,7 +149,7 @@ fn executeQuery(gpa: std.mem.Allocator, store: storage.Storage, source: [:0]cons
     var result = try query.execute(gpa, txn, &prepared);
     errdefer result.deinit(gpa);
     try txn.commit();
-    return result;
+    return .{ .result = result };
 }
 
 fn localShell(gpa: std.mem.Allocator, io: std.Io, db_path: []const u8) !void {
@@ -144,14 +170,19 @@ fn localShell(gpa: std.mem.Allocator, io: std.Io, db_path: []const u8) !void {
         if (std.mem.eql(u8, trimmed, ":quit") or std.mem.eql(u8, trimmed, ":exit")) break;
         const source = try gpa.dupeZ(u8, trimmed);
         defer gpa.free(source);
-        var result = executeLocal(gpa, io, db_path, source) catch |err| {
+        var outcome = executeLocal(gpa, io, db_path, source) catch |err| {
             try stdout.print("error: {s}\n", .{@errorName(err)});
             continue;
         };
-        defer result.deinit(gpa);
-        var json: std.json.Stringify = .{ .writer = stdout, .options = .{} };
-        try result.writeJson(&json);
-        try stdout.writeByte('\n');
+        defer outcome.deinit(gpa);
+        switch (outcome) {
+            .result => |*result| {
+                var json: std.json.Stringify = .{ .writer = stdout, .options = .{} };
+                try result.writeJson(&json);
+                try stdout.writeByte('\n');
+            },
+            .parse_errors => |errors| try errors.render(stdout),
+        }
     }
 }
 
@@ -227,24 +258,46 @@ fn handleRequest(gpa: std.mem.Allocator, store: storage.Storage, request: *std.h
     const gql = try gpa.dupeZ(u8, raw_query);
     defer gpa.free(gql);
 
-    var result = executeQuery(gpa, store, gql) catch |err| {
-        var body = std.Io.Writer.Allocating.init(gpa);
-        defer body.deinit();
-        try body.writer.print("{{\"error\":\"{s}\"}}", .{@errorName(err)});
-        try request.respond(body.written(), .{
-            .status = .bad_request,
-            .keep_alive = false,
-            .extra_headers = &json_headers,
-        });
+    var outcome = executeQuery(gpa, store, gql) catch |err| {
+        try respondJsonError(gpa, request, .bad_request, @errorName(err));
         return;
     };
-    defer result.deinit(gpa);
+    defer outcome.deinit(gpa);
+
+    const result = switch (outcome) {
+        .result => |*result| result,
+        .parse_errors => |errors| {
+            var diagnostics = std.Io.Writer.Allocating.init(gpa);
+            defer diagnostics.deinit();
+            try errors.render(&diagnostics.writer);
+            try respondJsonError(gpa, request, .bad_request, diagnostics.written());
+            return;
+        },
+    };
 
     var body = std.Io.Writer.Allocating.init(gpa);
     defer body.deinit();
     var json: std.json.Stringify = .{ .writer = &body.writer, .options = .{} };
     try result.writeJson(&json);
     try request.respond(body.written(), .{ .extra_headers = &json_headers });
+}
+
+fn respondJsonError(
+    gpa: std.mem.Allocator,
+    request: *std.http.Server.Request,
+    status: std.http.Status,
+    message: []const u8,
+) !void {
+    var body = std.Io.Writer.Allocating.init(gpa);
+    defer body.deinit();
+    try body.writer.writeAll("{\"error\":");
+    try std.json.Stringify.value(message, .{}, &body.writer);
+    try body.writer.writeByte('}');
+    try request.respond(body.written(), .{
+        .status = status,
+        .keep_alive = false,
+        .extra_headers = &json_headers,
+    });
 }
 
 fn queryParam(gpa: std.mem.Allocator, target: []const u8, name: []const u8) ![]u8 {

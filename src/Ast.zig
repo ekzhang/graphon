@@ -22,19 +22,146 @@ pub const TokenList = std.MultiArrayList(struct {
     start: ByteOffset,
 });
 
+pub const SourceLocation = struct {
+    line: usize,
+    column: usize,
+    line_start: usize,
+    line_end: usize,
+};
+
+pub const Error = struct {
+    tag: Tag,
+    offset: ByteOffset,
+    found: Token.Tag,
+    expected: ?Token.Tag = null,
+
+    pub const Tag = enum {
+        invalid_token,
+        expected_token,
+        expected_statement,
+        expected_query_statement,
+        expected_read_clause,
+        expected_match_action,
+        expected_name,
+        expected_expression,
+        expected_return_item,
+        expected_sort_item,
+        expected_count,
+        expected_path_pattern,
+        expected_edge_pattern,
+        expected_node_pattern,
+        expected_insert_edge_endpoint,
+        expected_insert_edge_direction,
+        invalid_integer,
+        invalid_float,
+        invalid_string,
+        invalid_aggregate_argument,
+        unexpected_statement,
+    };
+
+    pub fn render(self: Error, source: []const u8, writer: anytype) !void {
+        const loc = sourceLocation(source, self.offset);
+        try writer.print("{d}:{d}: error: ", .{ loc.line + 1, loc.column + 1 });
+        try self.renderMessage(writer);
+        try writer.writeByte('\n');
+        if (loc.line_start <= loc.line_end and loc.line_end <= source.len) {
+            try writer.writeAll(source[loc.line_start..loc.line_end]);
+            try writer.writeByte('\n');
+            for (0..loc.column) |_| try writer.writeByte(' ');
+            try writer.writeByte('^');
+            try writer.writeByte('\n');
+        }
+    }
+
+    pub fn renderMessage(self: Error, writer: anytype) !void {
+        switch (self.tag) {
+            .invalid_token => try writer.print("invalid token '{s}'", .{self.found.symbol()}),
+            .expected_token => try writer.print("expected {s}, found {s}", .{ self.expected.?.symbol(), self.found.symbol() }),
+            .expected_statement => try writer.print("expected a statement, found {s}", .{self.found.symbol()}),
+            .expected_query_statement => try writer.print("expected a row-producing query, found {s}", .{self.found.symbol()}),
+            .expected_read_clause => try writer.print("expected WITH, MATCH, OPTIONAL MATCH, or RETURN, found {s}", .{self.found.symbol()}),
+            .expected_match_action => try writer.print("expected RETURN, INSERT, SET, DELETE, or FINISH after MATCH, found {s}", .{self.found.symbol()}),
+            .expected_name => try writer.print("expected an identifier, found {s}", .{self.found.symbol()}),
+            .expected_expression => try writer.print("expected an expression, found {s}", .{self.found.symbol()}),
+            .expected_return_item => try writer.print("expected a RETURN item, found {s}", .{self.found.symbol()}),
+            .expected_sort_item => try writer.print("expected an ORDER BY expression, found {s}", .{self.found.symbol()}),
+            .expected_count => try writer.print("expected an integer count, found {s}", .{self.found.symbol()}),
+            .expected_path_pattern => try writer.print("expected a path pattern, found {s}", .{self.found.symbol()}),
+            .expected_edge_pattern => try writer.print("expected an edge pattern, found {s}", .{self.found.symbol()}),
+            .expected_node_pattern => try writer.print("expected a node pattern, found {s}", .{self.found.symbol()}),
+            .expected_insert_edge_endpoint => try writer.writeAll("INSERT edge patterns must have explicit node endpoints"),
+            .expected_insert_edge_direction => try writer.writeAll("INSERT edge patterns must use ->, <-, or ~[]~"),
+            .invalid_integer => try writer.print("invalid integer literal '{s}'", .{self.found.symbol()}),
+            .invalid_float => try writer.print("invalid float literal '{s}'", .{self.found.symbol()}),
+            .invalid_string => try writer.writeAll("invalid string literal"),
+            .invalid_aggregate_argument => try writer.writeAll("only COUNT accepts '*' and COUNT(DISTINCT *) is invalid"),
+            .unexpected_statement => try writer.writeAll("UNION can only combine row-producing queries"),
+        }
+    }
+};
+
+pub const ErrorList = struct {
+    source: [:0]const u8,
+    errors: []Error,
+
+    pub fn deinit(self: *ErrorList, allocator: Allocator) void {
+        allocator.free(self.errors);
+        self.* = undefined;
+    }
+
+    pub fn render(self: ErrorList, writer: anytype) !void {
+        for (self.errors) |err| {
+            try err.render(self.source, writer);
+        }
+    }
+};
+
+pub fn sourceLocation(source: []const u8, offset: usize) SourceLocation {
+    var loc: SourceLocation = .{
+        .line = 0,
+        .column = 0,
+        .line_start = 0,
+        .line_end = source.len,
+    };
+    const clamped_offset = @min(offset, source.len);
+    for (source[0..clamped_offset], 0..) |c, i| {
+        if (c == '\n') {
+            loc.line += 1;
+            loc.column = 0;
+            loc.line_start = i + 1;
+        } else {
+            loc.column += 1;
+        }
+    }
+    loc.line_end = loc.line_start;
+    while (loc.line_end < source.len and source[loc.line_end] != '\n') {
+        loc.line_end += 1;
+    }
+    return loc;
+}
+
 /// Parse a GQL query into an AST (list of statements).
-pub fn parse(gpa: Allocator, source: [:0]const u8) Parse.Error!Program {
+pub fn parse(gpa: Allocator, source: [:0]const u8) Allocator.Error!Program {
     var parser: Parse = .{ .gpa = gpa, .source = source };
     return try parser.parse();
 }
 
 pub const Program = struct {
+    source: [:0]const u8,
     statements: []Statement,
+    errors: []Error = &.{},
 
     pub fn deinit(self: *Program, allocator: Allocator) void {
         for (self.statements) |*statement| statement.deinit(allocator);
         allocator.free(self.statements);
+        allocator.free(self.errors);
         self.* = undefined;
+    }
+
+    pub fn takeErrors(self: *Program) ErrorList {
+        const errors = self.errors;
+        self.errors = &.{};
+        return .{ .source = self.source, .errors = errors };
     }
 };
 

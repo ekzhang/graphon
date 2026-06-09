@@ -8,7 +8,8 @@ const Ast = @import("../Ast.zig");
 const Plan = @import("../Plan.zig");
 const types = @import("../types.zig");
 
-pub const Error = @import("../Parse.zig").Error || error{
+pub const Error = Allocator.Error || error{
+    InvalidSyntax,
     Unsupported,
     UnknownIdentifier,
     WrongType,
@@ -16,12 +17,37 @@ pub const Error = @import("../Parse.zig").Error || error{
 };
 
 pub const CompiledProgram = struct {
-    statements: []CompiledStatement,
+    value: union(enum) {
+        statements: []CompiledStatement,
+        parse_errors: Ast.ErrorList,
+    },
 
     pub fn deinit(self: *CompiledProgram, gpa: Allocator) void {
-        for (self.statements) |*statement| statement.deinit(gpa);
-        gpa.free(self.statements);
+        switch (self.value) {
+            .statements => |statement_slice| {
+                for (statement_slice) |*statement| statement.deinit(gpa);
+                gpa.free(statement_slice);
+            },
+            .parse_errors => |*errors| errors.deinit(gpa),
+        }
         self.* = undefined;
+    }
+
+    pub fn statements(self: *const CompiledProgram) Error![]CompiledStatement {
+        return switch (self.value) {
+            .statements => |statements_slice| statements_slice,
+            .parse_errors => error.InvalidSyntax,
+        };
+    }
+
+    pub fn takeParseErrors(self: *CompiledProgram) ?Ast.ErrorList {
+        return switch (self.value) {
+            .statements => null,
+            .parse_errors => |errors| {
+                self.value = .{ .statements = &.{} };
+                return errors;
+            },
+        };
     }
 };
 
@@ -70,7 +96,15 @@ pub const ResultColumn = struct {
 pub fn compile(gpa: Allocator, source: [:0]const u8) Error!CompiledProgram {
     var parsed = try Ast.parse(gpa, source);
     defer parsed.deinit(gpa);
+    if (parsed.errors.len > 0) {
+        const errors = parsed.takeErrors();
+        return .{ .value = .{ .parse_errors = errors } };
+    }
 
+    return try compileParsed(gpa, parsed);
+}
+
+fn compileParsed(gpa: Allocator, parsed: Ast.Program) Error!CompiledProgram {
     var statements = std.ArrayList(CompiledStatement).empty;
     errdefer {
         for (statements.items) |*statement| statement.deinit(gpa);
@@ -84,7 +118,7 @@ pub fn compile(gpa: Allocator, source: [:0]const u8) Error!CompiledProgram {
         compiled = null;
     }
 
-    return .{ .statements = try statements.toOwnedSlice(gpa) };
+    return .{ .value = .{ .statements = try statements.toOwnedSlice(gpa) } };
 }
 
 fn compileStatement(gpa: Allocator, statement: Ast.Statement) Error!CompiledStatement {
