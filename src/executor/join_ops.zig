@@ -59,10 +59,21 @@ pub fn runSemiJoin(_: void, _: *void, exec: *executor.Executor, op_index: u32) !
 pub const OptionalJoinState = struct {
     side: JoinState = .left,
     matched: bool = false,
+    null_idents: std.ArrayList(u16) = .empty,
+    null_idents_loaded: bool = false,
+
+    pub fn deinit(self: *OptionalJoinState, allocator: Allocator) void {
+        self.null_idents.deinit(allocator);
+        self.* = undefined;
+    }
 };
 
-pub fn runOptionalJoin(op: std.ArrayList(u16), state: *OptionalJoinState, exec: *executor.Executor, op_index: u32) !bool {
+pub fn runOptionalJoin(_: void, state: *OptionalJoinState, exec: *executor.Executor, op_index: u32) !bool {
     const j = exec.plan.subqueryBegin(op_index) orelse return error.MalformedPlan;
+    if (!state.null_idents_loaded) {
+        state.null_idents = (try exec.plan.subqueryDefinedIdents(exec.txn.allocator, op_index)) orelse return error.MalformedPlan;
+        state.null_idents_loaded = true;
+    }
 
     while (true) {
         switch (state.side) {
@@ -80,7 +91,7 @@ pub fn runOptionalJoin(op: std.ArrayList(u16), state: *OptionalJoinState, exec: 
 
                 state.side = .left;
                 if (!state.matched) {
-                    for (op.items) |ident| {
+                    for (state.null_idents.items) |ident| {
                         exec.assignments[ident].deinit(exec.txn.allocator);
                         exec.assignments[ident] = .null;
                     }

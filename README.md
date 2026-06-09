@@ -129,6 +129,7 @@ Query plans are constructed out of the following operations. The design here was
 - `ShortestPath`: Finds the shortest path(s) between two nodes.
 - `Join`: Take rows from the left subquery, execute the tree on the right subquery, and return both.
 - `SemiJoin`: Return rows from the left subquery where the right subquery is not null.
+- `OptionalJoin`: Left outer join, returns null when the right subquery does not match.
 - `Anti`: Test for the absence of a pattern, yielding a single row.
 - `Project`: Execute expressions or remap variable names.
 - `ProjectEndpoints`: Find the endpoints of an edge.

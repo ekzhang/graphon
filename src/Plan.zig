@@ -134,6 +134,20 @@ pub fn subqueryBegin(self: Plan, op_index: u32) ?u32 {
     return null;
 }
 
+/// Return all identifiers defined by a join-style operation's right subquery.
+pub fn subqueryDefinedIdents(self: Plan, allocator: Allocator, op_index: u32) Allocator.Error!?std.ArrayList(u16) {
+    const begin = self.subqueryBegin(op_index) orelse return null;
+    var defined = std.ArrayList(u16).empty;
+    errdefer defined.deinit(allocator);
+
+    const start: usize = @intCast(begin + 1);
+    const end: usize = @intCast(op_index);
+    for (self.ops.items[start..end]) |op| {
+        try op.appendDefinedIdents(allocator, &defined);
+    }
+    return defined;
+}
+
 /// A single step in the query plan, which may depend on previous steps.
 pub const Operator = union(enum) {
     node_scan: Scan,
@@ -148,7 +162,7 @@ pub const Operator = union(enum) {
     // shortest_path,
     join,
     semi_join,
-    optional_join: std.ArrayList(u16),
+    optional_join,
     anti,
     project: std.ArrayList(ProjectClause),
     // project_endpoints: ProjectEndpoints,
@@ -159,12 +173,12 @@ pub const Operator = union(enum) {
     skip: u64,
     sort: std.MultiArrayList(SortClause),
     top: u64, // unimplemented
-    aggregate: Aggregate,
     union_all,
     update: Update,
     insert_node: InsertNode,
     insert_edge: InsertEdge,
     delete: Delete,
+    aggregate: Aggregate,
     // group_aggregate,
 
     pub fn deinit(self: *Operator, allocator: Allocator) void {
@@ -179,7 +193,7 @@ pub const Operator = union(enum) {
             .repeat => {},
             .join => {},
             .semi_join => {},
-            .optional_join => |*n| n.deinit(allocator),
+            .optional_join => {},
             .anti => {},
             .project => |*n| {
                 for (n.items) |*c| c.deinit(allocator);
@@ -264,18 +278,7 @@ pub const Operator = union(enum) {
             .repeat => std.debug.panic("repeat unimplemented", .{}),
             .join => {},
             .semi_join => {},
-            .optional_join => |n| {
-                var first = true;
-                for (n.items) |ident| {
-                    if (first) {
-                        try writer.writeByte(' ');
-                    } else {
-                        try writer.writeAll(", ");
-                    }
-                    try writer.print("%{}", .{ident});
-                    first = false;
-                }
-            },
+            .optional_join => {},
             .anti => {},
             .project => |n| {
                 var first = true;
@@ -408,6 +411,30 @@ pub const Operator = union(enum) {
             .repeat, .semi_join, .optional_join, .join, .union_all => true,
             else => false,
         };
+    }
+
+    /// Append identifiers defined by this operator to the provided list.
+    pub fn appendDefinedIdents(self: Operator, allocator: Allocator, defined: *std.ArrayList(u16)) Allocator.Error!void {
+        switch (self) {
+            .node_scan => |n| try defined.append(allocator, n.ident),
+            .edge_scan => |n| try defined.append(allocator, n.ident),
+            .node_by_id => |n| try defined.append(allocator, n.ident_ref),
+            .edge_by_id => |n| try defined.append(allocator, n.ident_ref),
+            .step => |n| {
+                if (n.ident_edge) |ident| try defined.append(allocator, ident);
+                if (n.ident_dest) |ident| try defined.append(allocator, ident);
+            },
+            .argument => |n| try defined.append(allocator, n),
+            .project => |n| {
+                for (n.items) |c| try defined.append(allocator, c.ident);
+            },
+            .aggregate => |n| {
+                for (n.items.items) |c| try defined.append(allocator, c.ident);
+            },
+            .insert_node => |n| if (n.ident) |ident| try defined.append(allocator, ident),
+            .insert_edge => |n| if (n.ident) |ident| try defined.append(allocator, ident),
+            else => {},
+        }
     }
 };
 
@@ -835,4 +862,40 @@ test "subquery begin searches backward from join" {
     try plan.ops.append(allocator, .join);
 
     try std.testing.expectEqual(@as(?u32, 1), plan.subqueryBegin(3));
+}
+
+test "subquery defined idents collects right-side definitions" {
+    const allocator = std.testing.allocator;
+    var plan = Plan{};
+    defer plan.deinit(allocator);
+
+    try plan.ops.append(allocator, .{
+        .node_scan = .{
+            .ident = 0,
+            .label = null,
+        },
+    });
+    try plan.ops.append(allocator, .begin);
+    try plan.ops.append(allocator, .{
+        .step = .{
+            .ident_src = 0,
+            .ident_edge = 1,
+            .ident_dest = 2,
+            .direction = .right,
+            .edge_label = null,
+        },
+    });
+    var project = std.ArrayList(ProjectClause).empty;
+    errdefer {
+        for (project.items) |*clause| clause.deinit(allocator);
+        project.deinit(allocator);
+    }
+    try project.append(allocator, .{ .ident = 3, .exp = .{ .ident = 2 } });
+    try plan.ops.append(allocator, .{ .project = project });
+    project = .empty;
+    try plan.ops.append(allocator, .optional_join);
+
+    var defined = (try plan.subqueryDefinedIdents(allocator, 4)).?;
+    defer defined.deinit(allocator);
+    try std.testing.expectEqualSlices(u16, &.{ 1, 2, 3 }, defined.items);
 }

@@ -133,7 +133,6 @@ const Planner = struct {
     plan: Plan = .{},
     bindings: StringMap(PlanBinding) = .empty,
     next_ident: u16 = 0,
-    optional_idents: ?*std.ArrayList(u16) = null,
 
     fn deinit(self: *Planner) void {
         self.plan.deinit(self.gpa);
@@ -149,7 +148,6 @@ const Planner = struct {
 
     fn bind(self: *Planner, name: []const u8, kind: PlanBindingKind, ident: u16) Error!void {
         try self.bindings.put(self.gpa, name, .{ .ident = ident, .kind = kind });
-        if (self.optional_idents) |idents| try idents.append(self.gpa, ident);
     }
 
     fn get(self: *Planner, name: []const u8, kind: PlanBindingKind) Error!PlanBinding {
@@ -285,16 +283,8 @@ fn appendMatchPatterns(planner: *Planner, patterns: []Ast.PathPattern) Error!voi
 
 fn appendOptionalMatchClause(planner: *Planner, clause: Ast.MatchClause) Error!void {
     try planner.plan.ops.append(planner.gpa, .begin);
-
-    var optional_idents = std.ArrayList(u16).empty;
-    errdefer optional_idents.deinit(planner.gpa);
-    const previous = planner.optional_idents;
-    planner.optional_idents = &optional_idents;
-    defer planner.optional_idents = previous;
-
     try appendMatchClause(planner, clause);
-    try planner.plan.ops.append(planner.gpa, .{ .optional_join = optional_idents });
-    optional_idents = .empty;
+    try planner.plan.ops.append(planner.gpa, .optional_join);
 }
 
 fn appendInsertPath(planner: *Planner, pattern: Ast.PathPattern) Error!void {

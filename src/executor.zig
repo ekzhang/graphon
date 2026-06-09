@@ -28,7 +28,7 @@ const operator_impls = blk: {
         .{ Plan.Operator.begin, bool, null, join_ops.runBegin },
         .{ Plan.Operator.join, join_ops.JoinState, null, join_ops.runJoin },
         .{ Plan.Operator.semi_join, void, null, join_ops.runSemiJoin },
-        .{ Plan.Operator.optional_join, join_ops.OptionalJoinState, null, join_ops.runOptionalJoin },
+        .{ Plan.Operator.optional_join, join_ops.OptionalJoinState, join_ops.OptionalJoinState.deinit, join_ops.runOptionalJoin },
         .{ Plan.Operator.anti, bool, null, simple_ops.runAnti },
         .{ Plan.Operator.project, void, null, simple_ops.runProject },
         .{ Plan.Operator.empty_result, void, null, simple_ops.runEmptyResult },

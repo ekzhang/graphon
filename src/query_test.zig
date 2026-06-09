@@ -131,7 +131,7 @@ test "compile with optional match query plan snapshot" {
     try checkQueryPlanSnapshot("MATCH (p:Person) WITH DISTINCT p OPTIONAL MATCH (p)-[:Likes]->(f:Food) RETURN p.name, f.name", snap(@src(),
         \\Plan{%2, %3}
         \\  Project %2: %0.name, %3: %1.name
-        \\  OptionalJoin %1
+        \\  OptionalJoin
         \\    Filter %1: Food
         \\    Step (%0)-[:Likes]->(%1)
         \\  Begin
@@ -145,7 +145,7 @@ test "compile with aggregate query plan snapshot" {
         \\Plan{%3, %2}
         \\  Project %3: %0.name
         \\  Aggregate %2: count(%1) BY %0
-        \\  OptionalJoin %1
+        \\  OptionalJoin
         \\    Filter %1: Food
         \\    Step (%0)-[:Likes]->(%1)
         \\  Begin
