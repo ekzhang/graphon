@@ -179,7 +179,7 @@ pub const Operator = union(enum) {
     insert_edge: InsertEdge,
     delete: Delete,
     aggregate: Aggregate,
-    // group_aggregate,
+    // ordered_aggregate,
 
     pub fn deinit(self: *Operator, allocator: Allocator) void {
         switch (self.*) {

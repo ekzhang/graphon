@@ -146,6 +146,6 @@ Query plans are constructed out of the following operations. The design here was
 - `Update`: Set, add, or remove labels and properties from nodes and edges.
 - `Delete`: Delete a node or edge.
 - `Aggregate`: Compute aggregations, grouping by one or more columns.
-- `GroupAggregate`: Compute aggregations, where result table is already ordered into groups.
+- `OrderedAggregate`: Compute aggregations when input rows are already ordered by group key.
 
 There needs to be particular attention paid to graph algorithms to implement certain kinds of path queries efficiently, especially those that traverse paths or trails. We'll add new types of backend operations as Graphon's query language increases in expressivity.

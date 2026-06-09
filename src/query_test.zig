@@ -818,7 +818,7 @@ test "return numeric aggregates by group" {
     }
 }
 
-test "union can combine grouped aggregate branch results" {
+test "union can combine aggregate branch results with grouping" {
     var tmp = @import("test_helpers.zig").tmp();
     defer tmp.cleanup();
     const store = try tmp.store("test.db");
