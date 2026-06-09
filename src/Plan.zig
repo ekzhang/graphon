@@ -91,6 +91,7 @@ pub fn idents(self: Plan) u16 {
             .node_scan => |n| identsChk(&ret, .{n.ident}),
             .edge_scan => |n| identsChk(&ret, .{n.ident}),
             .step => |n| identsChk(&ret, .{ n.ident_edge, n.ident_dest }),
+            .step_between => |n| identsChk(&ret, .{n.ident_edge}),
             .argument => |n| identsChk(&ret, .{n}),
             .project => |n| {
                 for (n.items) |c| identsChk(&ret, .{c.ident});
@@ -155,7 +156,7 @@ pub const Operator = union(enum) {
     node_by_id: LookupId,
     edge_by_id: LookupId,
     step: Step,
-    // step_between,
+    step_between: StepBetween,
     begin,
     argument: u16, // unimplemented
     repeat, // unimplemented
@@ -188,6 +189,7 @@ pub const Operator = union(enum) {
             .node_by_id => {},
             .edge_by_id => {},
             .step => |*n| n.deinit(allocator),
+            .step_between => |*n| n.deinit(allocator),
             .begin => {},
             .argument => {},
             .repeat => {},
@@ -227,6 +229,7 @@ pub const Operator = union(enum) {
             .node_by_id => "NodeById",
             .edge_by_id => "EdgeById",
             .step => "Step",
+            .step_between => "StepBetween",
             .begin => "Begin",
             .argument => "Argument",
             .repeat => "Repeat",
@@ -266,6 +269,12 @@ pub const Operator = union(enum) {
                 try writer.print(" %{} -> %{}", .{ n.ident_id, n.ident_ref });
             },
             .step => |n| {
+                try writer.writeByte(' ');
+                try printNodeSpec(writer, n.ident_src, null);
+                try printEdgeSpec(writer, n.direction, n.ident_edge, n.edge_label);
+                try printNodeSpec(writer, n.ident_dest, null);
+            },
+            .step_between => |n| {
                 try writer.writeByte(' ');
                 try printNodeSpec(writer, n.ident_src, null);
                 try printEdgeSpec(writer, n.direction, n.ident_edge, n.edge_label);
@@ -424,6 +433,9 @@ pub const Operator = union(enum) {
                 if (n.ident_edge) |ident| try defined.append(allocator, ident);
                 if (n.ident_dest) |ident| try defined.append(allocator, ident);
             },
+            .step_between => |n| {
+                if (n.ident_edge) |ident| try defined.append(allocator, ident);
+            },
             .argument => |n| try defined.append(allocator, n),
             .project => |n| {
                 for (n.items) |c| try defined.append(allocator, c.ident);
@@ -512,6 +524,20 @@ pub const Step = struct {
     edge_label: ?[]u8, // Label to traverse on the edge.
 
     pub fn deinit(self: *Step, allocator: Allocator) void {
+        if (self.edge_label) |l| {
+            allocator.free(l);
+        }
+    }
+};
+
+pub const StepBetween = struct {
+    ident_src: u16, // Name of the starting node (input).
+    ident_edge: ?u16, // Name of the edge, to be bound (output).
+    ident_dest: u16, // Name of the ending node (input).
+    direction: EdgeDirection,
+    edge_label: ?[]u8, // Label to traverse on the edge.
+
+    pub fn deinit(self: *StepBetween, allocator: Allocator) void {
         if (self.edge_label) |l| {
             allocator.free(l);
         }
@@ -835,6 +861,32 @@ test "can create, free and print plan" {
     try checkPlanSnapshot(plan, snap(@src(),
         \\Plan{%1, %2}
         \\  Step (%0)~[%1:Likes]~>(%2)
+        \\  NodeScan (%0)
+    ));
+
+    try std.testing.expectEqual(3, plan.idents());
+}
+
+test "can print step between plan" {
+    const allocator = std.testing.allocator;
+    var plan = Plan{};
+    defer plan.deinit(allocator);
+
+    try plan.results.appendSlice(allocator, &[_]u16{ 0, 1, 2 });
+    try plan.ops.append(allocator, .{ .node_scan = .{ .ident = 0, .label = null } });
+    try plan.ops.append(allocator, .{ .node_scan = .{ .ident = 1, .label = null } });
+    try plan.ops.append(allocator, .{ .step_between = .{
+        .ident_src = 0,
+        .ident_edge = 2,
+        .ident_dest = 1,
+        .direction = .right,
+        .edge_label = try allocator.dupe(u8, "Knows"),
+    } });
+
+    try checkPlanSnapshot(plan, snap(@src(),
+        \\Plan{%0, %1, %2}
+        \\  StepBetween (%0)-[%2:Knows]->(%1)
+        \\  NodeScan (%1)
         \\  NodeScan (%0)
     ));
 

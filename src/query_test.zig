@@ -117,8 +117,42 @@ test "compile comma match query plan snapshot" {
 test "compile repeated node path query plan snapshot" {
     try checkQueryPlanSnapshot("MATCH (a:Person)->[:Knows]->(a) RETURN a", snap(@src(),
         \\Plan{%0}
-        \\  Filter (%1 = %0)
-        \\  Step (%0)-[:Knows]->(%1)
+        \\  StepBetween (%0)-[:Knows]->(%0)
+        \\  NodeScan (%0:Person)
+    ));
+}
+
+test "compile repeated node path with edge filters query plan snapshot" {
+    try checkQueryPlanSnapshot("MATCH (a:Person)-[e:Knows {since: 2024}]->(a) RETURN e", snap(@src(),
+        \\Plan{%1}
+        \\  Filter (%1.since = 2024)
+        \\  StepBetween (%0)-[%1:Knows]->(%0)
+        \\  NodeScan (%0:Person)
+    ));
+}
+
+test "compile bound endpoint path query plan snapshot" {
+    try checkQueryPlanSnapshot("MATCH (a:Person), (b:Person), (a)-[e:Knows]->(b) RETURN a, b, e", snap(@src(),
+        \\Plan{%0, %1, %2}
+        \\  Join
+        \\    StepBetween (%0)-[%2:Knows]->(%1)
+        \\  Begin
+        \\  Join
+        \\    NodeScan (%1:Person)
+        \\  Begin
+        \\  NodeScan (%0:Person)
+    ));
+}
+
+test "compile optional bound endpoint path query plan snapshot" {
+    try checkQueryPlanSnapshot("MATCH (a:Person), (b:Person) OPTIONAL MATCH (a)-[e:Knows]->(b) RETURN e", snap(@src(),
+        \\Plan{%2}
+        \\  OptionalJoin
+        \\    StepBetween (%0)-[%2:Knows]->(%1)
+        \\  Begin
+        \\  Join
+        \\    NodeScan (%1:Person)
+        \\  Begin
         \\  NodeScan (%0:Person)
     ));
 }

@@ -792,7 +792,7 @@ fn appendPathSegment(planner: *Planner, current: u16, segment: Ast.PathSegment) 
         planner.allocIdent()
     else
         null;
-    const dest_ident = planner.allocIdent();
+    const dest_ident = existing_dest orelse planner.allocIdent();
 
     if (segment.edge.variable) |name| {
         if (existing_edge == null) try planner.bind(name, .edge, edge_ident.?);
@@ -803,19 +803,29 @@ fn appendPathSegment(planner: *Planner, current: u16, segment: Ast.PathSegment) 
 
     var edge_label: ?[]u8 = if (segment.edge.label) |label| try planner.gpa.dupe(u8, label) else null;
     errdefer if (edge_label) |label| planner.gpa.free(label);
-    try planner.plan.ops.append(planner.gpa, .{ .step = .{
-        .ident_src = current,
-        .ident_edge = edge_ident,
-        .ident_dest = dest_ident,
-        .direction = segment.edge.direction,
-        .edge_label = edge_label,
-    } });
+    if (existing_dest != null) {
+        try appendNodeFilters(planner, dest_ident, segment.node, false);
+        try planner.plan.ops.append(planner.gpa, .{ .step_between = .{
+            .ident_src = current,
+            .ident_edge = edge_ident,
+            .ident_dest = dest_ident,
+            .direction = segment.edge.direction,
+            .edge_label = edge_label,
+        } });
+    } else {
+        try planner.plan.ops.append(planner.gpa, .{ .step = .{
+            .ident_src = current,
+            .ident_edge = edge_ident,
+            .ident_dest = dest_ident,
+            .direction = segment.edge.direction,
+            .edge_label = edge_label,
+        } });
+        try appendNodeFilters(planner, dest_ident, segment.node, false);
+    }
     edge_label = null;
 
     if (edge_ident) |ident| try appendEdgeFilters(planner, ident, segment.edge);
     if (existing_edge) |ident| try appendIdentEqualityFilter(planner, edge_ident.?, ident);
-    try appendNodeFilters(planner, dest_ident, segment.node, false);
-    if (existing_dest) |ident| try appendIdentEqualityFilter(planner, dest_ident, ident);
     return dest_ident;
 }
 

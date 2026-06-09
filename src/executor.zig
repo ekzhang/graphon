@@ -25,6 +25,7 @@ const operator_impls = blk: {
         .{ Plan.Operator.node_by_id, void, null, simple_ops.runNodeById },
         .{ Plan.Operator.edge_by_id, void, null, simple_ops.runEdgeById },
         .{ Plan.Operator.step, step_ops.StepState, step_ops.StepState.deinit, step_ops.runStep },
+        .{ Plan.Operator.step_between, step_ops.StepState, step_ops.StepState.deinit, step_ops.runStepBetween },
         .{ Plan.Operator.begin, bool, null, join_ops.runBegin },
         .{ Plan.Operator.join, join_ops.JoinState, null, join_ops.runJoin },
         .{ Plan.Operator.semi_join, void, null, join_ops.runSemiJoin },
