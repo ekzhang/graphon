@@ -162,7 +162,23 @@ const Session = struct {
         const source_z = try self.gpa.dupeZ(u8, source);
         defer self.gpa.free(source_z);
 
-        var result = executeQuery(self.gpa, self.store, source_z) catch |err| {
+        var prepared = query.prepare(self.gpa, source_z) catch |err| {
+            try self.fail(writer, @errorName(err));
+            return;
+        };
+        defer prepared.deinit(self.gpa);
+
+        if (prepared.takeParseErrors()) |errors| {
+            var parse_errors = errors;
+            defer parse_errors.deinit(self.gpa);
+            var diagnostics = std.Io.Writer.Allocating.init(self.gpa);
+            defer diagnostics.deinit();
+            try parse_errors.render(&diagnostics.writer);
+            try self.fail(writer, diagnostics.written());
+            return;
+        }
+
+        var result = executePrepared(self.gpa, self.store, &prepared) catch |err| {
             try self.fail(writer, @errorName(err));
             return;
         };
@@ -204,15 +220,16 @@ const Session = struct {
     }
 };
 
-fn executeQuery(gpa: Allocator, store: storage.Storage, source: [:0]const u8) query.Error!query.ResultSet {
-    var prepared = try query.prepare(gpa, source);
-    defer prepared.deinit(gpa);
-
+fn executePrepared(
+    gpa: Allocator,
+    store: storage.Storage,
+    prepared: *const query.CompiledProgram,
+) query.Error!query.ResultSet {
     const txn = store.txn();
     defer txn.close();
     errdefer txn.rollback() catch {};
 
-    var result = try query.execute(gpa, txn, &prepared);
+    var result = try query.execute(gpa, txn, prepared);
     errdefer result.deinit(gpa);
     try txn.commit();
     return result;

@@ -33,11 +33,12 @@ fn execForTest(store: storage.Storage, source: [:0]const u8) !ResultSet {
 fn checkQueryPlanSnapshot(source: [:0]const u8, want: Snap) !void {
     var compiled = try prepare(std.testing.allocator, source);
     defer compiled.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 1), compiled.statements.len);
+    const statements = try compiled.statements();
+    try std.testing.expectEqual(@as(usize, 1), statements.len);
 
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
-    try compiled.statements[0].plan.print(&out.writer);
+    try statements[0].plan.print(&out.writer);
     try want.diff(out.written());
 }
 
@@ -411,6 +412,29 @@ test "union rejects mismatched result column counts" {
     try std.testing.expectError(error.Unsupported, prepare(std.testing.allocator, "RETURN 1 UNION RETURN 1, 2"));
 }
 
+test "prepare carries parser diagnostics" {
+    var tmp = @import("test_helpers.zig").tmp();
+    defer tmp.cleanup();
+    const store = try tmp.store("test.db");
+    defer store.db.close();
+
+    var prepared = try prepare(std.testing.allocator, "RETURN 1 LIMIT 2.5");
+    defer prepared.deinit(std.testing.allocator);
+
+    switch (prepared.value) {
+        .parse_errors => |errors| {
+            try std.testing.expectEqual(@as(usize, 1), errors.errors.len);
+            try std.testing.expectEqual(.expected_count, errors.errors[0].tag);
+        },
+        .statements => try std.testing.expect(false),
+    }
+
+    const txn = store.txn();
+    defer txn.close();
+    defer txn.rollback() catch {};
+    try std.testing.expectError(error.InvalidSyntax, execute(std.testing.allocator, txn, &prepared));
+}
+
 test "execute cleans prior result when later statement fails" {
     var tmp = @import("test_helpers.zig").tmp();
     defer tmp.cleanup();
@@ -461,14 +485,15 @@ test "statement cursor pulls rows without materializing result set" {
 
     var prepared = try prepare(std.testing.allocator, "MATCH (p:Person) RETURN p.name ORDER BY p.name");
     defer prepared.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 1), prepared.statements.len);
+    const statements = try prepared.statements();
+    try std.testing.expectEqual(@as(usize, 1), statements.len);
 
     const txn = store.txn();
     defer txn.close();
     errdefer txn.rollback() catch {};
 
     {
-        var cursor = try StatementCursor.init(std.testing.allocator, txn, &prepared.statements[0]);
+        var cursor = try StatementCursor.init(std.testing.allocator, txn, &statements[0]);
         defer cursor.deinit();
         try std.testing.expectEqual(StatementResultKind.rows, cursor.kind());
         try std.testing.expectEqual(@as(usize, 1), cursor.columns().len);
@@ -503,14 +528,15 @@ test "statement cursor pulls mutation count" {
 
     var prepared = try prepare(std.testing.allocator, "MATCH (p:Person) FINISH");
     defer prepared.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 1), prepared.statements.len);
+    const statements = try prepared.statements();
+    try std.testing.expectEqual(@as(usize, 1), statements.len);
 
     const txn = store.txn();
     defer txn.close();
     errdefer txn.rollback() catch {};
 
     {
-        var cursor = try StatementCursor.init(std.testing.allocator, txn, &prepared.statements[0]);
+        var cursor = try StatementCursor.init(std.testing.allocator, txn, &statements[0]);
         defer cursor.deinit();
         try std.testing.expectEqual(StatementResultKind.mutation, cursor.kind());
         try std.testing.expectEqual(@as(usize, 0), cursor.columns().len);

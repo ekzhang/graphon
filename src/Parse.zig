@@ -13,18 +13,24 @@ const EdgeDirection = @import("types.zig").EdgeDirection;
 
 const Parse = @This();
 
-/// An error occurred while parsing.
-pub const Error = error{ParseError} || Allocator.Error;
+pub const Error = Allocator.Error;
+const InternalError = Error || error{ParseFailed};
 
 gpa: Allocator,
 source: [:0]const u8,
 tokens: Ast.TokenList.Slice = .empty,
+errors: std.ArrayList(Ast.Error) = .empty,
 tok_i: u32 = 0,
 
 pub fn parse(p: *Parse) Error!Ast.Program {
     p.deinitTokens();
-    try p.tokenize();
+    p.deinitErrors();
+    p.tokenize() catch |err| switch (err) {
+        error.ParseFailed => {},
+        error.OutOfMemory => return error.OutOfMemory,
+    };
     defer p.deinitTokens();
+    defer p.deinitErrors();
 
     var statements = std.ArrayList(Ast.Statement).empty;
     errdefer {
@@ -32,28 +38,54 @@ pub fn parse(p: *Parse) Error!Ast.Program {
         statements.deinit(p.gpa);
     }
 
-    while (!p.at(.eof)) {
-        if (p.eat(.semicolon)) continue;
-        var statement: ?Ast.Statement = try p.parseStatement();
-        errdefer if (statement) |*s| s.deinit(p.gpa);
-        try statements.append(p.gpa, statement.?);
-        statement = null;
-        _ = p.eat(.semicolon);
+    if (p.errors.items.len == 0) {
+        while (!p.at(.eof)) {
+            if (p.eat(.semicolon)) continue;
+            var statement: ?Ast.Statement = p.parseStatement() catch |err| switch (err) {
+                error.ParseFailed => break,
+                error.OutOfMemory => return error.OutOfMemory,
+            };
+            errdefer if (statement) |*s| s.deinit(p.gpa);
+            try statements.append(p.gpa, statement.?);
+            statement = null;
+            _ = p.eat(.semicolon);
+        }
     }
 
-    return .{ .statements = try statements.toOwnedSlice(p.gpa) };
+    const owned_statements = try statements.toOwnedSlice(p.gpa);
+    errdefer {
+        for (owned_statements) |*statement| statement.deinit(p.gpa);
+        p.gpa.free(owned_statements);
+    }
+    const owned_errors = try p.errors.toOwnedSlice(p.gpa);
+    p.errors = .empty;
+    return .{ .source = p.source, .statements = owned_statements, .errors = owned_errors };
 }
 
-fn tokenize(p: *Parse) Error!void {
+fn tokenize(p: *Parse) InternalError!void {
     var toks: Ast.TokenList = .empty;
     errdefer toks.deinit(p.gpa);
     var t = tokenizer.Tokenizer.init(p.source);
     while (true) {
         const token = t.next();
-        if (token.tag == .invalid) return error.ParseError;
-        const start = std.math.cast(Ast.ByteOffset, token.loc.start) orelse return error.ParseError;
+        const start = std.math.cast(Ast.ByteOffset, token.loc.start) orelse {
+            try p.addError(.{
+                .tag = .invalid_token,
+                .offset = std.math.maxInt(Ast.ByteOffset),
+                .found = token.tag,
+            });
+            return error.ParseFailed;
+        };
         try toks.append(p.gpa, .{ .tag = token.tag, .start = start });
+        if (token.tag == .invalid) {
+            try p.addError(.{ .tag = .invalid_token, .offset = start, .found = token.tag });
+            break;
+        }
         if (token.tag == .eof) break;
+    }
+    if (toks.items(.tag)[toks.len - 1] != .eof) {
+        const eof_start = std.math.cast(Ast.ByteOffset, p.source.len) orelse std.math.maxInt(Ast.ByteOffset);
+        try toks.append(p.gpa, .{ .tag = .eof, .start = eof_start });
     }
 
     p.tokens = toks.toOwnedSlice();
@@ -66,7 +98,36 @@ fn deinitTokens(p: *Parse) void {
     p.tok_i = 0;
 }
 
-fn parseStatement(p: *Parse) Error!Ast.Statement {
+fn deinitErrors(p: *Parse) void {
+    p.errors.deinit(p.gpa);
+    p.errors = .empty;
+}
+
+fn addError(p: *Parse, err: Ast.Error) Allocator.Error!void {
+    try p.errors.append(p.gpa, err);
+}
+
+fn fail(p: *Parse, tag: Ast.Error.Tag) InternalError {
+    try p.addErrorAt(p.tok_i, tag, null);
+    return error.ParseFailed;
+}
+
+fn failExpected(p: *Parse, expected: Ast.Token.Tag) InternalError {
+    try p.addErrorAt(p.tok_i, .expected_token, expected);
+    return error.ParseFailed;
+}
+
+fn addErrorAt(p: *Parse, tok: u32, tag: Ast.Error.Tag, expected: ?Ast.Token.Tag) Allocator.Error!void {
+    const token_tag = p.tokenTag(tok);
+    try p.addError(.{
+        .tag = tag,
+        .offset = @intCast(p.tokenStart(tok)),
+        .found = token_tag,
+        .expected = expected,
+    });
+}
+
+fn parseStatement(p: *Parse) InternalError!Ast.Statement {
     var statement: ?Ast.Statement = try p.parseSingleStatement();
     errdefer if (statement) |*s| s.deinit(p.gpa);
 
@@ -102,7 +163,7 @@ fn parseStatement(p: *Parse) Error!Ast.Statement {
     return out;
 }
 
-fn parseSingleStatement(p: *Parse) Error!Ast.Statement {
+fn parseSingleStatement(p: *Parse) InternalError!Ast.Statement {
     if (p.eat(.keyword_return)) {
         return .{ .query = .{ .single = .{ .return_only = try p.parseReturnClause() } } };
     }
@@ -149,10 +210,10 @@ fn parseSingleStatement(p: *Parse) Error!Ast.Statement {
             else => .{ .mutation = .{ .match = query } },
         };
     }
-    return error.ParseError;
+    return p.fail(.expected_statement);
 }
 
-fn parseQueryBody(p: *Parse) Error!Ast.QueryBody {
+fn parseQueryBody(p: *Parse) InternalError!Ast.QueryBody {
     var statement: ?Ast.Statement = try p.parseSingleStatement();
     errdefer if (statement) |*s| s.deinit(p.gpa);
     const owned_statement = statement.?;
@@ -161,25 +222,25 @@ fn parseQueryBody(p: *Parse) Error!Ast.QueryBody {
     return row;
 }
 
-fn takeQueryBody(p: *Parse, statement: Ast.Statement) Error!Ast.QueryBody {
+fn takeQueryBody(p: *Parse, statement: Ast.Statement) InternalError!Ast.QueryBody {
     switch (statement) {
         .query => |query| switch (query) {
             .single => |body| return body,
             .union_query => {
                 var owned = query;
                 owned.deinit(p.gpa);
-                return error.ParseError;
+                return p.fail(.unexpected_statement);
             },
         },
         .mutation => |mutation| {
             var owned = mutation;
             owned.deinit(p.gpa);
-            return error.ParseError;
+            return p.fail(.expected_query_statement);
         },
     }
 }
 
-fn parseReadQueryFromFirst(p: *Parse, first: Ast.ReadClause) Error!Ast.ReadQuery {
+fn parseReadQueryFromFirst(p: *Parse, first: Ast.ReadClause) InternalError!Ast.ReadQuery {
     var clauses = std.ArrayList(Ast.ReadClause).empty;
     errdefer {
         for (clauses.items) |*clause| clause.deinit(p.gpa);
@@ -217,12 +278,12 @@ fn parseReadQueryFromFirst(p: *Parse, first: Ast.ReadClause) Error!Ast.ReadQuery
             ret = null;
             return out;
         } else {
-            return error.ParseError;
+            return p.fail(.expected_read_clause);
         }
     }
 }
 
-fn parseMatchClauseAfterKeyword(p: *Parse) Error!Ast.MatchClause {
+fn parseMatchClauseAfterKeyword(p: *Parse) InternalError!Ast.MatchClause {
     const patterns = try p.parsePatternListUntilAction();
     errdefer Ast.deinitPatterns(patterns, p.gpa);
     var where: ?Ast.WherePredicate = null;
@@ -233,7 +294,7 @@ fn parseMatchClauseAfterKeyword(p: *Parse) Error!Ast.MatchClause {
     return .{ .patterns = patterns, .where = where };
 }
 
-fn parseMatchAction(p: *Parse) Error!Ast.MatchAction {
+fn parseMatchAction(p: *Parse) InternalError!Ast.MatchAction {
     if (p.eat(.keyword_return)) return .{ .ret = try p.parseReturnClause() };
     if (p.eat(.keyword_insert)) return .{ .insert = try p.parsePatternListUntilAction() };
     if (p.eat(.keyword_finish)) return .finish;
@@ -250,10 +311,10 @@ fn parseMatchAction(p: *Parse) Error!Ast.MatchAction {
         }
         return .{ .delete = .{ .detach = detach, .variables = try vars.toOwnedSlice(p.gpa) } };
     }
-    return error.ParseError;
+    return p.fail(.expected_match_action);
 }
 
-fn parseSetClauses(p: *Parse) Error![]Ast.SetClause {
+fn parseSetClauses(p: *Parse) InternalError![]Ast.SetClause {
     var clauses = std.ArrayList(Ast.SetClause).empty;
     errdefer {
         for (clauses.items) |*clause| clause.deinit(p.gpa);
@@ -273,7 +334,7 @@ fn parseSetClauses(p: *Parse) Error![]Ast.SetClause {
     return try clauses.toOwnedSlice(p.gpa);
 }
 
-fn parseReturnClause(p: *Parse) Error!Ast.ReturnClause {
+fn parseReturnClause(p: *Parse) InternalError!Ast.ReturnClause {
     const distinct = p.eat(.keyword_distinct);
     const items = try p.parseReturnItems();
     var ret = Ast.ReturnClause{ .items = items, .distinct = distinct };
@@ -296,7 +357,7 @@ fn parseReturnClause(p: *Parse) Error!Ast.ReturnClause {
     return out;
 }
 
-fn parseSortItems(p: *Parse) Error![]Ast.SortItem {
+fn parseSortItems(p: *Parse) InternalError![]Ast.SortItem {
     var items = std.ArrayList(Ast.SortItem).empty;
     errdefer {
         for (items.items) |*item| item.deinit(p.gpa);
@@ -315,11 +376,11 @@ fn parseSortItems(p: *Parse) Error![]Ast.SortItem {
         expr = null;
         if (!p.eat(.comma)) break;
     }
-    if (items.items.len == 0) return error.ParseError;
+    if (items.items.len == 0) return p.fail(.expected_sort_item);
     return try items.toOwnedSlice(p.gpa);
 }
 
-fn parseReturnItems(p: *Parse) Error![]Ast.ReturnItem {
+fn parseReturnItems(p: *Parse) InternalError![]Ast.ReturnItem {
     var items = std.ArrayList(Ast.ReturnItem).empty;
     errdefer {
         for (items.items) |*item| item.deinit(p.gpa);
@@ -333,23 +394,32 @@ fn parseReturnItems(p: *Parse) Error![]Ast.ReturnItem {
         expr = null;
         if (!p.eat(.comma)) break;
     }
-    if (items.items.len == 0) return error.ParseError;
+    if (items.items.len == 0) return p.fail(.expected_return_item);
     return try items.toOwnedSlice(p.gpa);
 }
 
-fn parseCount(p: *Parse) Error!usize {
+fn parseCount(p: *Parse) InternalError!usize {
     const tok = p.next();
-    if (p.tokenTag(tok) != .number_literal) return error.ParseError;
+    if (p.tokenTag(tok) != .number_literal) {
+        try p.addErrorAt(tok, .expected_count, null);
+        return error.ParseFailed;
+    }
     const s = p.slice(tok);
-    if (std.mem.indexOfScalar(u8, s, '.') != null) return error.ParseError;
-    return std.fmt.parseInt(usize, s, 10) catch return error.ParseError;
+    if (std.mem.indexOfScalar(u8, s, '.') != null) {
+        try p.addErrorAt(tok, .expected_count, null);
+        return error.ParseFailed;
+    }
+    return std.fmt.parseInt(usize, s, 10) catch {
+        try p.addErrorAt(tok, .invalid_integer, null);
+        return error.ParseFailed;
+    };
 }
 
-fn parsePatternListUntilAction(p: *Parse) Error![]Ast.PathPattern {
+fn parsePatternListUntilAction(p: *Parse) InternalError![]Ast.PathPattern {
     return p.parsePatternListUntilActionWith(.{});
 }
 
-fn parseInsertPatternListUntilAction(p: *Parse) Error![]Ast.PathPattern {
+fn parseInsertPatternListUntilAction(p: *Parse) InternalError![]Ast.PathPattern {
     return p.parsePatternListUntilActionWith(.{
         .require_explicit_start_node = true,
         .require_explicit_end_node = true,
@@ -357,7 +427,7 @@ fn parseInsertPatternListUntilAction(p: *Parse) Error![]Ast.PathPattern {
     });
 }
 
-fn parsePatternListUntilActionWith(p: *Parse, options: PathPatternOptions) Error![]Ast.PathPattern {
+fn parsePatternListUntilActionWith(p: *Parse, options: PathPatternOptions) InternalError![]Ast.PathPattern {
     var patterns = std.ArrayList(Ast.PathPattern).empty;
     errdefer {
         for (patterns.items) |*pattern| pattern.deinit(p.gpa);
@@ -370,11 +440,11 @@ fn parsePatternListUntilActionWith(p: *Parse, options: PathPatternOptions) Error
         pattern = null;
         if (!p.eat(.comma)) break;
     }
-    if (patterns.items.len == 0) return error.ParseError;
+    if (patterns.items.len == 0) return p.fail(.expected_path_pattern);
     return try patterns.toOwnedSlice(p.gpa);
 }
 
-fn parsePathPattern(p: *Parse) Error!Ast.PathPattern {
+fn parsePathPattern(p: *Parse) InternalError!Ast.PathPattern {
     return p.parsePathPatternWith(.{});
 }
 
@@ -385,7 +455,7 @@ const PathPatternOptions = struct {
     require_insert_edge_directions: bool = false,
 };
 
-fn parsePathPatternWith(p: *Parse, options: PathPatternOptions) Error!Ast.PathPattern {
+fn parsePathPatternWith(p: *Parse, options: PathPatternOptions) InternalError!Ast.PathPattern {
     var start = Ast.NodePattern{};
     var start_owned = false;
     errdefer if (start_owned) start.deinit(p.gpa);
@@ -395,17 +465,17 @@ fn parsePathPatternWith(p: *Parse, options: PathPatternOptions) Error!Ast.PathPa
         start = try p.parseNodePattern();
         start_owned = true;
     } else if (options.require_explicit_start_node) {
-        return error.ParseError;
+        return p.fail(.expected_insert_edge_endpoint);
     }
 
     var parsed_segments = try p.parsePathSegments();
     errdefer deinitPathSegments(parsed_segments.segments, p.gpa);
 
-    if (options.require_edge and parsed_segments.segments.len == 0) return error.ParseError;
-    if (options.require_explicit_end_node and !parsed_segments.explicit_end_node) return error.ParseError;
+    if (options.require_edge and parsed_segments.segments.len == 0) return p.fail(.expected_edge_pattern);
+    if (options.require_explicit_end_node and !parsed_segments.explicit_end_node) return p.fail(.expected_insert_edge_endpoint);
     if (options.require_insert_edge_directions) {
         for (parsed_segments.segments) |segment| {
-            if (!isInsertEdgeDirection(segment.edge.direction)) return error.ParseError;
+            if (!isInsertEdgeDirection(segment.edge.direction)) return p.fail(.expected_insert_edge_direction);
         }
     }
 
@@ -427,7 +497,7 @@ const ParsedPathSegments = struct {
     explicit_end_node: bool,
 };
 
-fn parsePathSegments(p: *Parse) Error!ParsedPathSegments {
+fn parsePathSegments(p: *Parse) InternalError!ParsedPathSegments {
     var segments = std.ArrayList(Ast.PathSegment).empty;
     var explicit_end_node = true;
     errdefer {
@@ -457,7 +527,7 @@ fn deinitPathSegments(segments: []Ast.PathSegment, gpa: Allocator) void {
     gpa.free(segments);
 }
 
-fn parseWherePredicate(p: *Parse) Error!Ast.WherePredicate {
+fn parseWherePredicate(p: *Parse) InternalError!Ast.WherePredicate {
     const start = p.tok_i;
     if (p.eat(.keyword_not)) {
         if (try p.isPathPredicateStart()) {
@@ -471,11 +541,11 @@ fn parseWherePredicate(p: *Parse) Error!Ast.WherePredicate {
     return .{ .expr = try p.parseExpr(0) };
 }
 
-fn parsePathPredicate(p: *Parse) Error!Ast.PathPattern {
+fn parsePathPredicate(p: *Parse) InternalError!Ast.PathPattern {
     return p.parsePathPatternWith(.{ .require_edge = true });
 }
 
-fn parseNodePattern(p: *Parse) Error!Ast.NodePattern {
+fn parseNodePattern(p: *Parse) InternalError!Ast.NodePattern {
     try p.expect(.l_paren);
     var node = Ast.NodePattern{};
     errdefer node.deinit(p.gpa);
@@ -492,7 +562,7 @@ fn parseNodePattern(p: *Parse) Error!Ast.NodePattern {
     return node;
 }
 
-fn parseEdgePattern(p: *Parse) Error!Ast.EdgePattern {
+fn parseEdgePattern(p: *Parse) InternalError!Ast.EdgePattern {
     const EdgeStart = enum { minus, left_arrow, tilde, left_arrow_tilde };
 
     var direction: EdgeDirection = .any;
@@ -559,7 +629,7 @@ fn parseEdgePattern(p: *Parse) Error!Ast.EdgePattern {
             direction = .any;
             bracketed = false;
         },
-        else => return error.ParseError,
+        else => return p.fail(.expected_edge_pattern),
     }
 
     var edge = Ast.EdgePattern{ .direction = direction };
@@ -575,6 +645,7 @@ fn parseEdgePattern(p: *Parse) Error!Ast.EdgePattern {
         }
         if (p.at(.l_brace)) edge.properties = try p.parseProperties();
 
+        const close_tok = p.tok_i;
         const close = p.peek();
         switch (close) {
             .bracket_right_arrow => {
@@ -582,7 +653,10 @@ fn parseEdgePattern(p: *Parse) Error!Ast.EdgePattern {
                 edge.direction = switch (start) {
                     .minus => .right,
                     .left_arrow => .left_or_right,
-                    .tilde, .left_arrow_tilde => return error.ParseError,
+                    .tilde, .left_arrow_tilde => {
+                        try p.addErrorAt(close_tok, .expected_edge_pattern, null);
+                        return error.ParseFailed;
+                    },
                 };
             },
             .right_bracket_minus => {
@@ -590,7 +664,10 @@ fn parseEdgePattern(p: *Parse) Error!Ast.EdgePattern {
                 edge.direction = switch (start) {
                     .minus => .any,
                     .left_arrow => .left,
-                    .tilde, .left_arrow_tilde => return error.ParseError,
+                    .tilde, .left_arrow_tilde => {
+                        try p.addErrorAt(close_tok, .expected_edge_pattern, null);
+                        return error.ParseFailed;
+                    },
                 };
             },
             .right_bracket_tilde => {
@@ -598,27 +675,33 @@ fn parseEdgePattern(p: *Parse) Error!Ast.EdgePattern {
                 edge.direction = switch (start) {
                     .tilde => .undirected,
                     .left_arrow_tilde => .left_or_undirected,
-                    .minus, .left_arrow => return error.ParseError,
+                    .minus, .left_arrow => {
+                        try p.addErrorAt(close_tok, .expected_edge_pattern, null);
+                        return error.ParseFailed;
+                    },
                 };
             },
             .bracket_tilde_right_arrow => {
                 _ = p.next();
                 edge.direction = switch (start) {
                     .tilde => .right_or_undirected,
-                    .minus, .left_arrow, .left_arrow_tilde => return error.ParseError,
+                    .minus, .left_arrow, .left_arrow_tilde => {
+                        try p.addErrorAt(close_tok, .expected_edge_pattern, null);
+                        return error.ParseFailed;
+                    },
                 };
             },
             .r_bracket => {
                 _ = p.next();
                 edge.direction = direction;
             },
-            else => return error.ParseError,
+            else => return p.fail(.expected_edge_pattern),
         }
     }
     return edge;
 }
 
-fn parseProperties(p: *Parse) Error![]Ast.Property {
+fn parseProperties(p: *Parse) InternalError![]Ast.Property {
     try p.expect(.l_brace);
     var properties = std.ArrayList(Ast.Property).empty;
     errdefer {
@@ -640,7 +723,7 @@ fn parseProperties(p: *Parse) Error![]Ast.Property {
     return try properties.toOwnedSlice(p.gpa);
 }
 
-fn parseExpr(p: *Parse, min_prec: u8) Error!Ast.Expr {
+fn parseExpr(p: *Parse, min_prec: u8) InternalError!Ast.Expr {
     var left = try p.parseUnary();
     errdefer left.deinit(p.gpa);
 
@@ -657,7 +740,7 @@ fn parseExpr(p: *Parse, min_prec: u8) Error!Ast.Expr {
     return left;
 }
 
-fn parseUnary(p: *Parse) Error!Ast.Expr {
+fn parseUnary(p: *Parse) InternalError!Ast.Expr {
     if (p.eat(.keyword_not)) {
         var operand: ?Ast.Expr = try p.parseExpr(3);
         errdefer if (operand) |*expr| expr.deinit(p.gpa);
@@ -669,16 +752,22 @@ fn parseUnary(p: *Parse) Error!Ast.Expr {
     return p.parsePrimary();
 }
 
-fn parsePrimary(p: *Parse) Error!Ast.Expr {
+fn parsePrimary(p: *Parse) InternalError!Ast.Expr {
     const tok = p.next();
     const tag = p.tokenTag(tok);
     switch (tag) {
         .number_literal => {
             const s = p.slice(tok);
             if (std.mem.indexOfScalar(u8, s, '.') != null) {
-                return .{ .literal = .{ .float64 = std.fmt.parseFloat(f64, s) catch return error.ParseError } };
+                return .{ .literal = .{ .float64 = std.fmt.parseFloat(f64, s) catch {
+                    try p.addErrorAt(tok, .invalid_float, null);
+                    return error.ParseFailed;
+                } } };
             }
-            return .{ .literal = .{ .int64 = std.fmt.parseInt(i64, s, 10) catch return error.ParseError } };
+            return .{ .literal = .{ .int64 = std.fmt.parseInt(i64, s, 10) catch {
+                try p.addErrorAt(tok, .invalid_integer, null);
+                return error.ParseFailed;
+            } } };
         },
         .string_literal => return .{ .literal = .{ .string = try p.unquoteString(p.slice(tok)) } },
         .keyword_true => return .{ .literal = .{ .bool = true } },
@@ -690,7 +779,10 @@ fn parsePrimary(p: *Parse) Error!Ast.Expr {
             return expr;
         },
         else => {
-            if (!isNameToken(tag)) return error.ParseError;
+            if (!isNameToken(tag)) {
+                try p.addErrorAt(tok, .expected_expression, null);
+                return error.ParseFailed;
+            }
             const name = p.slice(tok);
             if (p.eat(.l_paren)) {
                 return p.parseCall(tag);
@@ -703,21 +795,21 @@ fn parsePrimary(p: *Parse) Error!Ast.Expr {
     }
 }
 
-fn parseCall(p: *Parse, tag: Ast.Token.Tag) Error!Ast.Expr {
+fn parseCall(p: *Parse, tag: Ast.Token.Tag) InternalError!Ast.Expr {
     const function: Plan.AggregateFunction = switch (tag) {
         .keyword_count => .count,
         .keyword_sum => .sum,
         .keyword_avg => .avg,
         .keyword_min => .min,
         .keyword_max => .max,
-        else => return error.ParseError,
+        else => return p.fail(.expected_expression),
     };
 
     const distinct = p.eat(.keyword_distinct);
     var argument: ?Ast.Expr = null;
     errdefer if (argument) |*arg| arg.deinit(p.gpa);
     if (p.eat(.asterisk)) {
-        if (function != .count or distinct) return error.ParseError;
+        if (function != .count or distinct) return p.fail(.invalid_aggregate_argument);
         argument = null;
     } else {
         argument = try p.parseExpr(0);
@@ -730,12 +822,12 @@ fn parseCall(p: *Parse, tag: Ast.Token.Tag) Error!Ast.Expr {
     return .{ .aggregate = aggregate };
 }
 
-fn unquoteString(p: *Parse, s: []const u8) Error![]u8 {
-    if (s.len < 2) return error.ParseError;
+fn unquoteString(p: *Parse, s: []const u8) InternalError![]u8 {
+    if (s.len < 2) return p.fail(.invalid_string);
     var start: usize = 1;
     const delimiter = s[0];
     if (delimiter == '@') {
-        if (s.len < 3) return error.ParseError;
+        if (s.len < 3) return p.fail(.invalid_string);
         start = 2;
     }
     const end = s.len - 1;
@@ -807,14 +899,18 @@ fn edgeStartsHere(p: *Parse) bool {
     };
 }
 
-fn isPathPredicateStart(p: *Parse) Error!bool {
+fn isPathPredicateStart(p: *Parse) InternalError!bool {
     if (p.edgeStartsHere()) return true;
     if (!p.at(.l_paren)) return false;
 
     const saved_tok_i = p.tok_i;
+    const saved_errors_len = p.errors.items.len;
     var node = p.parseNodePattern() catch |err| {
         p.tok_i = saved_tok_i;
-        if (err == error.ParseError) return false;
+        if (err == error.ParseFailed) {
+            p.errors.shrinkRetainingCapacity(saved_errors_len);
+            return false;
+        }
         return err;
     };
     defer {
@@ -844,13 +940,16 @@ fn eat(p: *Parse, tag: Ast.Token.Tag) bool {
     return false;
 }
 
-fn expect(p: *Parse, tag: Ast.Token.Tag) Error!void {
-    if (!p.eat(tag)) return error.ParseError;
+fn expect(p: *Parse, tag: Ast.Token.Tag) InternalError!void {
+    if (!p.eat(tag)) return p.failExpected(tag);
 }
 
-fn expectName(p: *Parse) Error![]const u8 {
+fn expectName(p: *Parse) InternalError![]const u8 {
     const tok = p.next();
-    if (!isNameToken(p.tokenTag(tok))) return error.ParseError;
+    if (!isNameToken(p.tokenTag(tok))) {
+        try p.addErrorAt(tok, .expected_name, null);
+        return error.ParseFailed;
+    }
     return p.slice(tok);
 }
 
