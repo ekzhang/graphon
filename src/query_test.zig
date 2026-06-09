@@ -217,6 +217,15 @@ test "compile edge path predicate query plan snapshot" {
     ));
 }
 
+test "compile edge-only match query plan snapshot" {
+    try checkQueryPlanSnapshot("MATCH -[]- RETURN COUNT(*)", snap(@src(),
+        \\Plan{%2}
+        \\  Aggregate %2: count(*)
+        \\  Step (%0)~[]~(%1)
+        \\  NodeScan (%0)
+    ));
+}
+
 test "compile return distinct query plan snapshot" {
     try checkQueryPlanSnapshot("MATCH (p:Person) RETURN DISTINCT p.name", snap(@src(),
         \\Plan{%1}

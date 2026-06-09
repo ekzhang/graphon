@@ -226,6 +226,39 @@ test "parse where path predicates" {
     try expectOptionalName(where.not_path_pattern.segments[0].node.variable, "b");
 }
 
+test "parse match edge patterns with implicit endpoints" {
+    var program = try Ast.parse(std.testing.allocator, "MATCH -[:Knows]-> RETURN COUNT(*)");
+    defer program.deinit(std.testing.allocator);
+
+    const body = try expectSingleQuery(&program.statements[0]);
+    try std.testing.expect(body.* == .match_query);
+    const pattern = body.match_query.patterns[0];
+    try std.testing.expect(pattern.start.variable == null);
+    try std.testing.expect(pattern.start.label == null);
+    try std.testing.expectEqual(@as(usize, 1), pattern.segments.len);
+    try expectOptionalName(pattern.segments[0].edge.label, "Knows");
+    try std.testing.expectEqual(EdgeDirection.right, pattern.segments[0].edge.direction);
+    try std.testing.expect(pattern.segments[0].node.variable == null);
+    try std.testing.expect(pattern.segments[0].node.label == null);
+}
+
+test "parse match path patterns with implicit leading and trailing endpoints" {
+    var program = try Ast.parse(std.testing.allocator, "MATCH -[:From]->(n:Node)-[:To]-> RETURN n");
+    defer program.deinit(std.testing.allocator);
+
+    const body = try expectSingleQuery(&program.statements[0]);
+    try std.testing.expect(body.* == .match_query);
+    const pattern = body.match_query.patterns[0];
+    try std.testing.expect(pattern.start.variable == null);
+    try std.testing.expectEqual(@as(usize, 2), pattern.segments.len);
+    try expectOptionalName(pattern.segments[0].edge.label, "From");
+    try expectOptionalName(pattern.segments[0].node.variable, "n");
+    try expectOptionalName(pattern.segments[0].node.label, "Node");
+    try expectOptionalName(pattern.segments[1].edge.label, "To");
+    try std.testing.expect(pattern.segments[1].node.variable == null);
+    try std.testing.expect(pattern.segments[1].node.label == null);
+}
+
 test "parse where edge predicates" {
     var program = try Ast.parse(std.testing.allocator, "MATCH (a:Person) WHERE -[:Knows]-> RETURN a");
     defer program.deinit(std.testing.allocator);
