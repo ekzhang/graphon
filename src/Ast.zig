@@ -142,7 +142,7 @@ pub const ReadClause = union(enum) {
 
 pub const MatchClause = struct {
     patterns: []PathPattern,
-    where: ?Expr = null,
+    where: ?WherePredicate = null,
 
     pub fn deinit(self: *MatchClause, allocator: Allocator) void {
         deinitPatterns(self.patterns, allocator);
@@ -153,7 +153,7 @@ pub const MatchClause = struct {
 
 pub const MatchQuery = struct {
     patterns: []PathPattern,
-    where: ?Expr = null,
+    where: ?WherePredicate = null,
     action: MatchAction,
 
     pub fn deinit(self: *MatchQuery, allocator: Allocator) void {
@@ -288,6 +288,20 @@ pub const Property = struct {
 
     pub fn deinit(self: *Property, allocator: Allocator) void {
         self.value.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+pub const WherePredicate = union(enum) {
+    expr: Expr,
+    path_pattern: PathPattern,
+    not_path_pattern: PathPattern,
+
+    pub fn deinit(self: *WherePredicate, allocator: Allocator) void {
+        switch (self.*) {
+            .expr => |*expr| expr.deinit(allocator),
+            .path_pattern, .not_path_pattern => |*pattern| pattern.deinit(allocator),
+        }
         self.* = undefined;
     }
 };

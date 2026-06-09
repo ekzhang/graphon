@@ -225,10 +225,10 @@ fn parseReadQueryFromFirst(p: *Parse, first: Ast.ReadClause) Error!Ast.ReadQuery
 fn parseMatchClauseAfterKeyword(p: *Parse) Error!Ast.MatchClause {
     const patterns = try p.parsePatternListUntilAction();
     errdefer Ast.deinitPatterns(patterns, p.gpa);
-    var where: ?Ast.Expr = null;
-    errdefer if (where) |*expr| expr.deinit(p.gpa);
+    var where: ?Ast.WherePredicate = null;
+    errdefer if (where) |*predicate| predicate.deinit(p.gpa);
     if (p.eat(.keyword_where)) {
-        where = try p.parseExpr(0);
+        where = try p.parseWherePredicate();
     }
     return .{ .patterns = patterns, .where = where };
 }
@@ -368,6 +368,10 @@ fn parsePathPattern(p: *Parse) Error!Ast.PathPattern {
         var s = start;
         s.deinit(p.gpa);
     }
+    return .{ .start = start, .segments = try p.parsePathSegments() };
+}
+
+fn parsePathSegments(p: *Parse) Error![]Ast.PathSegment {
     var segments = std.ArrayList(Ast.PathSegment).empty;
     errdefer {
         for (segments.items) |*segment| segment.deinit(p.gpa);
@@ -382,7 +386,57 @@ fn parsePathPattern(p: *Parse) Error!Ast.PathPattern {
         edge = null;
         node = null;
     }
-    return .{ .start = start, .segments = try segments.toOwnedSlice(p.gpa) };
+    return try segments.toOwnedSlice(p.gpa);
+}
+
+fn parseWherePredicate(p: *Parse) Error!Ast.WherePredicate {
+    const start = p.tok_i;
+    if (p.eat(.keyword_not)) {
+        if (try p.isPathPredicateStart()) {
+            return .{ .not_path_pattern = try p.parsePathPredicate() };
+        }
+        p.tok_i = start;
+    } else if (try p.isPathPredicateStart()) {
+        return .{ .path_pattern = try p.parsePathPredicate() };
+    }
+
+    return .{ .expr = try p.parseExpr(0) };
+}
+
+fn parsePathPredicate(p: *Parse) Error!Ast.PathPattern {
+    var start = Ast.NodePattern{};
+    var start_owned = false;
+    errdefer if (start_owned) start.deinit(p.gpa);
+
+    var segments = std.ArrayList(Ast.PathSegment).empty;
+    errdefer {
+        for (segments.items) |*segment| segment.deinit(p.gpa);
+        segments.deinit(p.gpa);
+    }
+
+    if (!p.edgeStartsHere()) {
+        start = try p.parseNodePattern();
+        start_owned = true;
+    }
+
+    while (p.edgeStartsHere()) {
+        var edge: ?Ast.EdgePattern = try p.parseEdgePattern();
+        errdefer if (edge) |*e| e.deinit(p.gpa);
+        const explicit_node = p.at(.l_paren);
+        var node: ?Ast.NodePattern = if (explicit_node) try p.parseNodePattern() else Ast.NodePattern{};
+        errdefer if (node) |*n| n.deinit(p.gpa);
+        try segments.append(p.gpa, .{ .edge = edge.?, .node = node.? });
+        edge = null;
+        node = null;
+        if (!explicit_node) break;
+    }
+
+    if (segments.items.len == 0) return error.ParseError;
+    const owned_segments = try segments.toOwnedSlice(p.gpa);
+    segments = .empty;
+    const out = Ast.PathPattern{ .start = start, .segments = owned_segments };
+    start_owned = false;
+    return out;
 }
 
 fn parseNodePattern(p: *Parse) Error!Ast.NodePattern {
@@ -647,6 +701,23 @@ fn edgeStartsHere(p: *Parse) bool {
         .minus_left_bracket, .left_arrow_bracket, .right_arrow, .left_arrow, .left_minus_right => true,
         else => false,
     };
+}
+
+fn isPathPredicateStart(p: *Parse) Error!bool {
+    if (p.edgeStartsHere()) return true;
+    if (!p.at(.l_paren)) return false;
+
+    const saved_tok_i = p.tok_i;
+    var node = p.parseNodePattern() catch |err| {
+        p.tok_i = saved_tok_i;
+        if (err == error.ParseError) return false;
+        return err;
+    };
+    defer {
+        node.deinit(p.gpa);
+        p.tok_i = saved_tok_i;
+    }
+    return p.edgeStartsHere();
 }
 
 fn isName(p: *Parse) bool {

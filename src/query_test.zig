@@ -144,6 +144,17 @@ test "compile bound endpoint path query plan snapshot" {
     ));
 }
 
+test "compile right-bound path query plan snapshot" {
+    try checkQueryPlanSnapshot("MATCH (b:Person), (a:Person)-[:Knows]->(b) RETURN a, b", snap(@src(),
+        \\Plan{%1, %0}
+        \\  Join
+        \\    Filter %1: Person
+        \\    Step (%0)<-[:Knows]-(%1)
+        \\  Begin
+        \\  NodeScan (%0:Person)
+    ));
+}
+
 test "compile optional bound endpoint path query plan snapshot" {
     try checkQueryPlanSnapshot("MATCH (a:Person), (b:Person) OPTIONAL MATCH (a)-[e:Knows]->(b) RETURN e", snap(@src(),
         \\Plan{%2}
@@ -152,6 +163,55 @@ test "compile optional bound endpoint path query plan snapshot" {
         \\  Begin
         \\  Join
         \\    NodeScan (%1:Person)
+        \\  Begin
+        \\  NodeScan (%0:Person)
+    ));
+}
+
+test "compile negative path predicate query plan snapshot" {
+    try checkQueryPlanSnapshot(
+        \\MATCH
+        \\  (me:Person {name: 'me'})-[:WORKS_IN]->(location),
+        \\  (other:Person)-[:WORKS_IN]->(location)
+        \\WHERE NOT (me)-[:FRIENDS_WITH]->(other)
+        \\RETURN other.name
+    , snap(@src(),
+        \\Plan{%3}
+        \\  Project %3: %2.name
+        \\  Join
+        \\    Anti
+        \\    StepBetween (%0)-[:FRIENDS_WITH]->(%2)
+        \\  Begin
+        \\  Join
+        \\    Filter %2: Person
+        \\    Step (%1)<-[:WORKS_IN]-(%2)
+        \\  Begin
+        \\  Step (%0)-[:WORKS_IN]->(%1)
+        \\  Filter (%0.name = 'me')
+        \\  NodeScan (%0:Person)
+    ));
+}
+
+test "compile middle-bound path query plan snapshot" {
+    try checkQueryPlanSnapshot("MATCH (location:Place), (left:Person)-[:LIVES_IN]->(location)<-[:WORKS_IN]-(right:Person) RETURN left.name, right.name", snap(@src(),
+        \\Plan{%3, %4}
+        \\  Project %3: %1.name, %4: %2.name
+        \\  Join
+        \\    Filter %2: Person
+        \\    Step (%0)<-[:WORKS_IN]-(%2)
+        \\    Filter %1: Person
+        \\    Step (%0)<-[:LIVES_IN]-(%1)
+        \\  Begin
+        \\  NodeScan (%0:Place)
+    ));
+}
+
+test "compile edge path predicate query plan snapshot" {
+    try checkQueryPlanSnapshot("MATCH (a:Person) WHERE -[:Knows]-> RETURN a", snap(@src(),
+        \\Plan{%0}
+        \\  SemiJoin
+        \\    Step (%1)-[:Knows]->(%2)
+        \\    NodeScan (%1)
         \\  Begin
         \\  NodeScan (%0:Person)
     ));

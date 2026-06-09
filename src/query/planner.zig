@@ -6,6 +6,7 @@ const StringMap = std.array_hash_map.String;
 
 const Ast = @import("../Ast.zig");
 const Plan = @import("../Plan.zig");
+const types = @import("../types.zig");
 
 pub const Error = @import("../Parse.zig").Error || error{
     Unsupported,
@@ -343,7 +344,26 @@ fn appendMatchQuery(planner: *Planner, mq: Ast.MatchQuery) Error!void {
 fn appendMatchClause(planner: *Planner, clause: Ast.MatchClause) Error!void {
     try appendMatchPatterns(planner, clause.patterns);
     if (clause.where) |where| {
-        try appendFilter(planner, .{ .bool_exp = try planExpr(planner, where) });
+        try appendWhere(planner, where);
+    }
+}
+
+fn appendWhere(planner: *Planner, where: Ast.WherePredicate) Error!void {
+    switch (where) {
+        .expr => |expr| try appendFilter(planner, .{ .bool_exp = try planExpr(planner, expr) }),
+        .path_pattern => |pattern| try appendPatternPredicate(planner, pattern, false),
+        .not_path_pattern => |pattern| try appendPatternPredicate(planner, pattern, true),
+    }
+}
+
+fn appendPatternPredicate(planner: *Planner, pattern: Ast.PathPattern, negate: bool) Error!void {
+    try planner.plan.ops.append(planner.gpa, .begin);
+    try appendPathPattern(planner, pattern);
+    if (negate) {
+        try planner.plan.ops.append(planner.gpa, .anti);
+        try planner.plan.ops.append(planner.gpa, .join);
+    } else {
+        try planner.plan.ops.append(planner.gpa, .semi_join);
     }
 }
 
@@ -744,10 +764,72 @@ fn orderByBinding(planner: *Planner, expr: Ast.Expr) ?u16 {
 }
 
 fn appendPathPattern(planner: *Planner, pattern: Ast.PathPattern) Error!void {
+    if (try pathPatternAnchor(planner, pattern)) |anchor| {
+        try appendNodeFilters(planner, anchor.ident, pathPatternNode(pattern, anchor.node_i), false);
+
+        var current = anchor.ident;
+        var segment_i = anchor.node_i;
+        while (segment_i > 0) {
+            segment_i -= 1;
+            const segment = pattern.segments[segment_i];
+            current = try appendPathTraversal(
+                planner,
+                current,
+                pathPatternNode(pattern, segment_i),
+                segment.edge,
+                segment.edge.direction.reverse(),
+            );
+        }
+
+        current = anchor.ident;
+        segment_i = anchor.node_i;
+        while (segment_i < pattern.segments.len) : (segment_i += 1) {
+            const segment = pattern.segments[segment_i];
+            current = try appendPathTraversal(
+                planner,
+                current,
+                pathPatternNode(pattern, segment_i + 1),
+                segment.edge,
+                segment.edge.direction,
+            );
+        }
+        return;
+    }
+
     var current = try appendNodeStart(planner, pattern.start);
     for (pattern.segments) |segment| {
-        current = try appendPathSegment(planner, current, segment);
+        current = try appendPathTraversal(planner, current, segment.node, segment.edge, segment.edge.direction);
     }
+}
+
+const PathPatternAnchor = struct {
+    node_i: usize,
+    ident: u16,
+};
+
+fn pathPatternAnchor(planner: *Planner, pattern: Ast.PathPattern) Error!?PathPatternAnchor {
+    const node_count = pattern.segments.len + 1;
+    for (0..node_count) |node_i| {
+        if (try boundNodeIdent(planner, pathPatternNode(pattern, node_i))) |ident| {
+            return .{ .node_i = node_i, .ident = ident };
+        }
+    }
+    return null;
+}
+
+fn pathPatternNode(pattern: Ast.PathPattern, node_i: usize) Ast.NodePattern {
+    if (node_i == 0) return pattern.start;
+    return pattern.segments[node_i - 1].node;
+}
+
+fn boundNodeIdent(planner: *Planner, pattern: Ast.NodePattern) Error!?u16 {
+    if (pattern.variable) |name| {
+        if (planner.bindings.get(name)) |binding| {
+            if (binding.kind != .node) return error.WrongType;
+            return binding.ident;
+        }
+    }
+    return null;
 }
 
 fn appendNodeStart(planner: *Planner, pattern: Ast.NodePattern) Error!u16 {
@@ -772,15 +854,15 @@ fn appendNodeStart(planner: *Planner, pattern: Ast.NodePattern) Error!u16 {
     return ident;
 }
 
-fn appendPathSegment(planner: *Planner, current: u16, segment: Ast.PathSegment) Error!u16 {
-    const existing_dest = if (segment.node.variable) |name| blk: {
-        if (planner.bindings.get(name)) |binding| {
-            if (binding.kind != .node) return error.WrongType;
-            break :blk binding.ident;
-        }
-        break :blk null;
-    } else null;
-    const existing_edge = if (segment.edge.variable) |name| blk: {
+fn appendPathTraversal(
+    planner: *Planner,
+    current: u16,
+    dest_pattern: Ast.NodePattern,
+    edge_pattern: Ast.EdgePattern,
+    direction: types.EdgeDirection,
+) Error!u16 {
+    const existing_dest = try boundNodeIdent(planner, dest_pattern);
+    const existing_edge = if (edge_pattern.variable) |name| blk: {
         if (planner.bindings.get(name)) |binding| {
             if (binding.kind != .edge) return error.WrongType;
             break :blk binding.ident;
@@ -788,28 +870,29 @@ fn appendPathSegment(planner: *Planner, current: u16, segment: Ast.PathSegment) 
         break :blk null;
     } else null;
 
-    const edge_ident: ?u16 = if (segment.edge.variable != null or segment.edge.properties.len > 0 or existing_edge != null)
-        planner.allocIdent()
-    else
-        null;
+    const needs_edge_ident =
+        edge_pattern.variable != null or
+        edge_pattern.properties.len > 0 or
+        existing_edge != null;
+    const edge_ident: ?u16 = if (needs_edge_ident) planner.allocIdent() else null;
     const dest_ident = existing_dest orelse planner.allocIdent();
 
-    if (segment.edge.variable) |name| {
+    if (edge_pattern.variable) |name| {
         if (existing_edge == null) try planner.bind(name, .edge, edge_ident.?);
     }
-    if (segment.node.variable) |name| {
+    if (dest_pattern.variable) |name| {
         if (existing_dest == null) try planner.bind(name, .node, dest_ident);
     }
 
-    var edge_label: ?[]u8 = if (segment.edge.label) |label| try planner.gpa.dupe(u8, label) else null;
+    var edge_label: ?[]u8 = if (edge_pattern.label) |label| try planner.gpa.dupe(u8, label) else null;
     errdefer if (edge_label) |label| planner.gpa.free(label);
     if (existing_dest != null) {
-        try appendNodeFilters(planner, dest_ident, segment.node, false);
+        try appendNodeFilters(planner, dest_ident, dest_pattern, false);
         try planner.plan.ops.append(planner.gpa, .{ .step_between = .{
             .ident_src = current,
             .ident_edge = edge_ident,
             .ident_dest = dest_ident,
-            .direction = segment.edge.direction,
+            .direction = direction,
             .edge_label = edge_label,
         } });
     } else {
@@ -817,14 +900,14 @@ fn appendPathSegment(planner: *Planner, current: u16, segment: Ast.PathSegment) 
             .ident_src = current,
             .ident_edge = edge_ident,
             .ident_dest = dest_ident,
-            .direction = segment.edge.direction,
+            .direction = direction,
             .edge_label = edge_label,
         } });
-        try appendNodeFilters(planner, dest_ident, segment.node, false);
+        try appendNodeFilters(planner, dest_ident, dest_pattern, false);
     }
     edge_label = null;
 
-    if (edge_ident) |ident| try appendEdgeFilters(planner, ident, segment.edge);
+    if (edge_ident) |ident| try appendEdgeFilters(planner, ident, edge_pattern);
     if (existing_edge) |ident| try appendIdentEqualityFilter(planner, edge_ident.?, ident);
     return dest_ident;
 }
@@ -832,7 +915,10 @@ fn appendPathSegment(planner: *Planner, current: u16, segment: Ast.PathSegment) 
 fn appendNodeFilters(planner: *Planner, ident: u16, pattern: Ast.NodePattern, label_in_scan: bool) Error!void {
     if (!label_in_scan) {
         if (pattern.label) |label| {
-            try appendFilter(planner, .{ .ident_label = .{ .ident = ident, .label = try planner.gpa.dupe(u8, label) } });
+            var label_copy: ?[]u8 = try planner.gpa.dupe(u8, label);
+            errdefer if (label_copy) |owned| planner.gpa.free(owned);
+            try appendFilter(planner, .{ .ident_label = .{ .ident = ident, .label = label_copy.? } });
+            label_copy = null;
         }
     }
     for (pattern.properties) |property| {
@@ -984,7 +1070,8 @@ fn exprHasRowValueOutsideAggregate(expr: Ast.Expr) bool {
     return switch (expr) {
         .aggregate => false,
         .unary => |unary| exprHasRowValueOutsideAggregate(unary.operand),
-        .binary => |binary| exprHasRowValueOutsideAggregate(binary.left) or exprHasRowValueOutsideAggregate(binary.right),
+        .binary => |binary| exprHasRowValueOutsideAggregate(binary.left) or
+            exprHasRowValueOutsideAggregate(binary.right),
         .variable, .property => true,
         .literal => false,
     };

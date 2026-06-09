@@ -104,6 +104,19 @@ pub const EdgeDirection = enum {
             .any => "]-",
         };
     }
+
+    /// Returns this direction from the opposite endpoint.
+    pub fn reverse(self: EdgeDirection) EdgeDirection {
+        return switch (self) {
+            .left => .right,
+            .right => .left,
+            .undirected => .undirected,
+            .left_or_undirected => .right_or_undirected,
+            .right_or_undirected => .left_or_undirected,
+            .left_or_right => .left_or_right,
+            .any => .any,
+        };
+    }
 };
 
 /// Whether an edge is going in or out of a node. Stored in adjacency lists.

@@ -193,7 +193,7 @@ test "parse match where and set clauses" {
     try expectOptionalName(query.patterns[0].start.variable, "p");
     try expectOptionalName(query.patterns[1].start.variable, "f");
 
-    const where = query.where.?;
+    const where = query.where.?.expr;
     const not = try expectUnary(where, .not);
     const and_expr = try expectBinary(not.operand, .and_);
     const lt = try expectBinary(and_expr.left, .lt);
@@ -211,6 +211,32 @@ test "parse match where and set clauses" {
     try expectPropertyExpr(sets[0].value, "f", "name");
     try std.testing.expectEqualStrings("active", sets[1].property);
     try expectBoolLiteral(sets[1].value, true);
+}
+
+test "parse where path predicates" {
+    var program = try Ast.parse(std.testing.allocator, "MATCH (a:Person), (b:Person) WHERE NOT (a)-[:Knows]->(b) RETURN b.name");
+    defer program.deinit(std.testing.allocator);
+
+    const body = try expectSingleQuery(&program.statements[0]);
+    const where = body.match_query.where.?;
+    try std.testing.expect(where == .not_path_pattern);
+    try expectOptionalName(where.not_path_pattern.start.variable, "a");
+    try std.testing.expectEqual(@as(usize, 1), where.not_path_pattern.segments.len);
+    try expectOptionalName(where.not_path_pattern.segments[0].edge.label, "Knows");
+    try expectOptionalName(where.not_path_pattern.segments[0].node.variable, "b");
+}
+
+test "parse where edge predicates" {
+    var program = try Ast.parse(std.testing.allocator, "MATCH (a:Person) WHERE -[:Knows]-> RETURN a");
+    defer program.deinit(std.testing.allocator);
+
+    const body = try expectSingleQuery(&program.statements[0]);
+    const where = body.match_query.where.?;
+    try std.testing.expect(where == .path_pattern);
+    try std.testing.expectEqual(@as(usize, 1), where.path_pattern.segments.len);
+    try expectOptionalName(where.path_pattern.segments[0].edge.label, "Knows");
+    try std.testing.expectEqual(EdgeDirection.right, where.path_pattern.segments[0].edge.direction);
+    try std.testing.expect(where.path_pattern.segments[0].node.variable == null);
 }
 
 test "parse multiple mutation statements" {
