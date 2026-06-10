@@ -25,6 +25,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    const anyline_dep = b.dependency("anyline", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    exe_mod.addImport("anyline", anyline_dep.module("anyline"));
     exe_mod.linkSystemLibrary("rocksdb", .{});
 
     const exe = b.addExecutable(.{
@@ -39,6 +44,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    cli_mod.addImport("anyline", anyline_dep.module("anyline"));
     const cli_exe = b.addExecutable(.{
         .name = "graphon-cli",
         .root_module = cli_mod,

@@ -1,4 +1,5 @@
 const std = @import("std");
+const anyline = @import("anyline");
 
 const rocksdb = @import("storage/rocksdb.zig");
 const storage = @import("storage.zig");
@@ -156,22 +157,31 @@ fn localShell(gpa: std.mem.Allocator, io: std.Io, db_path: []const u8) !void {
     var stdout_buffer: [4096]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
-    var stdin_buffer: [4096]u8 = undefined;
-    var stdin_reader = std.Io.File.stdin().reader(io, &stdin_buffer);
-    const stdin = &stdin_reader.interface;
+
+    anyline.history.usingHistory();
+    defer anyline.freeHistory(gpa);
+    defer anyline.freeKillRing(gpa);
 
     try stdout.print("Opened local Graphon database at {s}\n", .{db_path});
     while (true) {
-        try stdout.writeAll("> ");
         try stdout.flush();
-        const line = (try stdin.takeDelimiter('\n')) orelse break;
+        const line = anyline.readLine(io, gpa, "> ") catch |err| switch (err) {
+            error.EndOfInput => break,
+            error.ProcessExit => break,
+            else => return err,
+        };
+        defer gpa.free(line);
+
         const trimmed = std.mem.trim(u8, line, " \t\r\n");
         if (trimmed.len == 0) continue;
         if (std.mem.eql(u8, trimmed, ":quit") or std.mem.eql(u8, trimmed, ":exit")) break;
+        try anyline.history.addHistory(gpa, trimmed);
+
         const source = try gpa.dupeZ(u8, trimmed);
         defer gpa.free(source);
         var outcome = executeLocal(gpa, io, db_path, source) catch |err| {
             try stdout.print("error: {s}\n", .{@errorName(err)});
+            try stdout.flush();
             continue;
         };
         defer outcome.deinit(gpa);
@@ -183,6 +193,7 @@ fn localShell(gpa: std.mem.Allocator, io: std.Io, db_path: []const u8) !void {
             },
             .parse_errors => |errors| try errors.render(stdout),
         }
+        try stdout.flush();
     }
 }
 

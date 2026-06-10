@@ -1,4 +1,5 @@
 const std = @import("std");
+const anyline = @import("anyline");
 
 const default_url = "http://127.0.0.1:7687/";
 
@@ -20,21 +21,31 @@ pub fn main(init: std.process.Init) !void {
     }
 
     try stdout.print("Connected to {s}\n", .{default_url});
-    var stdin_buffer: [4096]u8 = undefined;
-    var stdin_reader = std.Io.File.stdin().reader(io, &stdin_buffer);
-    const stdin = &stdin_reader.interface;
+
+    anyline.history.usingHistory();
+    defer anyline.freeHistory(gpa);
+    defer anyline.freeKillRing(gpa);
 
     while (true) {
-        try stdout.writeAll("> ");
         try stdout.flush();
-        const line = (try stdin.takeDelimiter('\n')) orelse break;
+        const line = anyline.readLine(io, gpa, "> ") catch |err| switch (err) {
+            error.EndOfInput => break,
+            error.ProcessExit => break,
+            else => return err,
+        };
+        defer gpa.free(line);
+
         const trimmed = std.mem.trim(u8, line, " \t\r\n");
         if (trimmed.len == 0) continue;
         if (std.mem.eql(u8, trimmed, ":quit") or std.mem.eql(u8, trimmed, ":exit")) break;
+        try anyline.history.addHistory(gpa, trimmed);
+
         sendQuery(gpa, io, stdout, default_url, trimmed) catch |err| {
             try stdout.print("error: {s}\n", .{@errorName(err)});
+            try stdout.flush();
             continue;
         };
+        try stdout.flush();
     }
     try stdout.flush();
 }
