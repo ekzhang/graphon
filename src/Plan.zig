@@ -177,7 +177,7 @@ pub const Operator = union(enum) {
     distinct: std.ArrayList(u16),
     skip: u64,
     sort: std.MultiArrayList(SortClause),
-    top: u64, // unimplemented
+    top: Top,
     union_all,
     update: Update,
     insert_node: InsertNode,
@@ -214,7 +214,7 @@ pub const Operator = union(enum) {
             .distinct => |*n| n.deinit(allocator),
             .skip => {},
             .sort => |*n| n.deinit(allocator),
-            .top => {},
+            .top => |*n| n.deinit(allocator),
             .aggregate => |*n| n.deinit(allocator),
             .union_all => {},
             .update => |*n| n.deinit(allocator),
@@ -363,7 +363,16 @@ pub const Operator = union(enum) {
                 }
             },
             .top => |n| {
-                try writer.print(" {}", .{n});
+                try writer.print(" {}", .{n.count});
+                for (0..n.clauses.len) |i| {
+                    if (i == 0) {
+                        try writer.writeByte(' ');
+                    } else {
+                        try writer.writeAll(", ");
+                    }
+                    const s = n.clauses.get(i);
+                    try writer.print("%{} {s}", .{ s.ident, if (s.desc) "desc" else "asc" });
+                }
             },
             .aggregate => |n| {
                 var first = true;
@@ -635,6 +644,16 @@ pub const FilterClause = union(enum) {
 pub const SortClause = struct {
     ident: u16,
     desc: bool,
+};
+
+pub const Top = struct {
+    count: u64,
+    clauses: std.MultiArrayList(SortClause) = .empty,
+
+    pub fn deinit(self: *Top, allocator: Allocator) void {
+        self.clauses.deinit(allocator);
+        self.* = undefined;
+    }
 };
 
 pub const Aggregate = struct {

@@ -95,8 +95,7 @@ fn executeForAllocationFailureTest(allocator: Allocator, store: storage.Storage)
 test "compile match return query plan snapshot" {
     try checkQueryPlanSnapshot("MATCH (p:Person) WHERE p.age > 30 RETURN p.name ORDER BY p.age DESC LIMIT 2", snap(@src(),
         \\Plan{%1}
-        \\  Limit 2
-        \\  Sort %2 desc
+        \\  Top 2 %2 desc
         \\  Project %2: %0.age
         \\  Project %1: %0.name
         \\  Filter (%0.age > 30)
@@ -283,9 +282,30 @@ test "compile return distinct query plan snapshot" {
 test "compile order by return alias query plan snapshot" {
     try checkQueryPlanSnapshot("MATCH (p:Person) RETURN p.name AS name ORDER BY name DESC LIMIT 1", snap(@src(),
         \\Plan{%1}
-        \\  Limit 1
-        \\  Sort %1 desc
+        \\  Top 1 %1 desc
         \\  Project %1: %0.name
+        \\  NodeScan (%0:Person)
+    ));
+}
+
+test "compile order by skip limit does not use top snapshot" {
+    try checkQueryPlanSnapshot("MATCH (p:Person) RETURN p.name ORDER BY p.name SKIP 1 LIMIT 1", snap(@src(),
+        \\Plan{%1}
+        \\  Limit 1
+        \\  Skip 1
+        \\  Sort %2 asc
+        \\  Project %2: %0.name
+        \\  Project %1: %0.name
+        \\  NodeScan (%0:Person)
+    ));
+}
+
+test "compile multi-key top query plan snapshot" {
+    try checkQueryPlanSnapshot("MATCH (p:Person) RETURN p.name, p.team ORDER BY p.team, p.name DESC LIMIT 3", snap(@src(),
+        \\Plan{%1, %2}
+        \\  Top 3 %3 asc, %4 desc
+        \\  Project %3: %0.team, %4: %0.name
+        \\  Project %1: %0.name, %2: %0.team
         \\  NodeScan (%0:Person)
     ));
 }
@@ -786,6 +806,13 @@ test "match return order by" {
         try std.testing.expectEqualStrings("Ada", result.rows[0].values[0].value.string);
         try std.testing.expectEqualStrings("Bert", result.rows[1].values[0].value.string);
         try std.testing.expectEqualStrings("Cara", result.rows[2].values[0].value.string);
+    }
+    {
+        var result = try execForTest(store, "MATCH (p:Person) RETURN p.name ORDER BY p.age DESC LIMIT 2");
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 2), result.rows.len);
+        try std.testing.expectEqualStrings("Cara", result.rows[0].values[0].value.string);
+        try std.testing.expectEqualStrings("Bert", result.rows[1].values[0].value.string);
     }
     {
         var result = try execForTest(store, "MATCH (p:Person) RETURN p.name ORDER BY p.age DESC SKIP 1 LIMIT 1");

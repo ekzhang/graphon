@@ -765,7 +765,19 @@ fn appendSkipLimit(planner: *Planner, ret: Ast.ReturnClause) Error!void {
         try planner.plan.ops.append(planner.gpa, .{ .skip = @intCast(ret.skip) });
     }
     if (ret.limit) |limit| {
-        try planner.plan.ops.append(planner.gpa, .{ .limit = @intCast(limit) });
+        // Memory optimization: Sort + Limit = Top.
+        if (planner.plan.ops.items.len > 0 and planner.plan.ops.getLast() == .sort) {
+            const idx = planner.plan.ops.items.len - 1;
+            const clauses = planner.plan.ops.items[idx].sort;
+            planner.plan.ops.items[idx] = .{
+                .top = Plan.Top{
+                    .count = @intCast(limit),
+                    .clauses = clauses,
+                },
+            };
+        } else {
+            try planner.plan.ops.append(planner.gpa, .{ .limit = @intCast(limit) });
+        }
     }
 }
 

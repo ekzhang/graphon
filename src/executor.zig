@@ -8,6 +8,7 @@ const types = @import("types.zig");
 const Value = types.Value;
 const storage = @import("storage.zig");
 
+const agg_ops = @import("executor/agg_ops.zig");
 const join_ops = @import("executor/join_ops.zig");
 const modify_ops = @import("executor/modify_ops.zig");
 const repeat_ops = @import("executor/repeat_ops.zig");
@@ -38,10 +39,11 @@ const operator_impls = blk: {
         .{ Plan.Operator.empty_result, void, null, simple_ops.runEmptyResult },
         .{ Plan.Operator.filter, void, null, simple_ops.runFilter },
         .{ Plan.Operator.limit, u64, null, simple_ops.runLimit },
-        .{ Plan.Operator.distinct, simple_ops.DistinctState, simple_ops.DistinctState.deinit, simple_ops.runDistinct },
+        .{ Plan.Operator.distinct, agg_ops.DistinctState, agg_ops.DistinctState.deinit, agg_ops.runDistinct },
         .{ Plan.Operator.skip, bool, null, simple_ops.runSkip },
-        .{ Plan.Operator.sort, simple_ops.SortState, simple_ops.SortState.deinit, simple_ops.runSort },
-        .{ Plan.Operator.aggregate, simple_ops.AggregateState, simple_ops.AggregateState.deinit, simple_ops.runAggregate },
+        .{ Plan.Operator.sort, agg_ops.SortState, agg_ops.SortState.deinit, agg_ops.runSort },
+        .{ Plan.Operator.top, agg_ops.TopState, agg_ops.TopState.deinit, agg_ops.runTop },
+        .{ Plan.Operator.aggregate, agg_ops.AggregateState, agg_ops.AggregateState.deinit, agg_ops.runAggregate },
         .{ Plan.Operator.union_all, bool, null, join_ops.runUnionAll },
         .{ Plan.Operator.update, void, null, modify_ops.runUpdate },
         .{ Plan.Operator.insert_node, void, null, modify_ops.runInsertNode },
@@ -116,6 +118,9 @@ pub const Executor = struct {
     states: []OperatorState,
 
     /// Value assignments, implicitly represents the current row.
+    ///
+    /// Remember to call `.deinit()` to free values before reassigning any
+    /// particular slot in this array.
     assignments: []Value,
 
     /// Whether the implicit "initial operator" has returned yet.
