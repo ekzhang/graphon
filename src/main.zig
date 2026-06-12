@@ -11,13 +11,15 @@ const graphon = @import("graphon.zig");
 const default_db_path = "/tmp/graphon.db";
 const default_host = "127.0.0.1";
 const default_port: u16 = 7687;
-const default_threads: ?usize = null;
-const max_default_server_threads: usize = 64;
+const default_concurrency: usize = 64;
 const json_headers = [_]std.http.Header{.{ .name = "content-type", .value = "application/json" }};
+const have_signal_handlers = std.posix.Sigaction != void;
+
+var server_shutdown_requested: std.atomic.Value(bool) = .init(false);
 
 const ServeOptions = struct {
     db_path: []const u8 = default_db_path,
-    threads: ?usize = default_threads,
+    concurrency: usize = default_concurrency,
 };
 
 const ConnectionJob = struct {
@@ -25,6 +27,16 @@ const ConnectionJob = struct {
     io: std.Io,
     store: storage.Storage,
     stream: std.Io.net.Stream,
+    sema: *std.Io.Semaphore,
+};
+
+const AcceptContext = struct {
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    store: storage.Storage,
+    server: *std.Io.net.Server,
+    connection_group: *std.Io.Group,
+    connection_sema: *std.Io.Semaphore,
 };
 
 const QueryOutcome = union(enum) {
@@ -39,6 +51,45 @@ const QueryOutcome = union(enum) {
         self.* = undefined;
     }
 };
+
+const SignalHandlers = struct {
+    old_int: if (have_signal_handlers) std.posix.Sigaction else void = undefined,
+    old_term: if (have_signal_handlers) std.posix.Sigaction else void = undefined,
+    installed: bool = false,
+
+    fn install() SignalHandlers {
+        server_shutdown_requested.store(false, .release);
+
+        var self: SignalHandlers = .{};
+        if (have_signal_handlers) {
+            const action: std.posix.Sigaction = .{
+                .handler = .{ .handler = handleShutdownSignal },
+                .mask = std.posix.sigemptyset(),
+                .flags = 0,
+            };
+            std.posix.sigaction(.INT, &action, &self.old_int);
+            std.posix.sigaction(.TERM, &action, &self.old_term);
+            self.installed = true;
+        }
+        return self;
+    }
+
+    fn deinit(self: *SignalHandlers) void {
+        if (have_signal_handlers and self.installed) {
+            std.posix.sigaction(.INT, &self.old_int, null);
+            std.posix.sigaction(.TERM, &self.old_term, null);
+            self.installed = false;
+        }
+    }
+};
+
+fn handleShutdownSignal(_: std.posix.SIG) callconv(.c) void {
+    server_shutdown_requested.store(true, .release);
+}
+
+fn shutdownRequested() bool {
+    return server_shutdown_requested.load(.acquire);
+}
 
 fn rocksdbInsertPerf(io: std.Io) !void {
     const db = try rocksdb.DB.open("/tmp/graphon-perf");
@@ -76,7 +127,7 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     if (args.len == 1) {
-        try serve(io, .{});
+        try serve(gpa, io, .{});
         return;
     }
 
@@ -101,7 +152,7 @@ pub fn main(init: std.process.Init) !void {
                 usage();
                 std.process.exit(1);
             };
-            try serve(io, options);
+            try serve(gpa, io, options);
         },
         .query => {
             if (args.len < 3) {
@@ -141,7 +192,7 @@ fn usage() void {
     std.debug.print(
         \\usage:
         \\  graphon                         start HTTP server on 127.0.0.1:7687
-        \\  graphon serve [db-path] [--threads N]
+        \\  graphon serve [db-path] [--concurrency N]
         \\                                  start HTTP/Bolt server
         \\  graphon query <GQL>              run one query against /tmp/graphon.db
         \\  graphon shell                    run a local GQL shell
@@ -156,12 +207,12 @@ fn parseServeOptions(args: []const []const u8) !ServeOptions {
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
-        if (std.mem.eql(u8, arg, "--threads")) {
+        if (std.mem.eql(u8, arg, "--concurrency")) {
             i += 1;
-            if (i >= args.len) return error.MissingThreadCount;
-            options.threads = try parseThreadCount(args[i]);
-        } else if (std.mem.startsWith(u8, arg, "--threads=")) {
-            options.threads = try parseThreadCount(arg["--threads=".len..]);
+            if (i >= args.len) return error.MissingConcurrency;
+            options.concurrency = try parseConcurrency(args[i]);
+        } else if (std.mem.startsWith(u8, arg, "--concurrency=")) {
+            options.concurrency = try parseConcurrency(arg["--concurrency=".len..]);
         } else if (std.mem.startsWith(u8, arg, "--")) {
             return error.UnknownOption;
         } else if (seen_path) {
@@ -174,14 +225,10 @@ fn parseServeOptions(args: []const []const u8) !ServeOptions {
     return options;
 }
 
-fn parseThreadCount(value: []const u8) !usize {
-    const threads = try std.fmt.parseUnsigned(usize, value, 10);
-    if (threads == 0) return error.InvalidThreadCount;
-    return threads;
-}
-
-fn defaultThreadCount() usize {
-    return @min(max_default_server_threads, std.Thread.getCpuCount() catch 1);
+fn parseConcurrency(value: []const u8) !usize {
+    const concurrency = try std.fmt.parseUnsigned(usize, value, 10);
+    if (concurrency == 0) return error.InvalidConcurrency;
+    return concurrency;
 }
 
 fn executeLocal(gpa: std.mem.Allocator, io: std.Io, db_path: []const u8, source: [:0]const u8) !QueryOutcome {
@@ -250,65 +297,87 @@ fn localShell(gpa: std.mem.Allocator, io: std.Io, db_path: []const u8) !void {
     }
 }
 
-fn serve(io: std.Io, options: ServeOptions) !void {
+fn serve(gpa: std.mem.Allocator, io: std.Io, options: ServeOptions) !void {
+    var signals = SignalHandlers.install();
+    defer signals.deinit();
+
     const db = try rocksdb.DB.open(options.db_path);
     defer db.close();
     const worker_allocator = std.heap.c_allocator;
     const store = storage.Storage{ .db = db, .allocator = worker_allocator, .io = io };
-    const thread_count = options.threads orelse defaultThreadCount();
 
-    var pool: std.Thread.Pool = undefined;
-    try pool.init(.{ .allocator = worker_allocator, .n_jobs = thread_count });
-    defer pool.deinit();
+    var connection_group: std.Io.Group = .init;
+    defer connection_group.cancel(io);
+    var connection_sema: std.Io.Semaphore = .{ .permits = options.concurrency };
+    var accept_group: std.Io.Group = .init;
+    defer accept_group.cancel(io);
 
     const addr = try std.Io.net.IpAddress.parse(default_host, default_port);
     var server = try addr.listen(io, .{ .reuse_address = true });
     defer server.deinit(io);
 
     std.debug.print(
-        "Graphon listening at http://{s}:{d}/ and bolt://{s}:{d}/ using {s} with {d} worker threads\n",
+        "Graphon listening at http://{s}:{d} and bolt://{s}:{d} using {s} with up to {d} concurrent connections\n",
         .{
             default_host,
             default_port,
             default_host,
             default_port,
             options.db_path,
-            thread_count,
+            options.concurrency,
         },
     );
+
+    var accept_context = AcceptContext{
+        .gpa = gpa,
+        .io = io,
+        .store = store,
+        .server = &server,
+        .connection_group = &connection_group,
+        .connection_sema = &connection_sema,
+    };
+    accept_group.async(io, acceptConnections, .{&accept_context});
+
+    while (!shutdownRequested()) {
+        std.Io.sleep(io, .fromMilliseconds(50), .awake) catch |err| switch (err) {
+            error.Canceled => break,
+        };
+    }
+
+    std.debug.print("Graphon shutting down\n", .{});
+    accept_group.cancel(io);
+    connection_group.cancel(io);
+}
+
+fn acceptConnections(context: *AcceptContext) std.Io.Cancelable!void {
     while (true) {
-        const stream = server.accept(io) catch |err| {
-            std.debug.print("accept error: {s}\n", .{@errorName(err)});
-            continue;
+        try context.connection_sema.wait(context.io);
+        const stream = context.server.accept(context.io) catch |err| switch (err) {
+            error.Canceled => {
+                context.connection_sema.post(context.io);
+                return error.Canceled;
+            },
+            else => {
+                context.connection_sema.post(context.io);
+                std.debug.print("accept error: {s}\n", .{@errorName(err)});
+                continue;
+            },
         };
 
-        const job = worker_allocator.create(ConnectionJob) catch |err| {
-            stream.close(io);
-            std.debug.print("connection allocation error: {s}\n", .{@errorName(err)});
-            continue;
-        };
-        job.* = .{
-            .gpa = worker_allocator,
-            .io = io,
-            .store = store,
+        const job = ConnectionJob{
+            .gpa = context.gpa,
+            .io = context.io,
+            .store = context.store,
             .stream = stream,
+            .sema = context.connection_sema,
         };
-        pool.spawn(handleConnectionJob, .{job}) catch |err| {
-            worker_allocator.destroy(job);
-            stream.close(io);
-            std.debug.print("connection dispatch error: {s}\n", .{@errorName(err)});
-        };
+        context.connection_group.async(context.io, handleConnectionJob, .{job});
     }
 }
 
-fn handleConnectionJob(job: *ConnectionJob) void {
-    const gpa = job.gpa;
-    const io = job.io;
-    const store = job.store;
-    const stream = job.stream;
-    gpa.destroy(job);
-
-    handleConnection(gpa, io, store, stream) catch |err| {
+fn handleConnectionJob(job: ConnectionJob) void {
+    defer job.sema.post(job.io);
+    handleConnection(job.gpa, job.io, job.store, job.stream) catch |err| {
         std.debug.print("connection error: {s}\n", .{@errorName(err)});
     };
 }
@@ -437,29 +506,29 @@ test "percent decode query parameter" {
     try std.testing.expectEqualStrings("RETURN 100 * 3", decoded);
 }
 
-test "parse serve thread options" {
+test "parse serve concurrency options" {
     {
         const options = try parseServeOptions(&.{});
         try std.testing.expectEqualStrings(default_db_path, options.db_path);
-        try std.testing.expectEqual(@as(?usize, null), options.threads);
+        try std.testing.expectEqual(@as(usize, default_concurrency), options.concurrency);
     }
     {
-        const options = try parseServeOptions(&.{ "--threads", "4" });
+        const options = try parseServeOptions(&.{ "--concurrency", "4" });
         try std.testing.expectEqualStrings(default_db_path, options.db_path);
-        try std.testing.expectEqual(@as(?usize, 4), options.threads);
+        try std.testing.expectEqual(@as(usize, 4), options.concurrency);
     }
     {
-        const options = try parseServeOptions(&.{ "/tmp/custom.db", "--threads=8" });
+        const options = try parseServeOptions(&.{ "/tmp/custom.db", "--concurrency=8" });
         try std.testing.expectEqualStrings("/tmp/custom.db", options.db_path);
-        try std.testing.expectEqual(@as(?usize, 8), options.threads);
+        try std.testing.expectEqual(@as(usize, 8), options.concurrency);
     }
     {
-        const options = try parseServeOptions(&.{ "--threads", "128" });
-        try std.testing.expectEqual(@as(?usize, 128), options.threads);
+        const options = try parseServeOptions(&.{ "--concurrency", "128" });
+        try std.testing.expectEqual(@as(usize, 128), options.concurrency);
     }
 }
 
-test "parse serve rejects invalid thread counts" {
-    try std.testing.expectError(error.InvalidThreadCount, parseServeOptions(&.{ "--threads", "0" }));
-    try std.testing.expectError(error.MissingThreadCount, parseServeOptions(&.{"--threads"}));
+test "parse serve rejects invalid concurrency" {
+    try std.testing.expectError(error.InvalidConcurrency, parseServeOptions(&.{ "--concurrency", "0" }));
+    try std.testing.expectError(error.MissingConcurrency, parseServeOptions(&.{"--concurrency"}));
 }
