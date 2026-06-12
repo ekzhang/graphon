@@ -238,17 +238,13 @@ const SortRow = struct {
 
 const SortClauses = std.MultiArrayList(Plan.SortClause).Slice;
 
-const SortContext = struct {
-    clauses: SortClauses,
-};
-
 pub fn runSort(op: std.MultiArrayList(Plan.SortClause), state: *SortState, exec: *executor.Executor, op_index: u32) !bool {
     if (!state.loaded) {
         while (try exec.next(op_index)) {
             try state.rows.append(exec.txn.allocator, .{ .assignments = try cloneAssignments(exec.txn.allocator, exec.assignments) });
         }
         state.loaded = true;
-        std.mem.sort(SortRow, state.rows.items, SortContext{ .clauses = op.slice() }, sortRowLessThan);
+        std.mem.sort(SortRow, state.rows.items, op.slice(), sortRowLessThan);
     }
 
     if (state.index >= state.rows.items.len) return false;
@@ -334,8 +330,8 @@ fn distinctRowEqual(idents: []const u16, left: []const Value, right: []const Val
     return true;
 }
 
-fn sortRowLessThan(ctx: SortContext, left: SortRow, right: SortRow) bool {
-    return orderRows(ctx.clauses, left, right) == .lt;
+fn sortRowLessThan(clauses: SortClauses, left: SortRow, right: SortRow) bool {
+    return orderRows(clauses, left, right) == .lt;
 }
 
 fn orderRowsReverse(clauses: SortClauses, left: SortRow, right: SortRow) std.math.Order {
