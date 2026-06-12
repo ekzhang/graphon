@@ -2,12 +2,12 @@
 //!
 //! Supported:
 //! * Bolt 5.0 and 4.4 negotiation, including manifest v1.
-//! * `HELLO`, `RUN`, `PULL`, `RESET`, and `GOODBYE`.
+//! * `HELLO`, `RUN`, `PULL`, `BEGIN`, `COMMIT`, `ROLLBACK`, `RESET`, and `GOODBYE`.
 //! * Graphon GQL execution through `RUN` and PackStream `RECORD` rows via `PULL`.
 //! * Scalar values plus node/edge values encoded as plain PackStream maps.
 //!
 //! Unsupported:
-//! * TLS, authentication, routing, explicit transactions, and parameter binding.
+//! * TLS, authentication, routing, and parameter binding.
 //! * Neo4j `Node`/`Relationship` structures; graph values are map-shaped.
 //! * Cypher compatibility beyond Graphon's currently supported GQL syntax.
 
@@ -55,6 +55,9 @@ const Tag = struct {
     const goodbye: u8 = 0x02;
     const reset: u8 = 0x0f;
     const run: u8 = 0x10;
+    const begin: u8 = 0x11;
+    const commit: u8 = 0x12;
+    const rollback: u8 = 0x13;
     const pull: u8 = 0x3f;
     const success: u8 = 0x70;
     const record: u8 = 0x71;
@@ -66,6 +69,8 @@ pub const Error = std.Io.Reader.Error || std.Io.Writer.Error || Allocator.Error 
     InvalidHandshake,
     InvalidMessage,
     MessageTooLarge,
+    NoOpenTransaction,
+    TransactionAlreadyOpen,
     UnsupportedBoltVersion,
 };
 
@@ -108,6 +113,9 @@ const Request = union(enum) {
     reset,
     run: []u8,
     pull: i64,
+    begin,
+    commit,
+    rollback,
 
     fn deinit(self: *Request, gpa: Allocator) void {
         switch (self.*) {
@@ -122,11 +130,16 @@ const Session = struct {
     gpa: Allocator,
     store: storage.Storage,
     pending: ?query.ResultSet = null,
+    txn: ?storage.Transaction = null,
     row_i: usize = 0,
     failed: bool = false,
 
     fn deinit(self: *Session) void {
         self.clearPending();
+        if (self.txn) |txn| {
+            txn.rollback() catch {};
+            txn.close();
+        }
         self.* = undefined;
     }
 
@@ -136,6 +149,7 @@ const Session = struct {
                 .reset => {
                     self.failed = false;
                     self.clearPending();
+                    self.rollbackTransaction() catch {};
                     try writeEmptySuccess(self.gpa, writer);
                 },
                 .goodbye => return false,
@@ -149,12 +163,49 @@ const Session = struct {
             .goodbye => return false,
             .reset => {
                 self.clearPending();
+                self.rollbackTransaction() catch {};
                 try writeEmptySuccess(self.gpa, writer);
             },
             .run => |source| try self.run(writer, source),
             .pull => |n| try self.pull(writer, n),
+            .begin => try self.begin(writer),
+            .commit => try self.commit(writer),
+            .rollback => try self.rollback(writer),
         }
         return true;
+    }
+
+    fn begin(self: *Session, writer: *std.Io.Writer) Error!void {
+        self.clearPending();
+        if (self.txn != null) {
+            try self.fail(writer, @errorName(error.TransactionAlreadyOpen));
+            return;
+        }
+        self.txn = self.store.txn();
+        try writeEmptySuccess(self.gpa, writer);
+    }
+
+    fn commit(self: *Session, writer: *std.Io.Writer) Error!void {
+        self.clearPending();
+        var txn = self.takeTransaction() catch |err| {
+            try self.fail(writer, @errorName(err));
+            return;
+        };
+        defer txn.close();
+        txn.commit() catch |err| {
+            try self.fail(writer, @errorName(err));
+            return;
+        };
+        try writeEmptySuccess(self.gpa, writer);
+    }
+
+    fn rollback(self: *Session, writer: *std.Io.Writer) Error!void {
+        self.clearPending();
+        self.rollbackTransaction() catch |err| {
+            try self.fail(writer, @errorName(err));
+            return;
+        };
+        try writeEmptySuccess(self.gpa, writer);
     }
 
     fn run(self: *Session, writer: *std.Io.Writer, source: []const u8) Error!void {
@@ -178,7 +229,10 @@ const Session = struct {
             return;
         }
 
-        var result = executePrepared(self.gpa, self.store, &prepared) catch |err| {
+        var result = (if (self.txn) |txn|
+            query.execute(self.gpa, txn, &prepared)
+        else
+            executePrepared(self.gpa, self.store, &prepared)) catch |err| {
             try self.fail(writer, @errorName(err));
             return;
         };
@@ -217,6 +271,18 @@ const Session = struct {
         if (self.pending) |*result| result.deinit(self.gpa);
         self.pending = null;
         self.row_i = 0;
+    }
+
+    fn rollbackTransaction(self: *Session) Error!void {
+        var txn = try self.takeTransaction();
+        defer txn.close();
+        try txn.rollback();
+    }
+
+    fn takeTransaction(self: *Session) Error!storage.Transaction {
+        const txn = self.txn orelse return error.NoOpenTransaction;
+        self.txn = null;
+        return txn;
     }
 };
 
@@ -343,6 +409,19 @@ fn parseRequest(gpa: Allocator, payload: []const u8) Error!Request {
         Tag.pull => blk: {
             if (header.fields != 1) return error.InvalidMessage;
             break :blk .{ .pull = try pack.readPullN(gpa) };
+        },
+        Tag.begin => blk: {
+            if (header.fields != 1) return error.InvalidMessage;
+            try pack.skipValue();
+            break :blk .begin;
+        },
+        Tag.commit => blk: {
+            if (header.fields != 0) return error.InvalidMessage;
+            break :blk .commit;
+        },
+        Tag.rollback => blk: {
+            if (header.fields != 0) return error.InvalidMessage;
+            break :blk .rollback;
         },
         else => error.InvalidMessage,
     };
@@ -850,8 +929,65 @@ test "bolt session executes return query" {
     try std.testing.expect(std.mem.indexOf(u8, output.written(), &[_]u8{ 0xb1, 0x71, 0x91, 0x37 }) != null);
 }
 
+test "bolt explicit transactions preserve snapshot isolation across sessions" {
+    var tmp = @import("test_helpers.zig").tmp();
+    defer tmp.cleanup();
+    const store = try tmp.store("bolt-snapshot.db");
+    defer store.db.close();
+
+    var session_a = Session{ .gpa = std.testing.allocator, .store = store };
+    defer session_a.deinit();
+    var session_b = Session{ .gpa = std.testing.allocator, .store = store };
+    defer session_b.deinit();
+    var session_c = Session{ .gpa = std.testing.allocator, .store = store };
+    defer session_c.deinit();
+
+    var out_a: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out_a.deinit();
+    var out_b: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out_b.deinit();
+    var out_c: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out_c.deinit();
+
+    try handleTestPayload(&session_a, &out_a.writer, &[_]u8{ 0xb1, Tag.begin, 0xa0 });
+
+    try handleTestPayload(&session_b, &out_b.writer, &[_]u8{ 0xb1, Tag.begin, 0xa0 });
+    try handleTestRunAndPull(&session_b, &out_b.writer, "INSERT (:SnapshotNode {name: 'committed-on-b'})");
+    try handleTestPayload(&session_b, &out_b.writer, &[_]u8{ 0xb0, Tag.commit });
+
+    try handleTestRunAndPull(&session_a, &out_a.writer, "MATCH (n:SnapshotNode) RETURN COUNT(n) AS count");
+    try expectBoltRecordInt(out_a.written(), 0);
+    try handleTestPayload(&session_a, &out_a.writer, &[_]u8{ 0xb0, Tag.rollback });
+
+    try handleTestRunAndPull(&session_c, &out_c.writer, "MATCH (n:SnapshotNode) RETURN COUNT(n) AS count");
+    try expectBoltRecordInt(out_c.written(), 1);
+}
+
 fn writeTestMessage(writer: *std.Io.Writer, payload: []const u8) !void {
     try writer.writeInt(u16, @intCast(payload.len), .big);
     try writer.writeAll(payload);
     try writer.writeInt(u16, 0, .big);
+}
+
+fn handleTestRunAndPull(session: *Session, writer: *std.Io.Writer, source: []const u8) !void {
+    var payload: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer payload.deinit();
+    var pack = PackWriter{ .writer = &payload.writer };
+    try pack.writeStructHeader(3, Tag.run);
+    try pack.writeString(source);
+    try pack.writeMapHeader(0);
+    try pack.writeMapHeader(0);
+    try handleTestPayload(session, writer, payload.written());
+    try handleTestPayload(session, writer, &[_]u8{ 0xb1, Tag.pull, 0xa1, 0x81, 'n', 0xff });
+}
+
+fn handleTestPayload(session: *Session, writer: *std.Io.Writer, payload: []const u8) !void {
+    var request = try parseRequest(std.testing.allocator, payload);
+    defer request.deinit(std.testing.allocator);
+    try std.testing.expect(try session.handle(writer, request));
+}
+
+fn expectBoltRecordInt(output: []const u8, value: u8) !void {
+    const needle = [_]u8{ 0xb1, Tag.record, 0x91, value };
+    try std.testing.expect(std.mem.indexOf(u8, output, &needle) != null);
 }
