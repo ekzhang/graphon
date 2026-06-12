@@ -648,6 +648,18 @@ fn planAggregateExpr(planner: *Planner, expr: Ast.Expr, aggregate: *Plan.Aggrega
             right = .{ .ident = 0 };
             break :blk .{ .binop = planned };
         },
+        .index => |index| blk: {
+            const planned = try planner.gpa.create(Plan.IndexExp);
+            errdefer planner.gpa.destroy(planned);
+            var base = try planAggregateExpr(planner, index.base, aggregate);
+            errdefer base.deinit(planner.gpa);
+            var index_exp = try planAggregateExpr(planner, index.index, aggregate);
+            errdefer index_exp.deinit(planner.gpa);
+            planned.* = .{ .base = base, .index = index_exp };
+            base = .{ .ident = 0 };
+            index_exp = .{ .ident = 0 };
+            break :blk .{ .index = planned };
+        },
         .variable, .property => return error.Unsupported,
     };
 }
@@ -806,6 +818,7 @@ fn appendPathPattern(planner: *Planner, pattern: Ast.PathPattern) Error!void {
         while (segment_i > 0) {
             segment_i -= 1;
             const segment = pattern.segments[segment_i];
+            if (segment.repeat != null) return error.Unsupported;
             current = try appendPathTraversal(
                 planner,
                 current,
@@ -819,20 +832,26 @@ fn appendPathPattern(planner: *Planner, pattern: Ast.PathPattern) Error!void {
         segment_i = anchor.node_i;
         while (segment_i < pattern.segments.len) : (segment_i += 1) {
             const segment = pattern.segments[segment_i];
-            current = try appendPathTraversal(
-                planner,
-                current,
-                pathPatternNode(pattern, segment_i + 1),
-                segment.edge,
-                segment.edge.direction,
-            );
+            current = if (segment.repeat) |repeat|
+                try appendPathRepeatTraversal(planner, pattern.mode, current, pathPatternNode(pattern, segment_i + 1), segment.edge, repeat)
+            else
+                try appendPathTraversal(
+                    planner,
+                    current,
+                    pathPatternNode(pattern, segment_i + 1),
+                    segment.edge,
+                    segment.edge.direction,
+                );
         }
         return;
     }
 
     var current = try appendNodeStart(planner, pattern.start);
     for (pattern.segments) |segment| {
-        current = try appendPathTraversal(planner, current, segment.node, segment.edge, segment.edge.direction);
+        current = if (segment.repeat) |repeat|
+            try appendPathRepeatTraversal(planner, pattern.mode, current, segment.node, segment.edge, repeat)
+        else
+            try appendPathTraversal(planner, current, segment.node, segment.edge, segment.edge.direction);
     }
 }
 
@@ -886,6 +905,77 @@ fn appendNodeStart(planner: *Planner, pattern: Ast.NodePattern) Error!u16 {
     label = null;
     try appendNodeFilters(planner, ident, pattern, true);
     return ident;
+}
+
+fn appendPathRepeatTraversal(
+    planner: *Planner,
+    mode: Ast.PathMode,
+    current: u16,
+    dest_pattern: Ast.NodePattern,
+    edge_pattern: Ast.EdgePattern,
+    repeat: Ast.PathRepeat,
+) Error!u16 {
+    const existing_dest = try boundNodeIdent(planner, dest_pattern);
+    const dest_ident = existing_dest orelse planner.allocIdent();
+    if (dest_pattern.variable) |name| {
+        if (existing_dest == null) try planner.bind(name, .node, dest_ident);
+    }
+
+    const argument_ident = planner.allocIdent();
+    const frontier_ident = planner.allocIdent();
+    const needs_edge_ident =
+        mode == .trail or
+        edge_pattern.variable != null or
+        edge_pattern.properties.len > 0;
+    const edge_ident: ?u16 = if (needs_edge_ident) planner.allocIdent() else null;
+
+    var accumulators = std.ArrayList(Plan.RepeatAccumulator).empty;
+    errdefer accumulators.deinit(planner.gpa);
+    if (edge_pattern.variable) |name| {
+        if (planner.bindings.get(name) != null) return error.Unsupported;
+        const ident = planner.allocIdent();
+        try planner.bind(name, .scalar, ident);
+        try accumulators.append(planner.gpa, .{ .ident = ident, .item_ident = edge_ident.? });
+    }
+
+    try planner.plan.ops.append(planner.gpa, .begin);
+    try planner.plan.ops.append(planner.gpa, .{ .argument = argument_ident });
+
+    var edge_label: ?[]u8 = if (edge_pattern.label) |label| try planner.gpa.dupe(u8, label) else null;
+    errdefer if (edge_label) |label| planner.gpa.free(label);
+    try planner.plan.ops.append(planner.gpa, .{ .step = .{
+        .ident_src = argument_ident,
+        .ident_edge = edge_ident,
+        .ident_dest = frontier_ident,
+        .direction = edge_pattern.direction,
+        .edge_label = edge_label,
+    } });
+    edge_label = null;
+    if (edge_ident) |ident| try appendEdgeFilters(planner, ident, edge_pattern);
+
+    try planner.plan.ops.append(planner.gpa, .{ .repeat = .{
+        .mode = planPathMode(mode),
+        .ident_start = current,
+        .ident_argument = argument_ident,
+        .ident_frontier = frontier_ident,
+        .ident_dest = dest_ident,
+        .ident_trail_edge = if (mode == .trail) edge_ident else null,
+        .dest_bound = existing_dest != null,
+        .min = repeat.min,
+        .max = repeat.max,
+        .accumulators = accumulators,
+    } });
+    accumulators = .empty;
+
+    try appendNodeFilters(planner, dest_ident, dest_pattern, false);
+    return dest_ident;
+}
+
+fn planPathMode(mode: Ast.PathMode) Plan.PathMode {
+    return switch (mode) {
+        .walk => .walk,
+        .trail => .trail,
+    };
 }
 
 fn appendPathTraversal(
@@ -1046,6 +1136,18 @@ fn planExpr(planner: *Planner, expr: Ast.Expr) Error!Plan.Exp {
             right = .{ .ident = 0 };
             break :blk .{ .binop = planned };
         },
+        .index => |index| blk: {
+            const planned = try planner.gpa.create(Plan.IndexExp);
+            errdefer planner.gpa.destroy(planned);
+            var base = try planExpr(planner, index.base);
+            errdefer base.deinit(planner.gpa);
+            var index_exp = try planExpr(planner, index.index);
+            errdefer index_exp.deinit(planner.gpa);
+            planned.* = .{ .base = base, .index = index_exp };
+            base = .{ .ident = 0 };
+            index_exp = .{ .ident = 0 };
+            break :blk .{ .index = planned };
+        },
         .aggregate => return error.Unsupported,
     };
 }
@@ -1059,6 +1161,7 @@ fn exprName(gpa: Allocator, item: Ast.ReturnItem) Allocator.Error![]u8 {
         .aggregate => |call| gpa.dupe(u8, call.function.string()),
         .unary => gpa.dupe(u8, "expr"),
         .binary => gpa.dupe(u8, "expr"),
+        .index => gpa.dupe(u8, "expr"),
     };
 }
 
@@ -1096,6 +1199,7 @@ fn exprHasAggregate(expr: Ast.Expr) bool {
         .aggregate => true,
         .unary => |unary| exprHasAggregate(unary.operand),
         .binary => |binary| exprHasAggregate(binary.left) or exprHasAggregate(binary.right),
+        .index => |index| exprHasAggregate(index.base) or exprHasAggregate(index.index),
         .literal, .variable, .property => false,
     };
 }
@@ -1106,6 +1210,8 @@ fn exprHasRowValueOutsideAggregate(expr: Ast.Expr) bool {
         .unary => |unary| exprHasRowValueOutsideAggregate(unary.operand),
         .binary => |binary| exprHasRowValueOutsideAggregate(binary.left) or
             exprHasRowValueOutsideAggregate(binary.right),
+        .index => |index| exprHasRowValueOutsideAggregate(index.base) or
+            exprHasRowValueOutsideAggregate(index.index),
         .variable, .property => true,
         .literal => false,
     };

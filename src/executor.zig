@@ -10,6 +10,7 @@ const storage = @import("storage.zig");
 
 const join_ops = @import("executor/join_ops.zig");
 const modify_ops = @import("executor/modify_ops.zig");
+const repeat_ops = @import("executor/repeat_ops.zig");
 const scan_ops = @import("executor/scan_ops.zig");
 const simple_ops = @import("executor/simple_ops.zig");
 const step_ops = @import("executor/step_ops.zig");
@@ -27,6 +28,8 @@ const operator_impls = blk: {
         .{ Plan.Operator.step, step_ops.StepState, step_ops.StepState.deinit, step_ops.runStep },
         .{ Plan.Operator.step_between, step_ops.StepState, step_ops.StepState.deinit, step_ops.runStepBetween },
         .{ Plan.Operator.begin, bool, null, join_ops.runBegin },
+        .{ Plan.Operator.argument, void, null, repeat_ops.runArgument },
+        .{ Plan.Operator.repeat, repeat_ops.RepeatState, repeat_ops.RepeatState.deinit, repeat_ops.runRepeat },
         .{ Plan.Operator.join, join_ops.JoinState, null, join_ops.runJoin },
         .{ Plan.Operator.semi_join, void, null, join_ops.runSemiJoin },
         .{ Plan.Operator.optional_join, join_ops.OptionalJoinState, join_ops.OptionalJoinState.deinit, join_ops.runOptionalJoin },
@@ -317,7 +320,23 @@ pub fn evaluate(exp: Plan.Exp, assignments: []const Value, txn: storage.Transact
                 .and_, .or_ => unreachable,
             };
         },
+        .index => |index| evaluateIndex(index, assignments, txn),
     };
+}
+
+fn evaluateIndex(index: *Plan.IndexExp, assignments: []const Value, txn: storage.Transaction) Error!Value {
+    var base = try evaluate(index.base, assignments, txn);
+    defer base.deinit(txn.allocator);
+    var index_value = try evaluate(index.index, assignments, txn);
+    defer index_value.deinit(txn.allocator);
+
+    if (base == .null or index_value == .null) return .null;
+    if (base != .list or index_value != .int64) return Error.WrongType;
+    if (index_value.int64 < 0) return .null;
+
+    const item_i = std.math.cast(usize, index_value.int64) orelse return .null;
+    if (item_i >= base.list.len) return .null;
+    return base.list[item_i].dupe(txn.allocator);
 }
 
 fn evaluateProperty(p: Plan.PropertyExp, assignments: []const Value, txn: storage.Transaction) Error!Value {
@@ -387,4 +406,22 @@ test evaluate {
     var property_value = try evaluate(property_exp, &.{Value{ .node_ref = node.id }}, txn);
     defer property_value.deinit(txn.allocator);
     try std.testing.expectEqual(Value{ .int64 = 42 }, property_value);
+
+    const list_items = try txn.allocator.dupe(Value, &.{
+        Value{ .int64 = 10 },
+        Value{ .int64 = 20 },
+    });
+    defer txn.allocator.free(list_items);
+    var index_exp = Plan.IndexExp{
+        .base = .{ .ident = 0 },
+        .index = .{ .ident = 1 },
+    };
+    try std.testing.expectEqual(
+        Value{ .int64 = 20 },
+        try evaluate(.{ .index = &index_exp }, &.{ .{ .list = list_items }, .{ .int64 = 1 } }, txn),
+    );
+    try std.testing.expectEqual(
+        Value{ .null = {} },
+        try evaluate(.{ .index = &index_exp }, &.{ .{ .list = list_items }, .{ .int64 = 2 } }, txn),
+    );
 }

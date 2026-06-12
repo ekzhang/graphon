@@ -59,14 +59,15 @@ pub const Row = struct {
     }
 };
 
+/// A returned column value after optional graph-element materialization.
 pub const ResultValue = union(enum) {
-    scalar: Value,
+    value: Value,
     node: types.Node,
     edge: types.Edge,
 
     pub fn deinit(self: *ResultValue, allocator: Allocator) void {
         switch (self.*) {
-            .scalar => |*value| value.deinit(allocator),
+            .value => |*value| value.deinit(allocator),
             .node => |*node| node.deinit(allocator),
             .edge => |*edge| edge.deinit(allocator),
         }
@@ -75,7 +76,7 @@ pub const ResultValue = union(enum) {
 
     pub fn writeJson(self: ResultValue, json: *std.json.Stringify) !void {
         switch (self) {
-            .scalar => |scalar| try scalar.writeJson(json),
+            .value => |value| try value.writeJson(json),
             .node => |node| try node.writeJson(json),
             .edge => |edge| try edge.writeJson(json),
         }
@@ -229,7 +230,7 @@ fn rowFromCompiledResult(
 ) Error!Row {
     const values = try allocator.alloc(ResultValue, columns.len);
     errdefer allocator.free(values);
-    for (values) |*value| value.* = .{ .scalar = .null };
+    for (values) |*value| value.* = .{ .value = .null };
     errdefer for (values) |*value| value.deinit(allocator);
 
     for (columns, result.values, 0..) |column, value, i| {
@@ -249,19 +250,19 @@ fn resultValueFromCompiledValue(
     if (column.graph_value) {
         switch (value) {
             .node_ref => |id| {
-                var node = try txn.getNode(id) orelse return .{ .scalar = .null };
+                var node = try txn.getNode(id) orelse return .{ .value = .null };
                 defer node.deinit(txn.allocator);
                 return .{ .node = try node.dupe(allocator) };
             },
             .edge_ref => |id| {
-                var edge = try txn.getEdge(id) orelse return .{ .scalar = .null };
+                var edge = try txn.getEdge(id) orelse return .{ .value = .null };
                 defer edge.deinit(txn.allocator);
                 return .{ .edge = try edge.dupe(allocator) };
             },
             else => {},
         }
     }
-    return .{ .scalar = try value.dupe(allocator) };
+    return .{ .value = try value.dupe(allocator) };
 }
 
 // ----------------------------- Execution ----------------------------------

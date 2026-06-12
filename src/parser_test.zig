@@ -153,6 +153,27 @@ test "parse aggregate expressions" {
     try std.testing.expectEqualStrings("adjusted", ret.items[0].alias.?);
 }
 
+test "parse list index expressions" {
+    var program = try Ast.parse(std.testing.allocator, "RETURN rels[0], rels[i], (rels)[1]");
+    defer program.deinit(std.testing.allocator);
+
+    const body = try expectSingleQuery(&program.statements[0]);
+    const ret = body.return_only;
+    try std.testing.expectEqual(@as(usize, 3), ret.items.len);
+
+    const literal_index = try expectIndex(ret.items[0].expr);
+    try expectVariable(literal_index.base, "rels");
+    try expectIntLiteral(literal_index.index, 0);
+
+    const variable_index = try expectIndex(ret.items[1].expr);
+    try expectVariable(variable_index.base, "rels");
+    try expectVariable(variable_index.index, "i");
+
+    const grouped_index = try expectIndex(ret.items[2].expr);
+    try expectVariable(grouped_index.base, "rels");
+    try expectIntLiteral(grouped_index.index, 1);
+}
+
 test "parse match path with labels properties and directed edge" {
     var program = try Ast.parse(std.testing.allocator, "MATCH (a:User {name: 'Ada'})-[e:Likes {since: 2024}]->(f:Food) RETURN f.name");
     defer program.deinit(std.testing.allocator);
@@ -178,6 +199,39 @@ test "parse match path with labels properties and directed edge" {
 
     try std.testing.expect(query.action == .ret);
     try expectPropertyExpr(query.action.ret.items[0].expr, "f", "name");
+}
+
+test "parse match trail quantified edge segment" {
+    var program = try Ast.parse(std.testing.allocator, "MATCH TRAIL (follower:Person)-[:Follows]->{1,3}(influencer:Person), (influencer)-[:Created]->(post:Post) RETURN influencer.name");
+    defer program.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), program.statements.len);
+    const body = try expectSingleQuery(&program.statements[0]);
+    try std.testing.expect(body.* == .match_query);
+
+    const query = &body.match_query;
+    try std.testing.expectEqual(@as(usize, 2), query.patterns.len);
+    try std.testing.expectEqual(Ast.PathMode.trail, query.patterns[0].mode);
+    try std.testing.expectEqual(Ast.PathMode.walk, query.patterns[1].mode);
+    try expectOptionalName(query.patterns[0].start.variable, "follower");
+    try expectOptionalName(query.patterns[0].start.label, "Person");
+    try std.testing.expectEqual(@as(usize, 1), query.patterns[0].segments.len);
+
+    const segment = &query.patterns[0].segments[0];
+    try expectOptionalName(segment.edge.label, "Follows");
+    try std.testing.expectEqual(EdgeDirection.right, segment.edge.direction);
+    try expectOptionalName(segment.node.variable, "influencer");
+    try expectOptionalName(segment.node.label, "Person");
+    try std.testing.expect(segment.repeat != null);
+    try std.testing.expectEqual(@as(usize, 1), segment.repeat.?.min);
+    try std.testing.expectEqual(@as(usize, 3), segment.repeat.?.max);
+
+    const second = &query.patterns[1].segments[0];
+    try expectOptionalName(query.patterns[1].start.variable, "influencer");
+    try expectOptionalName(second.edge.label, "Created");
+    try expectOptionalName(second.node.variable, "post");
+    try expectOptionalName(second.node.label, "Post");
+    try std.testing.expect(second.repeat == null);
 }
 
 test "parse match where and set clauses" {
@@ -436,6 +490,11 @@ fn expectAggregate(expr: Ast.Expr, function: Plan.AggregateFunction) !*Ast.Aggre
     try std.testing.expect(expr == .aggregate);
     try std.testing.expectEqual(function, expr.aggregate.function);
     return expr.aggregate;
+}
+
+fn expectIndex(expr: Ast.Expr) !*Ast.IndexExpr {
+    try std.testing.expect(expr == .index);
+    return expr.index;
 }
 
 fn expectVariable(expr: Ast.Expr, expected: []const u8) !void {
