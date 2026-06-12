@@ -456,6 +456,7 @@ const PathPatternOptions = struct {
 };
 
 fn parsePathPatternWith(p: *Parse, options: PathPatternOptions) InternalError!Ast.PathPattern {
+    const mode = try p.parsePathModePrefix();
     var start = Ast.NodePattern{};
     var start_owned = false;
     errdefer if (start_owned) start.deinit(p.gpa);
@@ -479,10 +480,22 @@ fn parsePathPatternWith(p: *Parse, options: PathPatternOptions) InternalError!As
         }
     }
 
-    const out = Ast.PathPattern{ .start = start, .segments = parsed_segments.segments };
+    const out = Ast.PathPattern{ .mode = mode, .start = start, .segments = parsed_segments.segments };
     start_owned = false;
     parsed_segments.segments = &.{};
     return out;
+}
+
+fn parsePathModePrefix(p: *Parse) InternalError!Ast.PathMode {
+    const mode: Ast.PathMode = if (p.eat(.keyword_trail))
+        .trail
+    else if (p.eat(.keyword_walk))
+        .walk
+    else
+        return .walk;
+
+    _ = p.eat(.keyword_path) or p.eat(.keyword_paths);
+    return mode;
 }
 
 fn isInsertEdgeDirection(direction: EdgeDirection) bool {
@@ -507,10 +520,12 @@ fn parsePathSegments(p: *Parse) InternalError!ParsedPathSegments {
     while (p.edgeStartsHere()) {
         var edge: ?Ast.EdgePattern = try p.parseEdgePattern();
         errdefer if (edge) |*e| e.deinit(p.gpa);
+        const repeat = if (p.at(.l_brace)) try p.parsePathRepeat() else null;
         const explicit_node = p.at(.l_paren);
+        if (repeat != null and !explicit_node) return p.fail(.expected_node_pattern);
         var node: ?Ast.NodePattern = if (explicit_node) try p.parseNodePattern() else Ast.NodePattern{};
         errdefer if (node) |*n| n.deinit(p.gpa);
-        try segments.append(p.gpa, .{ .edge = edge.?, .node = node.? });
+        try segments.append(p.gpa, .{ .edge = edge.?, .node = node.?, .repeat = repeat });
         explicit_end_node = explicit_node;
         edge = null;
         node = null;
@@ -525,6 +540,15 @@ fn parsePathSegments(p: *Parse) InternalError!ParsedPathSegments {
 fn deinitPathSegments(segments: []Ast.PathSegment, gpa: Allocator) void {
     for (segments) |*segment| segment.deinit(gpa);
     gpa.free(segments);
+}
+
+fn parsePathRepeat(p: *Parse) InternalError!Ast.PathRepeat {
+    try p.expect(.l_brace);
+    const min = try p.parseCount();
+    const max = if (p.eat(.comma)) try p.parseCount() else min;
+    try p.expect(.r_brace);
+    if (max < min) return p.fail(.expected_count);
+    return .{ .min = min, .max = max };
 }
 
 fn parseWherePredicate(p: *Parse) InternalError!Ast.WherePredicate {
@@ -749,7 +773,25 @@ fn parseUnary(p: *Parse) InternalError!Ast.Expr {
         operand = null;
         return .{ .unary = unary };
     }
-    return p.parsePrimary();
+    return p.parsePostfix();
+}
+
+fn parsePostfix(p: *Parse) InternalError!Ast.Expr {
+    var expr = try p.parsePrimary();
+    errdefer expr.deinit(p.gpa);
+
+    while (p.eat(.l_bracket)) {
+        var index: ?Ast.Expr = try p.parseExpr(0);
+        errdefer if (index) |*i| i.deinit(p.gpa);
+        try p.expect(.r_bracket);
+
+        const indexed = try p.gpa.create(Ast.IndexExpr);
+        indexed.* = .{ .base = expr, .index = index.? };
+        index = null;
+        expr = .{ .index = indexed };
+    }
+
+    return expr;
 }
 
 fn parsePrimary(p: *Parse) InternalError!Ast.Expr {

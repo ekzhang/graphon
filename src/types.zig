@@ -143,6 +143,7 @@ pub const ValueKind = enum(u8) {
     id = 6,
     bool = 7,
     null = 8,
+    list = 9,
 };
 
 /// Encode a length-delimited byte buffer.
@@ -234,10 +235,15 @@ pub const Value = union(ValueKind) {
     id: ElementId, // Not necessarily populated by node or edge.
     bool: bool,
     null,
+    list: []Value,
 
     pub fn deinit(self: *Value, allocator: Allocator) void {
         switch (self.*) {
             .string => |s| allocator.free(s),
+            .list => |items| {
+                for (items) |*item| item.deinit(allocator);
+                allocator.free(items);
+            },
             else => {},
         }
         self.* = undefined;
@@ -247,6 +253,16 @@ pub const Value = union(ValueKind) {
     pub fn dupe(self: Value, allocator: Allocator) Allocator.Error!Value {
         return switch (self) {
             .string => |s| .{ .string = try allocator.dupe(u8, s) },
+            .list => |items| blk: {
+                const out = try allocator.alloc(Value, items.len);
+                for (out) |*item| item.* = .null;
+                errdefer {
+                    for (out) |*item| item.deinit(allocator);
+                    allocator.free(out);
+                }
+                for (items, out) |item, *dest| dest.* = try item.dupe(allocator);
+                break :blk .{ .list = out };
+            },
             else => self,
         };
     }
@@ -262,6 +278,11 @@ pub const Value = union(ValueKind) {
                 const id_string = id.toString();
                 try json.write(id_string[0..]);
             },
+            .list => |items| {
+                try json.beginArray();
+                for (items) |item| try item.writeJson(json);
+                try json.endArray();
+            },
         }
     }
 
@@ -276,6 +297,14 @@ pub const Value = union(ValueKind) {
             .id => |id| try writer.print("{s}", .{id.toString()}),
             .bool => |b| try writer.print("{s}", .{if (b) "true" else "false"}),
             .null => try writer.print("null", .{}),
+            .list => |items| {
+                try writer.writeByte('[');
+                for (items, 0..) |item, i| {
+                    if (i > 0) try writer.writeAll(", ");
+                    try item.print(writer);
+                }
+                try writer.writeByte(']');
+            },
         }
     }
 
@@ -295,6 +324,10 @@ pub const Value = union(ValueKind) {
             .id => |id| try id.encode(writer),
             .bool => |b| try writer.writeByte(if (b) 1 else 0),
             .null => {},
+            .list => |items| {
+                try writer.writeInt(u32, @intCast(items.len), .big);
+                for (items) |item| try item.encode(writer);
+            },
         }
     }
 
@@ -332,6 +365,17 @@ pub const Value = union(ValueKind) {
                 return .{ .bool = b != 0 };
             },
             .null => return .null,
+            .list => {
+                const len = try reader.takeInt(u32, .big);
+                const items = try allocator.alloc(Value, len);
+                for (items) |*item| item.* = .null;
+                errdefer {
+                    for (items) |*item| item.deinit(allocator);
+                    allocator.free(items);
+                }
+                for (items) |*item| item.* = try Value.decode(allocator, reader);
+                return .{ .list = items };
+            },
         }
     }
 
@@ -430,6 +474,16 @@ pub const Value = union(ValueKind) {
                 else => false,
             },
             .null => b == .null,
+            .list => |a_| switch (b) {
+                .list => |b_| {
+                    if (a_.len != b_.len) return false;
+                    for (a_, b_) |a_item, b_item| {
+                        if (!a_item.eql(b_item)) return false;
+                    }
+                    return true;
+                },
+                else => false,
+            },
         };
     }
 
@@ -466,6 +520,7 @@ pub const Value = union(ValueKind) {
             .node_ref, .edge_ref, .id => true,
             .bool => |b| b,
             .null => false,
+            .list => |items| items.len > 0,
         };
     }
 };

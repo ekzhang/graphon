@@ -267,6 +267,11 @@ pub const ReadClause = union(enum) {
     }
 };
 
+pub const PathMode = enum {
+    walk,
+    trail,
+};
+
 pub const MatchClause = struct {
     patterns: []PathPattern,
     where: ?WherePredicate = null,
@@ -364,6 +369,7 @@ pub const ReturnItem = struct {
 };
 
 pub const PathPattern = struct {
+    mode: PathMode = .walk,
     start: NodePattern,
     segments: []PathSegment,
 
@@ -378,12 +384,18 @@ pub const PathPattern = struct {
 pub const PathSegment = struct {
     edge: EdgePattern,
     node: NodePattern,
+    repeat: ?PathRepeat = null,
 
     pub fn deinit(self: *PathSegment, allocator: Allocator) void {
         self.edge.deinit(allocator);
         self.node.deinit(allocator);
         self.* = undefined;
     }
+};
+
+pub const PathRepeat = struct {
+    min: usize,
+    max: usize,
 };
 
 pub const NodePattern = struct {
@@ -440,6 +452,7 @@ pub const Expr = union(enum) {
     aggregate: *AggregateCall,
     unary: *UnaryExpr,
     binary: *BinaryExpr,
+    index: *IndexExpr,
 
     pub fn deinit(self: *Expr, allocator: Allocator) void {
         switch (self.*) {
@@ -455,6 +468,10 @@ pub const Expr = union(enum) {
             .binary => |b| {
                 b.deinit(allocator);
                 allocator.destroy(b);
+            },
+            .index => |i| {
+                i.deinit(allocator);
+                allocator.destroy(i);
             },
             .variable, .property => {},
         }
@@ -491,6 +508,17 @@ pub const BinaryExpr = struct {
     pub fn deinit(self: *BinaryExpr, allocator: Allocator) void {
         self.left.deinit(allocator);
         self.right.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+pub const IndexExpr = struct {
+    base: Expr,
+    index: Expr,
+
+    pub fn deinit(self: *IndexExpr, allocator: Allocator) void {
+        self.base.deinit(allocator);
+        self.index.deinit(allocator);
         self.* = undefined;
     }
 };

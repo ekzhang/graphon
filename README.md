@@ -50,18 +50,18 @@ GQL is a powerful language. Here is a larger example that demonstrates a few fea
 - **Ordering and Limiting:** Orders and limits the output to the top 10 results.
 
 ```gql
-MATCH TRAIL (follower:Person) ((nodes)-[:Follows]->()){1,3} (influencer:Person),
+MATCH TRAIL (follower:Person)-[follows:Follows]->{1,3}(influencer:Person),
             (influencer)-[:Created]->(post:Post),
             (follower)-[:Likes]->(post)
 WHERE post.likes_count > 100
 OPTIONAL MATCH (influencer)-[:Created]->(otherPost:Post)
          WHERE otherPost.creation_date > DATE '2024-01-01'
-WITH follower, influencer, post, nodes, COUNT(otherPost) AS recentPosts
+WITH follower, influencer, post, follows, COUNT(otherPost) AS recentPosts
 RETURN DISTINCT follower.name AS FollowerName,
                 influencer.name AS InfluencerName,
                 post.title AS PopularPost,
                 recentPosts AS RecentPostCount,
-                nodes AS FollowerTrail
+                follows AS FollowerTrail
 ORDER BY RecentPostCount DESC, InfluencerName
 LIMIT 10;
 ```

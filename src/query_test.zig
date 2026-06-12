@@ -52,25 +52,25 @@ fn jsonForTest(result: ResultSet) ![]u8 {
 
 fn resultContainsString(result: ResultSet, column: usize, expected: []const u8) bool {
     for (result.rows) |row| {
-        if (row.values[column] != .scalar) continue;
-        const scalar = row.values[column].scalar;
-        if (scalar != .string) continue;
-        if (std.mem.eql(u8, scalar.string, expected)) return true;
+        if (row.values[column] != .value) continue;
+        const value = row.values[column].value;
+        if (value != .string) continue;
+        if (std.mem.eql(u8, value.string, expected)) return true;
     }
     return false;
 }
 
 fn resultContainsStringInt(result: ResultSet, string_column: usize, expected_string: []const u8, int_column: usize, expected_int: i64) bool {
     for (result.rows) |row| {
-        if (row.values[string_column] != .scalar) continue;
-        const string_scalar = row.values[string_column].scalar;
-        if (string_scalar != .string) continue;
-        if (!std.mem.eql(u8, string_scalar.string, expected_string)) continue;
+        if (row.values[string_column] != .value) continue;
+        const string_value = row.values[string_column].value;
+        if (string_value != .string) continue;
+        if (!std.mem.eql(u8, string_value.string, expected_string)) continue;
 
-        if (row.values[int_column] != .scalar) continue;
-        const int_scalar = row.values[int_column].scalar;
-        if (int_scalar != .int64) continue;
-        if (int_scalar.int64 == expected_int) return true;
+        if (row.values[int_column] != .value) continue;
+        const int_value = row.values[int_column].value;
+        if (int_value != .int64) continue;
+        if (int_value.int64 == expected_int) return true;
     }
     return false;
 }
@@ -142,6 +142,50 @@ test "compile bound endpoint path query plan snapshot" {
         \\    NodeScan (%1:Person)
         \\  Begin
         \\  NodeScan (%0:Person)
+    ));
+}
+
+test "compile match trail query plan snapshot" {
+    try checkQueryPlanSnapshot("MATCH TRAIL (a:Person {name: 'Ada'})-[:Follows]->{1,3}(b:Person) RETURN b.name", snap(@src(),
+        \\Plan{%5}
+        \\  Project %5: %1.name
+        \\  Filter %1: Person
+        \\  Repeat trail %0 -> %1 (%2 -> %3){1, 3}
+        \\    Step (%2)-[%4:Follows]->(%3)
+        \\    Argument %2
+        \\  Begin
+        \\  Filter (%0.name = 'Ada')
+        \\  NodeScan (%0:Person)
+    ));
+}
+
+test "compile match trail with repeated subplan filters snapshot" {
+    try checkQueryPlanSnapshot("MATCH TRAIL (a:Person)-[rels:Follows {since: 2024}]->{1,2}(b:Person {name: 'Cara'}) RETURN rels, b", snap(@src(),
+        \\Plan{%5, %1}
+        \\  Filter (%1.name = 'Cara')
+        \\  Filter %1: Person
+        \\  Repeat trail %0 -> %1 (%2 -> %3){1, 2} collect %5 <- %4
+        \\    Filter (%4.since = 2024)
+        \\    Step (%2)-[%4:Follows]->(%3)
+        \\    Argument %2
+        \\  Begin
+        \\  NodeScan (%0:Person)
+    ));
+}
+
+test "compile quantified edge chain query plan snapshot" {
+    try checkQueryPlanSnapshot("MATCH (c1:Comment)<-[:replyOf]-{1,3}(m)-[:replyOf]->{1,3}(c2:Comment) RETURN m, c2", snap(@src(),
+        \\Plan{%1, %4}
+        \\  Filter %4: Comment
+        \\  Repeat walk %1 -> %4 (%5 -> %6){1, 3}
+        \\    Step (%5)-[:replyOf]->(%6)
+        \\    Argument %5
+        \\  Begin
+        \\  Repeat walk %0 -> %1 (%2 -> %3){1, 3}
+        \\    Step (%2)<-[:replyOf]-(%3)
+        \\    Argument %2
+        \\  Begin
+        \\  NodeScan (%0:Comment)
     ));
 }
 
@@ -346,7 +390,7 @@ test "return arithmetic" {
     var result = try execForTest(store, "RETURN 100 * 3");
     defer result.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 1), result.rows.len);
-    try std.testing.expectEqual(Value{ .int64 = 300 }, result.rows[0].values[0].scalar);
+    try std.testing.expectEqual(Value{ .int64 = 300 }, result.rows[0].values[0].value);
 
     const json = try jsonForTest(result);
     defer std.testing.allocator.free(json);
@@ -390,8 +434,8 @@ test "union all keeps duplicate rows" {
 
     try std.testing.expectEqual(@as(usize, 2), result.rows.len);
     try std.testing.expectEqualStrings("n", result.columns[0]);
-    try std.testing.expectEqual(Value{ .int64 = 1 }, result.rows[0].values[0].scalar);
-    try std.testing.expectEqual(Value{ .int64 = 1 }, result.rows[1].values[0].scalar);
+    try std.testing.expectEqual(Value{ .int64 = 1 }, result.rows[0].values[0].value);
+    try std.testing.expectEqual(Value{ .int64 = 1 }, result.rows[1].values[0].value);
 }
 
 test "union removes duplicate rows" {
@@ -405,7 +449,7 @@ test "union removes duplicate rows" {
 
     try std.testing.expectEqual(@as(usize, 1), result.rows.len);
     try std.testing.expectEqualStrings("n", result.columns[0]);
-    try std.testing.expectEqual(Value{ .int64 = 1 }, result.rows[0].values[0].scalar);
+    try std.testing.expectEqual(Value{ .int64 = 1 }, result.rows[0].values[0].value);
 }
 
 test "union rejects mismatched result column counts" {
@@ -468,7 +512,7 @@ test "execute can use different result and transaction allocators" {
         var result = try execForTest(store, "MATCH (p:Person) RETURN p.name");
         defer result.deinit(std.testing.allocator);
         try std.testing.expectEqual(@as(usize, 1), result.rows.len);
-        try std.testing.expectEqualStrings("Ada", result.rows[0].values[0].scalar.string);
+        try std.testing.expectEqualStrings("Ada", result.rows[0].values[0].value.string);
     }
 }
 
@@ -503,12 +547,12 @@ test "statement cursor pulls rows without materializing result set" {
         {
             var row = (try cursor.nextRow()).?;
             defer row.deinit(std.testing.allocator);
-            try std.testing.expectEqualStrings("Ada", row.values[0].scalar.string);
+            try std.testing.expectEqualStrings("Ada", row.values[0].value.string);
         }
         {
             var row = (try cursor.nextRow()).?;
             defer row.deinit(std.testing.allocator);
-            try std.testing.expectEqualStrings("Bert", row.values[0].scalar.string);
+            try std.testing.expectEqualStrings("Bert", row.values[0].value.string);
         }
         try std.testing.expect((try cursor.nextRow()) == null);
     }
@@ -586,8 +630,8 @@ test "insert match return and detach delete" {
         var result = try execForTest(store, "MATCH (a:User {name: 'Eric'})->[:Likes]->(f:Food) RETURN f.name, f.calories");
         defer result.deinit(std.testing.allocator);
         try std.testing.expectEqual(@as(usize, 1), result.rows.len);
-        try std.testing.expectEqualStrings("Pizza", result.rows[0].values[0].scalar.string);
-        try std.testing.expectEqual(Value{ .int64 = 285 }, result.rows[0].values[1].scalar);
+        try std.testing.expectEqualStrings("Pizza", result.rows[0].values[0].value.string);
+        try std.testing.expectEqual(Value{ .int64 = 285 }, result.rows[0].values[1].value);
     }
     {
         var result = try execForTest(store, "MATCH (f:Food {name: 'Pizza'}) DETACH DELETE f");
@@ -676,7 +720,7 @@ test "match path can reuse a node variable" {
         var result = try execForTest(store, "MATCH (a:Person {name: 'Ada'})->[:Knows]->(a) RETURN a.name");
         defer result.deinit(std.testing.allocator);
         try std.testing.expectEqual(@as(usize, 1), result.rows.len);
-        try std.testing.expectEqualStrings("Ada", result.rows[0].values[0].scalar.string);
+        try std.testing.expectEqualStrings("Ada", result.rows[0].values[0].value.string);
     }
 }
 
@@ -739,21 +783,21 @@ test "match return order by" {
         var result = try execForTest(store, "MATCH (p:Person) RETURN p.name ORDER BY p.age");
         defer result.deinit(std.testing.allocator);
         try std.testing.expectEqual(@as(usize, 3), result.rows.len);
-        try std.testing.expectEqualStrings("Ada", result.rows[0].values[0].scalar.string);
-        try std.testing.expectEqualStrings("Bert", result.rows[1].values[0].scalar.string);
-        try std.testing.expectEqualStrings("Cara", result.rows[2].values[0].scalar.string);
+        try std.testing.expectEqualStrings("Ada", result.rows[0].values[0].value.string);
+        try std.testing.expectEqualStrings("Bert", result.rows[1].values[0].value.string);
+        try std.testing.expectEqualStrings("Cara", result.rows[2].values[0].value.string);
     }
     {
         var result = try execForTest(store, "MATCH (p:Person) RETURN p.name ORDER BY p.age DESC SKIP 1 LIMIT 1");
         defer result.deinit(std.testing.allocator);
         try std.testing.expectEqual(@as(usize, 1), result.rows.len);
-        try std.testing.expectEqualStrings("Bert", result.rows[0].values[0].scalar.string);
+        try std.testing.expectEqualStrings("Bert", result.rows[0].values[0].value.string);
     }
     {
         var result = try execForTest(store, "MATCH (p:Person) RETURN p.name AS name ORDER BY name DESC SKIP 1 LIMIT 1");
         defer result.deinit(std.testing.allocator);
         try std.testing.expectEqual(@as(usize, 1), result.rows.len);
-        try std.testing.expectEqualStrings("Bert", result.rows[0].values[0].scalar.string);
+        try std.testing.expectEqualStrings("Bert", result.rows[0].values[0].value.string);
         try std.testing.expectEqualStrings("name", result.columns[0]);
     }
 }
@@ -780,7 +824,7 @@ test "match return distinct" {
         var result = try execForTest(store, "MATCH (p:Person)-[:Likes]->(f:Food) RETURN DISTINCT p.name");
         defer result.deinit(std.testing.allocator);
         try std.testing.expectEqual(@as(usize, 1), result.rows.len);
-        try std.testing.expectEqualStrings("Ada", result.rows[0].values[0].scalar.string);
+        try std.testing.expectEqualStrings("Ada", result.rows[0].values[0].value.string);
     }
 }
 
@@ -806,7 +850,7 @@ test "with distinct carries scoped bindings" {
         var result = try execForTest(store, "MATCH (p:Person)-[:Likes]->(f:Food) WITH DISTINCT p RETURN p.name");
         defer result.deinit(std.testing.allocator);
         try std.testing.expectEqual(@as(usize, 1), result.rows.len);
-        try std.testing.expectEqualStrings("Ada", result.rows[0].values[0].scalar.string);
+        try std.testing.expectEqualStrings("Ada", result.rows[0].values[0].value.string);
     }
 }
 
@@ -832,10 +876,10 @@ test "with optional match returns null extended rows" {
         var result = try execForTest(store, "MATCH (p:Person) WITH p, p.name AS name OPTIONAL MATCH (p)-[:Likes]->(f:Food) RETURN name, f.name ORDER BY name");
         defer result.deinit(std.testing.allocator);
         try std.testing.expectEqual(@as(usize, 2), result.rows.len);
-        try std.testing.expectEqualStrings("Ada", result.rows[0].values[0].scalar.string);
-        try std.testing.expectEqualStrings("Pizza", result.rows[0].values[1].scalar.string);
-        try std.testing.expectEqualStrings("Bert", result.rows[1].values[0].scalar.string);
-        try std.testing.expect(result.rows[1].values[1].scalar == .null);
+        try std.testing.expectEqualStrings("Ada", result.rows[0].values[0].value.string);
+        try std.testing.expectEqualStrings("Pizza", result.rows[0].values[1].value.string);
+        try std.testing.expectEqualStrings("Bert", result.rows[1].values[0].value.string);
+        try std.testing.expect(result.rows[1].values[1].value == .null);
     }
 }
 
@@ -868,10 +912,10 @@ test "with aggregate counts optional matches by group" {
         );
         defer result.deinit(std.testing.allocator);
         try std.testing.expectEqual(@as(usize, 2), result.rows.len);
-        try std.testing.expectEqualStrings("Ada", result.rows[0].values[0].scalar.string);
-        try std.testing.expectEqual(Value{ .int64 = 2 }, result.rows[0].values[1].scalar);
-        try std.testing.expectEqualStrings("Bert", result.rows[1].values[0].scalar.string);
-        try std.testing.expectEqual(Value{ .int64 = 0 }, result.rows[1].values[1].scalar);
+        try std.testing.expectEqualStrings("Ada", result.rows[0].values[0].value.string);
+        try std.testing.expectEqual(Value{ .int64 = 2 }, result.rows[0].values[1].value);
+        try std.testing.expectEqualStrings("Bert", result.rows[1].values[0].value.string);
+        try std.testing.expectEqual(Value{ .int64 = 0 }, result.rows[1].values[1].value);
     }
 }
 
@@ -890,13 +934,13 @@ test "return count aggregates matched rows" {
         defer result.deinit(std.testing.allocator);
         try std.testing.expectEqual(@as(usize, 1), result.rows.len);
         try std.testing.expectEqualStrings("people", result.columns[0]);
-        try std.testing.expectEqual(Value{ .int64 = 2 }, result.rows[0].values[0].scalar);
+        try std.testing.expectEqual(Value{ .int64 = 2 }, result.rows[0].values[0].value);
     }
     {
         var result = try execForTest(store, "MATCH (p:Missing) RETURN COUNT(*) AS people");
         defer result.deinit(std.testing.allocator);
         try std.testing.expectEqual(@as(usize, 1), result.rows.len);
-        try std.testing.expectEqual(Value{ .int64 = 0 }, result.rows[0].values[0].scalar);
+        try std.testing.expectEqual(Value{ .int64 = 0 }, result.rows[0].values[0].value);
     }
 }
 
@@ -914,14 +958,194 @@ test "directionless edge match counts oriented GQL paths" {
         var result = try execForTest(store, "MATCH -[]- RETURN COUNT(*) AS paths");
         defer result.deinit(std.testing.allocator);
         try std.testing.expectEqual(@as(usize, 1), result.rows.len);
-        try std.testing.expectEqual(Value{ .int64 = 2 }, result.rows[0].values[0].scalar);
+        try std.testing.expectEqual(Value{ .int64 = 2 }, result.rows[0].values[0].value);
     }
     {
         var result = try execForTest(store, "MATCH -[]-> RETURN COUNT(*) AS paths");
         defer result.deinit(std.testing.allocator);
         try std.testing.expectEqual(@as(usize, 1), result.rows.len);
-        try std.testing.expectEqual(Value{ .int64 = 1 }, result.rows[0].values[0].scalar);
+        try std.testing.expectEqual(Value{ .int64 = 1 }, result.rows[0].values[0].value);
     }
+}
+
+test "match trail returns bounded variable length paths" {
+    var tmp = @import("test_helpers.zig").tmp();
+    defer tmp.cleanup();
+    const store = try tmp.store("test.db");
+    defer store.db.close();
+
+    {
+        var result = try execForTest(store, "INSERT (:Person {name: 'Ada'}), (:Person {name: 'Bob'}), (:Person {name: 'Cara'}), (:Person {name: 'Dan'})");
+        defer result.deinit(std.testing.allocator);
+    }
+    {
+        var result = try execForTest(store, "MATCH (a:Person {name: 'Ada'}), (b:Person {name: 'Bob'}) INSERT (a)-[:Follows]->(b)");
+        defer result.deinit(std.testing.allocator);
+    }
+    {
+        var result = try execForTest(store, "MATCH (b:Person {name: 'Bob'}), (c:Person {name: 'Cara'}) INSERT (b)-[:Follows]->(c)");
+        defer result.deinit(std.testing.allocator);
+    }
+    {
+        var result = try execForTest(store, "MATCH (a:Person {name: 'Ada'}), (d:Person {name: 'Dan'}) INSERT (a)-[:Follows]->(d)");
+        defer result.deinit(std.testing.allocator);
+    }
+
+    var result = try execForTest(store, "MATCH TRAIL (a:Person {name: 'Ada'})-[:Follows]->{1,2}(b:Person) RETURN b.name ORDER BY b.name");
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 3), result.rows.len);
+    try std.testing.expectEqualStrings("Bob", result.rows[0].values[0].value.string);
+    try std.testing.expectEqualStrings("Cara", result.rows[1].values[0].value.string);
+    try std.testing.expectEqualStrings("Dan", result.rows[2].values[0].value.string);
+}
+
+test "match quantified edge returns repeated edge bindings" {
+    var tmp = @import("test_helpers.zig").tmp();
+    defer tmp.cleanup();
+    const store = try tmp.store("test.db");
+    defer store.db.close();
+
+    {
+        var result = try execForTest(store, "INSERT (:Person {name: 'Ada'}), (:Person {name: 'Bob'}), (:Person {name: 'Cara'})");
+        defer result.deinit(std.testing.allocator);
+    }
+    {
+        var result = try execForTest(store, "MATCH (a:Person {name: 'Ada'}), (b:Person {name: 'Bob'}) INSERT (a)-[:Follows]->(b)");
+        defer result.deinit(std.testing.allocator);
+    }
+    {
+        var result = try execForTest(store, "MATCH (b:Person {name: 'Bob'}), (c:Person {name: 'Cara'}) INSERT (b)-[:Follows]->(c)");
+        defer result.deinit(std.testing.allocator);
+    }
+
+    var result = try execForTest(store, "MATCH TRAIL (a:Person {name: 'Ada'})-[e:Follows]->{2,2}(b:Person) RETURN b.name, e");
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), result.rows.len);
+    try std.testing.expectEqualStrings("Cara", result.rows[0].values[0].value.string);
+    try std.testing.expectEqual(@as(usize, 2), result.rows[0].values[1].value.list.len);
+    try std.testing.expect(result.rows[0].values[1].value.list[0] == .edge_ref);
+    try std.testing.expect(result.rows[0].values[1].value.list[1] == .edge_ref);
+
+    var indexed = try execForTest(store, "MATCH TRAIL (a:Person {name: 'Ada'})-[e:Follows]->{2,2}(b:Person) WITH e, 1 AS i RETURN e[0] AS first, e[i] AS second, e[2] AS missing");
+    defer indexed.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), indexed.rows.len);
+    try std.testing.expect(indexed.rows[0].values[0].value == .edge_ref);
+    try std.testing.expect(indexed.rows[0].values[1].value == .edge_ref);
+    try std.testing.expect(!indexed.rows[0].values[0].value.eql(indexed.rows[0].values[1].value));
+    try std.testing.expect(indexed.rows[0].values[2].value == .null);
+}
+
+test "complex trail query with optional aggregate executes" {
+    var tmp = @import("test_helpers.zig").tmp();
+    defer tmp.cleanup();
+    const store = try tmp.store("test.db");
+    defer store.db.close();
+
+    {
+        var result = try execForTest(store,
+            \\INSERT (:Person {name: 'Ada'}),
+            \\       (:Person {name: 'Bert'}),
+            \\       (:Person {name: 'Cara'}),
+            \\       (:Post {title: 'Runtime Tips', likes_count: 120, creation_date: '2024-02-01'}),
+            \\       (:Post {title: 'Planner Notes', likes_count: 170, creation_date: '2024-02-10'}),
+            \\       (:Post {title: 'Extra Fresh', likes_count: 10, creation_date: '2024-03-01'}),
+            \\       (:Post {title: 'Old Notes', likes_count: 80, creation_date: '2023-12-01'})
+        );
+        defer result.deinit(std.testing.allocator);
+    }
+    {
+        var result = try execForTest(store, "MATCH (a:Person {name: 'Ada'}), (b:Person {name: 'Bert'}) INSERT (a)-[:Follows]->(b)");
+        defer result.deinit(std.testing.allocator);
+    }
+    {
+        var result = try execForTest(store, "MATCH (b:Person {name: 'Bert'}), (c:Person {name: 'Cara'}) INSERT (b)-[:Follows]->(c)");
+        defer result.deinit(std.testing.allocator);
+    }
+    {
+        var result = try execForTest(store, "MATCH (b:Person {name: 'Bert'}), (p:Post {title: 'Runtime Tips'}) INSERT (b)-[:Created]->(p)");
+        defer result.deinit(std.testing.allocator);
+    }
+    {
+        var result = try execForTest(store, "MATCH (c:Person {name: 'Cara'}), (p:Post {title: 'Planner Notes'}) INSERT (c)-[:Created]->(p)");
+        defer result.deinit(std.testing.allocator);
+    }
+    {
+        var result = try execForTest(store, "MATCH (c:Person {name: 'Cara'}), (p:Post {title: 'Extra Fresh'}) INSERT (c)-[:Created]->(p)");
+        defer result.deinit(std.testing.allocator);
+    }
+    {
+        var result = try execForTest(store, "MATCH (c:Person {name: 'Cara'}), (p:Post {title: 'Old Notes'}) INSERT (c)-[:Created]->(p)");
+        defer result.deinit(std.testing.allocator);
+    }
+    {
+        var result = try execForTest(store, "MATCH (a:Person {name: 'Ada'}), (p:Post {title: 'Runtime Tips'}) INSERT (a)-[:Likes]->(p)");
+        defer result.deinit(std.testing.allocator);
+    }
+    {
+        var result = try execForTest(store, "MATCH (a:Person {name: 'Ada'}), (p:Post {title: 'Planner Notes'}) INSERT (a)-[:Likes]->(p)");
+        defer result.deinit(std.testing.allocator);
+    }
+
+    var result = try execForTest(store,
+        \\MATCH TRAIL (follower:Person)-[follows:Follows]->{1,3}(influencer:Person),
+        \\            (influencer)-[:Created]->(post:Post),
+        \\            (follower)-[:Likes]->(post)
+        \\WHERE post.likes_count > 100
+        \\OPTIONAL MATCH (influencer)-[:Created]->(otherPost:Post)
+        \\         WHERE otherPost.creation_date > '2024-01-01'
+        \\WITH follower, influencer, post, follows, COUNT(otherPost) AS recentPosts
+        \\RETURN DISTINCT follower.name AS FollowerName,
+        \\                influencer.name AS InfluencerName,
+        \\                post.title AS PopularPost,
+        \\                recentPosts AS RecentPostCount,
+        \\                follows AS FollowerTrail
+        \\ORDER BY RecentPostCount DESC, InfluencerName
+        \\LIMIT 10;
+    );
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), result.rows.len);
+    try std.testing.expectEqualStrings("FollowerName", result.columns[0]);
+    try std.testing.expectEqualStrings("InfluencerName", result.columns[1]);
+    try std.testing.expectEqualStrings("PopularPost", result.columns[2]);
+    try std.testing.expectEqualStrings("RecentPostCount", result.columns[3]);
+    try std.testing.expectEqualStrings("FollowerTrail", result.columns[4]);
+
+    try std.testing.expectEqualStrings("Ada", result.rows[0].values[0].value.string);
+    try std.testing.expectEqualStrings("Cara", result.rows[0].values[1].value.string);
+    try std.testing.expectEqualStrings("Planner Notes", result.rows[0].values[2].value.string);
+    try std.testing.expectEqual(Value{ .int64 = 2 }, result.rows[0].values[3].value);
+    try std.testing.expectEqual(@as(usize, 2), result.rows[0].values[4].value.list.len);
+
+    try std.testing.expectEqualStrings("Ada", result.rows[1].values[0].value.string);
+    try std.testing.expectEqualStrings("Bert", result.rows[1].values[1].value.string);
+    try std.testing.expectEqualStrings("Runtime Tips", result.rows[1].values[2].value.string);
+    try std.testing.expectEqual(Value{ .int64 = 1 }, result.rows[1].values[3].value);
+    try std.testing.expectEqual(@as(usize, 1), result.rows[1].values[4].value.list.len);
+}
+
+test "match trail does not repeat an edge" {
+    var tmp = @import("test_helpers.zig").tmp();
+    defer tmp.cleanup();
+    const store = try tmp.store("test.db");
+    defer store.db.close();
+
+    {
+        var result = try execForTest(store, "INSERT (:Person {name: 'Ada'}), (:Person {name: 'Bob'})");
+        defer result.deinit(std.testing.allocator);
+    }
+    {
+        var result = try execForTest(store, "MATCH (a:Person {name: 'Ada'}), (b:Person {name: 'Bob'}) INSERT (a)~[:Knows]~(b)");
+        defer result.deinit(std.testing.allocator);
+    }
+
+    var result = try execForTest(store, "MATCH TRAIL (a:Person {name: 'Ada'})~[:Knows]~{2,2}(b:Person) RETURN b.name");
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 0), result.rows.len);
 }
 
 test "return numeric aggregates by group" {
@@ -953,21 +1177,21 @@ test "return numeric aggregates by group" {
         defer result.deinit(std.testing.allocator);
         try std.testing.expectEqual(@as(usize, 2), result.rows.len);
 
-        try std.testing.expectEqualStrings("A", result.rows[0].values[0].scalar.string);
-        try std.testing.expectEqual(Value{ .int64 = 2 }, result.rows[0].values[1].scalar);
-        try std.testing.expectEqual(Value{ .int64 = 1 }, result.rows[0].values[2].scalar);
-        try std.testing.expectEqual(Value{ .int64 = 30 }, result.rows[0].values[3].scalar);
-        try std.testing.expectEqual(Value{ .float64 = 15.0 }, result.rows[0].values[4].scalar);
-        try std.testing.expectEqualStrings("Ada", result.rows[0].values[5].scalar.string);
-        try std.testing.expectEqual(Value{ .int64 = 20 }, result.rows[0].values[6].scalar);
+        try std.testing.expectEqualStrings("A", result.rows[0].values[0].value.string);
+        try std.testing.expectEqual(Value{ .int64 = 2 }, result.rows[0].values[1].value);
+        try std.testing.expectEqual(Value{ .int64 = 1 }, result.rows[0].values[2].value);
+        try std.testing.expectEqual(Value{ .int64 = 30 }, result.rows[0].values[3].value);
+        try std.testing.expectEqual(Value{ .float64 = 15.0 }, result.rows[0].values[4].value);
+        try std.testing.expectEqualStrings("Ada", result.rows[0].values[5].value.string);
+        try std.testing.expectEqual(Value{ .int64 = 20 }, result.rows[0].values[6].value);
 
-        try std.testing.expectEqualStrings("B", result.rows[1].values[0].scalar.string);
-        try std.testing.expectEqual(Value{ .int64 = 1 }, result.rows[1].values[1].scalar);
-        try std.testing.expectEqual(Value{ .int64 = 1 }, result.rows[1].values[2].scalar);
-        try std.testing.expectEqual(Value{ .int64 = 7 }, result.rows[1].values[3].scalar);
-        try std.testing.expectEqual(Value{ .float64 = 7.0 }, result.rows[1].values[4].scalar);
-        try std.testing.expectEqualStrings("Bert", result.rows[1].values[5].scalar.string);
-        try std.testing.expectEqual(Value{ .int64 = 7 }, result.rows[1].values[6].scalar);
+        try std.testing.expectEqualStrings("B", result.rows[1].values[0].value.string);
+        try std.testing.expectEqual(Value{ .int64 = 1 }, result.rows[1].values[1].value);
+        try std.testing.expectEqual(Value{ .int64 = 1 }, result.rows[1].values[2].value);
+        try std.testing.expectEqual(Value{ .int64 = 7 }, result.rows[1].values[3].value);
+        try std.testing.expectEqual(Value{ .float64 = 7.0 }, result.rows[1].values[4].value);
+        try std.testing.expectEqualStrings("Bert", result.rows[1].values[5].value.string);
+        try std.testing.expectEqual(Value{ .int64 = 7 }, result.rows[1].values[6].value);
     }
 }
 
@@ -1019,8 +1243,8 @@ test "numeric distinct aggregates skip duplicate values" {
         var result = try execForTest(store, "MATCH (p:Person) RETURN SUM(DISTINCT p.age) AS total, AVG(DISTINCT p.age) AS avg");
         defer result.deinit(std.testing.allocator);
         try std.testing.expectEqual(@as(usize, 1), result.rows.len);
-        try std.testing.expectEqual(Value{ .int64 = 71 }, result.rows[0].values[0].scalar);
-        try std.testing.expectEqual(Value{ .float64 = 35.5 }, result.rows[0].values[1].scalar);
+        try std.testing.expectEqual(Value{ .int64 = 71 }, result.rows[0].values[0].value);
+        try std.testing.expectEqual(Value{ .float64 = 35.5 }, result.rows[0].values[1].value);
     }
 }
 
@@ -1033,11 +1257,11 @@ test "empty aggregates return null except count" {
     var result = try execForTest(store, "MATCH (p:Missing) RETURN COUNT(p) AS n, SUM(p.score) AS total, AVG(p.score) AS avg, MIN(p.name) AS first, MAX(p.score) AS max_score");
     defer result.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 1), result.rows.len);
-    try std.testing.expectEqual(Value{ .int64 = 0 }, result.rows[0].values[0].scalar);
-    try std.testing.expect(result.rows[0].values[1].scalar == .null);
-    try std.testing.expect(result.rows[0].values[2].scalar == .null);
-    try std.testing.expect(result.rows[0].values[3].scalar == .null);
-    try std.testing.expect(result.rows[0].values[4].scalar == .null);
+    try std.testing.expectEqual(Value{ .int64 = 0 }, result.rows[0].values[0].value);
+    try std.testing.expect(result.rows[0].values[1].value == .null);
+    try std.testing.expect(result.rows[0].values[2].value == .null);
+    try std.testing.expect(result.rows[0].values[3].value == .null);
+    try std.testing.expect(result.rows[0].values[4].value == .null);
 }
 
 test "aggregate expressions execute after aggregation" {
@@ -1059,14 +1283,14 @@ test "aggregate expressions execute after aggregation" {
         );
         defer result.deinit(std.testing.allocator);
         try std.testing.expectEqual(@as(usize, 1), result.rows.len);
-        try std.testing.expectEqual(Value{ .int64 = 3 }, result.rows[0].values[0].scalar);
-        try std.testing.expectEqual(Value{ .int64 = 10 }, result.rows[0].values[1].scalar);
-        try std.testing.expectEqual(Value{ .int64 = 32 }, result.rows[0].values[2].scalar);
+        try std.testing.expectEqual(Value{ .int64 = 3 }, result.rows[0].values[0].value);
+        try std.testing.expectEqual(Value{ .int64 = 10 }, result.rows[0].values[1].value);
+        try std.testing.expectEqual(Value{ .int64 = 32 }, result.rows[0].values[2].value);
     }
     {
         var result = try execForTest(store, "MATCH (p:Person) WITH COUNT(*) + 1 AS adjusted RETURN adjusted");
         defer result.deinit(std.testing.allocator);
-        try std.testing.expectEqual(Value{ .int64 = 3 }, result.rows[0].values[0].scalar);
+        try std.testing.expectEqual(Value{ .int64 = 3 }, result.rows[0].values[0].value);
     }
 }
 
@@ -1098,7 +1322,7 @@ test "match where filters with comparisons and boolean operators" {
         var result = try execForTest(store, "MATCH (p:Person) WHERE p.age > 30 AND p.active = true RETURN p.name");
         defer result.deinit(std.testing.allocator);
         try std.testing.expectEqual(@as(usize, 1), result.rows.len);
-        try std.testing.expectEqualStrings("Cara", result.rows[0].values[0].scalar.string);
+        try std.testing.expectEqualStrings("Cara", result.rows[0].values[0].value.string);
     }
     {
         var result = try execForTest(store, "MATCH (p:Person) WHERE NOT p.active OR p.age <= 30 RETURN p.name");
@@ -1212,6 +1436,6 @@ test "set updates matched properties" {
     {
         var result = try execForTest(store, "MATCH (p:Person {name: 'Eric'}) RETURN p.age");
         defer result.deinit(std.testing.allocator);
-        try std.testing.expectEqual(Value{ .int64 = 23 }, result.rows[0].values[0].scalar);
+        try std.testing.expectEqual(Value{ .int64 = 23 }, result.rows[0].values[0].value);
     }
 }

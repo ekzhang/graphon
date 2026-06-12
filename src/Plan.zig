@@ -93,6 +93,10 @@ pub fn idents(self: Plan) u16 {
             .step => |n| identsChk(&ret, .{ n.ident_edge, n.ident_dest }),
             .step_between => |n| identsChk(&ret, .{n.ident_edge}),
             .argument => |n| identsChk(&ret, .{n}),
+            .repeat => |n| {
+                identsChk(&ret, .{ n.ident_start, n.ident_argument, n.ident_frontier, n.ident_dest, n.ident_trail_edge });
+                for (n.accumulators.items) |accumulator| identsChk(&ret, .{ accumulator.ident, accumulator.item_ident });
+            },
             .project => |n| {
                 for (n.items) |c| identsChk(&ret, .{c.ident});
             },
@@ -158,8 +162,8 @@ pub const Operator = union(enum) {
     step: Step,
     step_between: StepBetween,
     begin,
-    argument: u16, // unimplemented
-    repeat, // unimplemented
+    argument: u16,
+    repeat: Repeat,
     // shortest_path,
     join,
     semi_join,
@@ -192,7 +196,7 @@ pub const Operator = union(enum) {
             .step_between => |*n| n.deinit(allocator),
             .begin => {},
             .argument => {},
-            .repeat => {},
+            .repeat => |*n| n.deinit(allocator),
             .join => {},
             .semi_join => {},
             .optional_join => {},
@@ -284,7 +288,21 @@ pub const Operator = union(enum) {
             .argument => |n| {
                 try writer.print(" %{}", .{n});
             },
-            .repeat => std.debug.panic("repeat unimplemented", .{}),
+            .repeat => |n| {
+                try writer.print(" {s} %{} -> %{} (%{} -> %{}){{{}, {}}}", .{
+                    @tagName(n.mode),
+                    n.ident_start,
+                    n.ident_dest,
+                    n.ident_argument,
+                    n.ident_frontier,
+                    n.min,
+                    n.max,
+                });
+                if (n.dest_bound) try writer.writeAll(" bound");
+                for (n.accumulators.items) |accumulator| {
+                    try writer.print(" collect %{} <- %{}", .{ accumulator.ident, accumulator.item_ident });
+                }
+            },
             .join => {},
             .semi_join => {},
             .optional_join => {},
@@ -437,6 +455,10 @@ pub const Operator = union(enum) {
                 if (n.ident_edge) |ident| try defined.append(allocator, ident);
             },
             .argument => |n| try defined.append(allocator, n),
+            .repeat => |n| {
+                if (!n.dest_bound) try defined.append(allocator, n.ident_dest);
+                for (n.accumulators.items) |accumulator| try defined.append(allocator, accumulator.ident);
+            },
             .project => |n| {
                 for (n.items) |c| try defined.append(allocator, c.ident);
             },
@@ -542,6 +564,34 @@ pub const StepBetween = struct {
             allocator.free(l);
         }
     }
+};
+
+pub const PathMode = enum {
+    walk,
+    trail,
+};
+
+pub const Repeat = struct {
+    mode: PathMode,
+    ident_start: u16,
+    ident_argument: u16,
+    ident_frontier: u16,
+    ident_dest: u16,
+    ident_trail_edge: ?u16 = null,
+    dest_bound: bool = false,
+    min: usize,
+    max: usize,
+    accumulators: std.ArrayList(RepeatAccumulator) = .empty,
+
+    pub fn deinit(self: *Repeat, allocator: Allocator) void {
+        self.accumulators.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+pub const RepeatAccumulator = struct {
+    ident: u16,
+    item_ident: u16,
 };
 
 /// A new variable assignment made in a Project operator.
@@ -704,6 +754,7 @@ pub const Exp = union(enum) {
     parameter: u32,
     unary: *UnaryExp,
     binop: *BinopExp,
+    index: *IndexExp,
 
     pub fn deinit(self: *Exp, allocator: Allocator) void {
         switch (self.*) {
@@ -716,6 +767,10 @@ pub const Exp = union(enum) {
             .binop => |b| {
                 b.deinit(allocator);
                 allocator.destroy(b); // Needed because binop is a pointer.
+            },
+            .index => |i| {
+                i.deinit(allocator);
+                allocator.destroy(i);
             },
             else => {},
         }
@@ -739,6 +794,12 @@ pub const Exp = union(enum) {
                 try writer.print(" {s} ", .{b.op.string()});
                 try b.right.print(writer);
                 try writer.writeByte(')');
+            },
+            .index => |i| {
+                try i.base.print(writer);
+                try writer.writeByte('[');
+                try i.index.print(writer);
+                try writer.writeByte(']');
             },
         }
     }
@@ -782,6 +843,17 @@ pub const BinopExp = struct {
     pub fn deinit(self: *BinopExp, allocator: Allocator) void {
         self.left.deinit(allocator);
         self.right.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+pub const IndexExp = struct {
+    base: Exp,
+    index: Exp,
+
+    pub fn deinit(self: *IndexExp, allocator: Allocator) void {
+        self.base.deinit(allocator);
+        self.index.deinit(allocator);
         self.* = undefined;
     }
 };

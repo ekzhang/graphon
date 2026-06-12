@@ -580,7 +580,7 @@ const PackWriter = struct {
 
     fn writeResultValue(self: *PackWriter, value: query.ResultValue) Error!void {
         switch (value) {
-            .scalar => |scalar| try self.writeScalar(scalar),
+            .value => |result_value| try self.writeScalar(result_value),
             .node => |node| try self.writeNode(node),
             .edge => |edge| try self.writeEdge(edge),
         }
@@ -596,6 +596,10 @@ const PackWriter = struct {
             .node_ref, .edge_ref, .id => |id| {
                 const encoded = id.toString();
                 try self.writeString(encoded[0..]);
+            },
+            .list => |items| {
+                try self.writeListHeader(items.len);
+                for (items) |item| try self.writeScalar(item);
             },
         }
     }
@@ -796,7 +800,7 @@ test "bolt parses run request" {
 test "bolt writes scalar record message" {
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
-    const values = [_]query.ResultValue{.{ .scalar = .{ .int64 = 55 } }};
+    const values = [_]query.ResultValue{.{ .value = .{ .int64 = 55 } }};
     try writeRecord(std.testing.allocator, &out.writer, .{ .values = @constCast(values[0..]) });
     try std.testing.expectEqualSlices(u8, &[_]u8{
         0x00, 0x04,
