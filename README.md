@@ -1,6 +1,6 @@
 # Graphon
 
-A very small graph database. Requires Zig 0.16.
+A very small graph database.
 
 ```gql
 MATCH (db:Database {name: 'graphon'})<-[:Wrote]-(p:Person)
@@ -9,19 +9,26 @@ RETURN p.name
 
 Can be queried with [GQL](https://www.iso.org/standard/76120.html), the ISO-standard graph query language.
 
-## Getting started
+## Quickstart
 
-Graphon is a single binary that implements almost the entire GQL standard, to specification. You can query it either from Neo4j client libraries, or by making an HTTP request in any language.
+Clone the codebase, download [Zig 0.16](https://ziglang.org/download/) plus [RocksDB](https://rocksdb.org/), and run `zig build` to generate the `zig-out/bin/` folder.
 
-To start a database, just download the binary and run it.
+```sh-session
+$ graphon shell
+```
+
+## Running a server
+
+Graphon is a single binary that implements a subset of the GQL standard. You can query it either from Neo4j client libraries, or by making an HTTP request in any language.
 
 ```sh-session
 $ graphon
+Graphon listening at http://127.0.0.1:7687 and bolt://127.0.0.1:7687 using /tmp/graphon.db with up to 64 concurrent connections
 $ curl "http://127.0.0.1:7687/?query=RETURN%2055"
-55
+[{"value":55}]
 ```
 
-The recommended way to explore a running Graphon database is through the CLI.
+There is a `graphon-cli` binary for connecting to a running server.
 
 ```sh-session
 $ graphon-cli
@@ -55,7 +62,7 @@ MATCH TRAIL (follower:Person)-[follows:Follows]->{1,3}(influencer:Person),
             (follower)-[:Likes]->(post)
 WHERE post.likes_count > 100
 OPTIONAL MATCH (influencer)-[:Created]->(otherPost:Post)
-         WHERE otherPost.creation_date > DATE '2024-01-01'
+         WHERE otherPost.creation_date > '2024-01-01'
 WITH follower, influencer, post, follows, COUNT(otherPost) AS recentPosts
 RETURN DISTINCT follower.name AS FollowerName,
                 influencer.name AS InfluencerName,
@@ -71,8 +78,8 @@ You can also insert, modify, and delete graph data.
 ```gql
 // Insert nodes and edges
 INSERT (a:Building {address: '285 Fulton St', city: 'New York', state: 'NY', zipcode: 10007}),
-       (a)-[:Nearby]-(:Geography {name: 'Hudson River', type: 'water'}),
-       (a)-[:Nearby]-(:Geography {name: 'The Battery', type: 'park'})
+       (a)-[:Nearby]->(:Geography {name: 'Hudson River', type: 'water'}),
+       (a)-[:Nearby]->(:Geography {name: 'The Battery', type: 'park'})
 
 // Modify properties
 MATCH (p:Person {name: 'Eric'}) SET p.age = 23
@@ -84,7 +91,7 @@ DETACH DELETE x
 
 Graphon can be queried via HTTP (results sent in JSON format) or [Bolt](https://neo4j.com/docs/bolt/current/) sessions. Concurrent transactions implement [snapshot isolation](https://jepsen.io/consistency/models/snapshot-isolation) to ensure consistency.
 
-The core GQL language includes graph pattern-matching queries, transactional updates, catalog changes, and list data types.
+The core GQL language includes graph pattern-matching queries, transactional updates, and list data types.
 
 These features are explicitly _not_ supported right now:
 
