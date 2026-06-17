@@ -380,6 +380,7 @@ pub const Token = struct {
         equal, // =, used as the equals operator, not assignment
         not_equal, // <>
         comma, // ,
+        dollar, // $
         bang, // !, used for label negation
         l_paren, // (
         r_paren, // )
@@ -759,6 +760,7 @@ pub const Token = struct {
                 .equal => "=",
                 .not_equal => "<>",
                 .comma => ",",
+                .dollar => "$",
                 .bang => "!",
                 .l_paren => "(",
                 .r_paren => ")",
@@ -1257,6 +1259,11 @@ pub const Tokenizer = struct {
                     },
                     ',' => {
                         result.tag = .comma;
+                        self.index += 1;
+                        break;
+                    },
+                    '$' => {
+                        result.tag = .dollar;
                         self.index += 1;
                         break;
                     },

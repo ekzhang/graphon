@@ -114,7 +114,16 @@ pub const StatementCursor = struct {
         txn: storage.Transaction,
         statement: *const planner.CompiledStatement,
     ) Error!StatementCursor {
-        const exec = try executor.Executor.init(&statement.plan, txn);
+        return initWithParams(gpa, txn, statement, &.{});
+    }
+
+    pub fn initWithParams(
+        gpa: Allocator,
+        txn: storage.Transaction,
+        statement: *const planner.CompiledStatement,
+        parameters: []const Value,
+    ) Error!StatementCursor {
+        const exec = try executor.Executor.initWithParams(&statement.plan, txn, parameters);
         return .{
             .gpa = gpa,
             .txn = txn,

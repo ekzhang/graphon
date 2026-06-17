@@ -7,6 +7,7 @@ const Ast = @import("Ast.zig");
 const query = @import("query.zig");
 const bolt = @import("bolt.zig");
 const graphon = @import("graphon.zig");
+const types = @import("types.zig");
 
 const default_db_path = "/tmp/graphon.db";
 const default_host = "127.0.0.1";
@@ -235,10 +236,16 @@ fn executeLocal(gpa: std.mem.Allocator, io: std.Io, db_path: []const u8, source:
     const db = try rocksdb.DB.open(db_path);
     defer db.close();
     const store = storage.Storage{ .db = db, .allocator = std.heap.c_allocator, .io = io };
-    return try executeQuery(gpa, store, source);
+    const parameters: query.ParameterMap = .empty;
+    return try executeQuery(gpa, store, source, parameters);
 }
 
-fn executeQuery(gpa: std.mem.Allocator, store: storage.Storage, source: [:0]const u8) !QueryOutcome {
+fn executeQuery(
+    gpa: std.mem.Allocator,
+    store: storage.Storage,
+    source: [:0]const u8,
+    parameters: query.ParameterMap,
+) !QueryOutcome {
     var prepared = try query.prepare(gpa, source);
     defer prepared.deinit(gpa);
     if (prepared.takeParseErrors()) |errors| return .{ .parse_errors = errors };
@@ -247,7 +254,7 @@ fn executeQuery(gpa: std.mem.Allocator, store: storage.Storage, source: [:0]cons
     defer txn.close();
     errdefer txn.rollback() catch {};
 
-    var result = try query.execute(gpa, txn, &prepared);
+    var result = try query.executeWithParams(gpa, txn, &prepared, parameters);
     errdefer result.deinit(gpa);
     try txn.commit();
     return .{ .result = result };
@@ -430,7 +437,13 @@ fn handleRequest(gpa: std.mem.Allocator, store: storage.Storage, request: *std.h
     const gql = try gpa.dupeZ(u8, raw_query);
     defer gpa.free(gql);
 
-    var outcome = executeQuery(gpa, store, gql) catch |err| {
+    var parameters = parseQueryParameters(gpa, request.head.target) catch |err| {
+        try respondJsonError(gpa, request, .bad_request, @errorName(err));
+        return;
+    };
+    defer query.deinitParameterMap(gpa, &parameters);
+
+    var outcome = executeQuery(gpa, store, gql, parameters) catch |err| {
         try respondJsonError(gpa, request, .bad_request, @errorName(err));
         return;
     };
@@ -472,8 +485,68 @@ fn respondJsonError(
     });
 }
 
+fn parseQueryParameters(gpa: std.mem.Allocator, target: []const u8) !query.ParameterMap {
+    const raw_params = try optionalQueryParam(gpa, target, "params") orelse return .empty;
+    defer gpa.free(raw_params);
+    return try parseJsonParameters(gpa, raw_params);
+}
+
+fn parseJsonParameters(gpa: std.mem.Allocator, bytes: []const u8) !query.ParameterMap {
+    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, bytes, .{});
+    defer parsed.deinit();
+
+    if (parsed.value != .object) return error.InvalidRequest;
+
+    var parameters: query.ParameterMap = .empty;
+    errdefer query.deinitParameterMap(gpa, &parameters);
+
+    var it = parsed.value.object.iterator();
+    while (it.next()) |entry| {
+        const key = try gpa.dupe(u8, entry.key_ptr.*);
+        errdefer gpa.free(key);
+        var value = try valueFromJson(gpa, entry.value_ptr.*);
+        errdefer value.deinit(gpa);
+        try parameters.put(gpa, key, value);
+    }
+
+    return parameters;
+}
+
+fn valueFromJson(gpa: std.mem.Allocator, value: std.json.Value) !types.Value {
+    return switch (value) {
+        .null => .null,
+        .bool => |b| .{ .bool = b },
+        .integer => |n| .{ .int64 = std.math.cast(i64, n) orelse return error.InvalidRequest },
+        .float => |f| .{ .float64 = f },
+        .number_string => |s| numberStringValue(s),
+        .string => |s| .{ .string = try gpa.dupe(u8, s) },
+        .array => |array| blk: {
+            const items = try gpa.alloc(types.Value, array.items.len);
+            for (items) |*item| item.* = .null;
+            errdefer {
+                for (items) |*item| item.deinit(gpa);
+                gpa.free(items);
+            }
+            for (array.items, items) |item, *dest| dest.* = try valueFromJson(gpa, item);
+            break :blk .{ .list = items };
+        },
+        .object => error.InvalidRequest,
+    };
+}
+
+fn numberStringValue(value: []const u8) !types.Value {
+    if (std.mem.indexOfAny(u8, value, ".eE")) |_| {
+        return .{ .float64 = try std.fmt.parseFloat(f64, value) };
+    }
+    return .{ .int64 = try std.fmt.parseInt(i64, value, 10) };
+}
+
 fn queryParam(gpa: std.mem.Allocator, target: []const u8, name: []const u8) ![]u8 {
-    const q_pos = std.mem.indexOfScalar(u8, target, '?') orelse return error.InvalidRequest;
+    return try optionalQueryParam(gpa, target, name) orelse error.InvalidRequest;
+}
+
+fn optionalQueryParam(gpa: std.mem.Allocator, target: []const u8, name: []const u8) !?[]u8 {
+    const q_pos = std.mem.indexOfScalar(u8, target, '?') orelse return null;
     var params = std.mem.splitScalar(u8, target[q_pos + 1 ..], '&');
     while (params.next()) |param| {
         const eq_pos = std.mem.indexOfScalar(u8, param, '=') orelse continue;
@@ -481,7 +554,7 @@ fn queryParam(gpa: std.mem.Allocator, target: []const u8, name: []const u8) ![]u
         if (!std.mem.eql(u8, key, name)) continue;
         return try decodeQueryValue(gpa, param[eq_pos + 1 ..]);
     }
-    return error.InvalidRequest;
+    return null;
 }
 
 fn decodeQueryValue(gpa: std.mem.Allocator, input: []const u8) ![]u8 {
@@ -504,6 +577,19 @@ test "percent decode query parameter" {
     const decoded = try queryParam(std.testing.allocator, "/?query=RETURN%20100%20%2A%203", "query");
     defer std.testing.allocator.free(decoded);
     try std.testing.expectEqualStrings("RETURN 100 * 3", decoded);
+}
+
+test "parse HTTP query parameters from JSON" {
+    var parameters = try parseQueryParameters(
+        std.testing.allocator,
+        "/?query=RETURN%20%24name&params=%7B%22name%22%3A%22Ada%22%2C%22age%22%3A42%2C%22scores%22%3A%5B1%2C2%5D%7D",
+    );
+    defer query.deinitParameterMap(std.testing.allocator, &parameters);
+
+    try std.testing.expectEqualStrings("Ada", parameters.get("name").?.string);
+    try std.testing.expectEqual(types.Value{ .int64 = 42 }, parameters.get("age").?);
+    try std.testing.expectEqual(@as(usize, 2), parameters.get("scores").?.list.len);
+    try std.testing.expectEqual(types.Value{ .int64 = 1 }, parameters.get("scores").?.list[0]);
 }
 
 test "parse serve concurrency options" {

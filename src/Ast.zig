@@ -472,6 +472,7 @@ pub const WherePredicate = union(enum) {
 pub const Expr = union(enum) {
     literal: Value,
     variable: []const u8,
+    parameter: []const u8,
     property: struct { variable: []const u8, property: []const u8 },
     aggregate: *AggregateCall,
     unary: *UnaryExpr,
@@ -497,7 +498,7 @@ pub const Expr = union(enum) {
                 i.deinit(allocator);
                 allocator.destroy(i);
             },
-            .variable, .property => {},
+            .variable, .parameter, .property => {},
         }
         self.* = undefined;
     }

@@ -11,12 +11,18 @@ const StatementResultKind = query.StatementResultKind;
 const Value = types.Value;
 
 const execute = query.execute;
+const executeWithParams = query.executeWithParams;
 const prepare = query.prepare;
 
 const Snap = @import("vendor/snaptest.zig").Snap;
 const snap = Snap.snap;
 
 fn execForTest(store: storage.Storage, source: [:0]const u8) !ResultSet {
+    const parameters: query.ParameterMap = .empty;
+    return execForTestWithParams(store, source, parameters);
+}
+
+fn execForTestWithParams(store: storage.Storage, source: [:0]const u8, parameters: query.ParameterMap) !ResultSet {
     var prepared = try prepare(std.testing.allocator, source);
     defer prepared.deinit(std.testing.allocator);
 
@@ -24,7 +30,7 @@ fn execForTest(store: storage.Storage, source: [:0]const u8) !ResultSet {
     defer txn.close();
     errdefer txn.rollback() catch {};
 
-    var result = try execute(std.testing.allocator, txn, &prepared);
+    var result = try executeWithParams(std.testing.allocator, txn, &prepared, parameters);
     errdefer result.deinit(std.testing.allocator);
     try txn.commit();
     return result;
@@ -390,6 +396,25 @@ test "compile union query plan snapshot" {
     ));
 }
 
+test "compile query parameters into plan snapshot" {
+    var compiled = try prepare(std.testing.allocator, "RETURN $x + $x AS total, $name AS name");
+    defer compiled.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), compiled.parameters.len);
+    try std.testing.expectEqualStrings("x", compiled.parameters[0]);
+    try std.testing.expectEqualStrings("name", compiled.parameters[1]);
+
+    const statements = try compiled.statements();
+    try std.testing.expectEqual(@as(usize, 1), statements.len);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try statements[0].plan.print(&out.writer);
+    try snap(@src(),
+        \\Plan{%0, %1}
+        \\  Project %0: ($0 + $0), %1: $1
+    ).diff(out.written());
+}
+
 test "prepare query cleans up across allocation failures" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, prepareForAllocationFailureTest, .{});
 }
@@ -433,6 +458,37 @@ test "return arithmetic" {
     const json = try jsonForTest(result);
     defer std.testing.allocator.free(json);
     try std.testing.expectEqualStrings("[{\"expr\":300}]", json);
+}
+
+test "query parameters execute in expressions and predicates" {
+    var tmp = @import("test_helpers.zig").tmp();
+    defer tmp.cleanup();
+    const store = try tmp.store("test.db");
+    defer store.db.close();
+
+    var parameters: query.ParameterMap = .empty;
+    defer query.deinitParameterMap(std.testing.allocator, &parameters);
+    try parameters.put(std.testing.allocator, try std.testing.allocator.dupe(u8, "name"), .{ .string = try std.testing.allocator.dupe(u8, "Ada") });
+    try parameters.put(std.testing.allocator, try std.testing.allocator.dupe(u8, "age"), .{ .int64 = 41 });
+    try parameters.put(std.testing.allocator, try std.testing.allocator.dupe(u8, "offset"), .{ .int64 = 1 });
+
+    var result = try execForTestWithParams(store,
+        \\INSERT (:Person {name: $name, age: $age});
+        \\MATCH (p:Person {name: $name}) WHERE p.age = $age RETURN p.age + $offset AS adjusted
+    , parameters);
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), result.rows.len);
+    try std.testing.expectEqual(Value{ .int64 = 42 }, result.rows[0].values[0].value);
+}
+
+test "query parameters require provided values" {
+    var tmp = @import("test_helpers.zig").tmp();
+    defer tmp.cleanup();
+    const store = try tmp.store("test.db");
+    defer store.db.close();
+
+    try std.testing.expectError(error.MissingParameter, execForTest(store, "RETURN $missing"));
 }
 
 test "return limit zero" {

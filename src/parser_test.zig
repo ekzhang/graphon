@@ -174,6 +174,24 @@ test "parse list index expressions" {
     try expectIntLiteral(grouped_index.index, 1);
 }
 
+test "parse query parameters" {
+    var program = try Ast.parse(std.testing.allocator, "MATCH (p:Person {name: $name}) WHERE p.age > $min_age RETURN $name, p.age + $offset");
+    defer program.deinit(std.testing.allocator);
+
+    const body = try expectSingleQuery(&program.statements[0]);
+    const query = &body.match_query;
+    try expectParameter(query.patterns[0].start.properties[0].value, "name");
+
+    const gt = try expectBinary(query.where.?.expr, .gt);
+    try expectPropertyExpr(gt.left, "p", "age");
+    try expectParameter(gt.right, "min_age");
+
+    try expectParameter(query.action.ret.items[0].expr, "name");
+    const add = try expectBinary(query.action.ret.items[1].expr, .add);
+    try expectPropertyExpr(add.left, "p", "age");
+    try expectParameter(add.right, "offset");
+}
+
 test "parse match path with labels properties and directed edge" {
     var program = try Ast.parse(std.testing.allocator, "MATCH (a:User {name: 'Ada'})-[e:Likes {since: 2024}]->(f:Food) RETURN f.name");
     defer program.deinit(std.testing.allocator);
@@ -536,6 +554,11 @@ fn expectIndex(expr: Ast.Expr) !*Ast.IndexExpr {
 fn expectVariable(expr: Ast.Expr, expected: []const u8) !void {
     try std.testing.expect(expr == .variable);
     try std.testing.expectEqualStrings(expected, expr.variable);
+}
+
+fn expectParameter(expr: Ast.Expr, expected: []const u8) !void {
+    try std.testing.expect(expr == .parameter);
+    try std.testing.expectEqualStrings(expected, expr.parameter);
 }
 
 fn expectPropertyExpr(expr: Ast.Expr, variable: []const u8, property: []const u8) !void {

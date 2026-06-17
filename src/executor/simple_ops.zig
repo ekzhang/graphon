@@ -51,7 +51,7 @@ pub fn runProject(op: std.ArrayList(Plan.ProjectClause), _: *void, exec: *execut
     if (!try exec.next(op_index)) return false;
     for (op.items) |clause| {
         // This allows later assignment clauses to depend on earlier ones in the list.
-        const new_value = try executor.evaluate(clause.exp, exec.assignments, exec.txn);
+        const new_value = try executor.evaluateWithParams(clause.exp, exec.assignments, exec.txn, exec.parameters);
         exec.assignments[clause.ident].deinit(exec.txn.allocator);
         exec.assignments[clause.ident] = new_value;
     }
@@ -88,7 +88,7 @@ pub fn runFilter(op: std.ArrayList(Plan.FilterClause), _: *void, exec: *executor
         for (op.items) |clause| {
             switch (clause) {
                 .bool_exp => |exp| {
-                    var value = try executor.evaluate(exp, exec.assignments, exec.txn);
+                    var value = try executor.evaluateWithParams(exp, exec.assignments, exec.txn, exec.parameters);
                     defer value.deinit(exec.txn.allocator);
                     if (!value.truthy()) {
                         continue :filter;

@@ -3,11 +3,12 @@
 //! Supported:
 //! * Bolt 5.0 and 4.4 negotiation, including manifest v1.
 //! * `HELLO`, `RUN`, `PULL`, `BEGIN`, `COMMIT`, `ROLLBACK`, `RESET`, and `GOODBYE`.
-//! * Graphon GQL execution through `RUN` and PackStream `RECORD` rows via `PULL`.
+//! * Graphon GQL execution through `RUN`, including parameter maps, and PackStream `RECORD` rows via `PULL`.
 //! * Scalar values plus node/edge values encoded as plain PackStream maps.
 //!
 //! Unsupported:
-//! * TLS, authentication, routing, and parameter binding.
+//! * TLS, authentication, and routing.
+//! * Map-valued Bolt parameters; scalar and list parameters are supported.
 //! * Neo4j `Node`/`Relationship` structures; graph values are map-shaped.
 //! * Cypher compatibility beyond Graphon's currently supported GQL syntax.
 
@@ -111,7 +112,7 @@ const Request = union(enum) {
     hello,
     goodbye,
     reset,
-    run: []u8,
+    run: RunRequest,
     pull: i64,
     begin,
     commit,
@@ -119,9 +120,20 @@ const Request = union(enum) {
 
     fn deinit(self: *Request, gpa: Allocator) void {
         switch (self.*) {
-            .run => |query_text| gpa.free(query_text),
+            .run => |*run| run.deinit(gpa),
             else => {},
         }
+        self.* = undefined;
+    }
+};
+
+const RunRequest = struct {
+    source: []u8,
+    parameters: query.ParameterMap = .empty,
+
+    fn deinit(self: *RunRequest, gpa: Allocator) void {
+        gpa.free(self.source);
+        query.deinitParameterMap(gpa, &self.parameters);
         self.* = undefined;
     }
 };
@@ -166,7 +178,7 @@ const Session = struct {
                 self.rollbackTransaction() catch {};
                 try writeEmptySuccess(self.gpa, writer);
             },
-            .run => |source| try self.run(writer, source),
+            .run => |request_run| try self.run(writer, request_run.source, request_run.parameters),
             .pull => |n| try self.pull(writer, n),
             .begin => try self.begin(writer),
             .commit => try self.commit(writer),
@@ -208,7 +220,12 @@ const Session = struct {
         try writeEmptySuccess(self.gpa, writer);
     }
 
-    fn run(self: *Session, writer: *std.Io.Writer, source: []const u8) Error!void {
+    fn run(
+        self: *Session,
+        writer: *std.Io.Writer,
+        source: []const u8,
+        parameters: query.ParameterMap,
+    ) Error!void {
         self.clearPending();
         const source_z = try self.gpa.dupeZ(u8, source);
         defer self.gpa.free(source_z);
@@ -230,9 +247,9 @@ const Session = struct {
         }
 
         var result = (if (self.txn) |txn|
-            query.execute(self.gpa, txn, &prepared)
+            query.executeWithParams(self.gpa, txn, &prepared, parameters)
         else
-            executePrepared(self.gpa, self.store, &prepared)) catch |err| {
+            executePrepared(self.gpa, self.store, &prepared, parameters)) catch |err| {
             try self.fail(writer, @errorName(err));
             return;
         };
@@ -290,12 +307,13 @@ fn executePrepared(
     gpa: Allocator,
     store: storage.Storage,
     prepared: *const query.CompiledProgram,
+    parameters: query.ParameterMap,
 ) query.Error!query.ResultSet {
     const txn = store.txn();
     defer txn.close();
     errdefer txn.rollback() catch {};
 
-    var result = try query.execute(gpa, txn, prepared);
+    var result = try query.executeWithParams(gpa, txn, prepared, parameters);
     errdefer result.deinit(gpa);
     try txn.commit();
     return result;
@@ -400,11 +418,11 @@ fn parseRequest(gpa: Allocator, payload: []const u8) Error!Request {
         },
         Tag.run => blk: {
             if (header.fields != 2 and header.fields != 3) return error.InvalidMessage;
-            const query_text = try pack.readStringAlloc(gpa);
-            errdefer gpa.free(query_text);
-            try pack.skipValue();
+            var run = RunRequest{ .source = try pack.readStringAlloc(gpa) };
+            errdefer run.deinit(gpa);
+            run.parameters = try pack.readParameterMap(gpa);
             if (header.fields == 3) try pack.skipValue();
-            break :blk .{ .run = query_text };
+            break :blk .{ .run = run };
         },
         Tag.pull => blk: {
             if (header.fields != 1) return error.InvalidMessage;
@@ -562,6 +580,48 @@ const PackReader = struct {
         return n;
     }
 
+    fn readParameterMap(self: *PackReader, gpa: Allocator) Error!query.ParameterMap {
+        const fields = try self.readMapHeader();
+        var parameters: query.ParameterMap = .empty;
+        errdefer query.deinitParameterMap(gpa, &parameters);
+
+        for (0..fields) |_| {
+            const key = try self.readStringAlloc(gpa);
+            errdefer gpa.free(key);
+            var value = try self.readValue(gpa);
+            errdefer value.deinit(gpa);
+            try parameters.put(gpa, key, value);
+        }
+
+        return parameters;
+    }
+
+    fn readValue(self: *PackReader, gpa: Allocator) Error!types.Value {
+        const marker = try self.reader.takeByte();
+        return switch (marker) {
+            0x00...0x7f, 0xf0...0xff, 0xc8...0xcb => .{ .int64 = try self.readIntFromMarker(marker) },
+            0xc0 => .null,
+            0xc1 => .{ .float64 = @bitCast(try self.reader.takeInt(u64, .big)) },
+            0xc2 => .{ .bool = false },
+            0xc3 => .{ .bool = true },
+            0x80...0x8f, 0xd0...0xd2 => .{ .string = try self.readStringAllocFromMarker(gpa, marker) },
+            0x90...0x9f, 0xd4...0xd6 => try self.readListFromMarker(gpa, marker),
+            else => error.InvalidMessage,
+        };
+    }
+
+    fn readListFromMarker(self: *PackReader, gpa: Allocator, marker: u8) Error!types.Value {
+        const len = try self.readListLenFromMarker(marker);
+        const items = try gpa.alloc(types.Value, len);
+        for (items) |*item| item.* = .null;
+        errdefer {
+            for (items) |*item| item.deinit(gpa);
+            gpa.free(items);
+        }
+        for (items) |*item| item.* = try self.readValue(gpa);
+        return .{ .list = items };
+    }
+
     fn skipValue(self: *PackReader) Error!void {
         const marker = try self.reader.takeByte();
         switch (marker) {
@@ -603,6 +663,10 @@ const PackReader = struct {
 
     fn readInt(self: *PackReader) Error!i64 {
         const marker = try self.reader.takeByte();
+        return try self.readIntFromMarker(marker);
+    }
+
+    fn readIntFromMarker(self: *PackReader, marker: u8) Error!i64 {
         return switch (marker) {
             0x00...0x7f => marker,
             0xf0...0xff => @as(i8, @bitCast(marker)),
@@ -616,6 +680,15 @@ const PackReader = struct {
 
     fn readStringLen(self: *PackReader) Error!usize {
         const marker = try self.reader.takeByte();
+        return try self.readStringLenFromMarker(marker);
+    }
+
+    fn readStringAllocFromMarker(self: *PackReader, gpa: Allocator, marker: u8) Error![]u8 {
+        const len = try self.readStringLenFromMarker(marker);
+        return try gpa.dupe(u8, try self.reader.take(len));
+    }
+
+    fn readStringLenFromMarker(self: *PackReader, marker: u8) Error!usize {
         return switch (marker) {
             0x80...0x8f => marker & 0x0f,
             0xd0 => try self.reader.takeInt(u8, .big),
@@ -632,6 +705,16 @@ const PackReader = struct {
             0xd8 => try self.reader.takeInt(u8, .big),
             0xd9 => try self.reader.takeInt(u16, .big),
             0xda => try self.reader.takeInt(u32, .big),
+            else => error.InvalidMessage,
+        };
+    }
+
+    fn readListLenFromMarker(self: *PackReader, marker: u8) Error!usize {
+        return switch (marker) {
+            0x90...0x9f => marker & 0x0f,
+            0xd4 => try self.reader.takeInt(u8, .big),
+            0xd5 => try self.reader.takeInt(u16, .big),
+            0xd6 => try self.reader.takeInt(u32, .big),
             else => error.InvalidMessage,
         };
     }
@@ -873,7 +956,35 @@ test "bolt parses run request" {
     var request = try parseRequest(std.testing.allocator, &payload);
     defer request.deinit(std.testing.allocator);
     try std.testing.expect(request == .run);
-    try std.testing.expectEqualStrings("RETURN 1 AS n", request.run);
+    try std.testing.expectEqualStrings("RETURN 1 AS n", request.run.source);
+    try std.testing.expectEqual(@as(usize, 0), request.run.parameters.count());
+}
+
+test "bolt parses run request parameters" {
+    const payload = [_]u8{
+        0xb3, 0x10,
+        0x8e, 'R',
+        'E',  'T',
+        'U',  'R',
+        'N',  ' ',
+        '$',  'n',
+        ' ',  'A',
+        'S',  ' ',
+        'n',  0xa2,
+        0x81, 'n',
+        0x2a, 0x84,
+        'n',  'a',
+        'm',  'e',
+        0x83, 'A',
+        'd',  'a',
+        0xa0,
+    };
+    var request = try parseRequest(std.testing.allocator, &payload);
+    defer request.deinit(std.testing.allocator);
+    try std.testing.expect(request == .run);
+    try std.testing.expectEqualStrings("RETURN $n AS n", request.run.source);
+    try std.testing.expectEqual(types.Value{ .int64 = 42 }, request.run.parameters.get("n").?);
+    try std.testing.expectEqualStrings("Ada", request.run.parameters.get("name").?.string);
 }
 
 test "bolt writes scalar record message" {
@@ -927,6 +1038,32 @@ test "bolt session executes return query" {
 
     try std.testing.expect(std.mem.startsWith(u8, output.written(), &[_]u8{ 0x00, 0x00, 0x00, 0x05 }));
     try std.testing.expect(std.mem.indexOf(u8, output.written(), &[_]u8{ 0xb1, 0x71, 0x91, 0x37 }) != null);
+}
+
+test "bolt session executes parameterized return query" {
+    var tmp = @import("test_helpers.zig").tmp();
+    defer tmp.cleanup();
+    const store = try tmp.store("bolt-params.db");
+    defer store.db.close();
+
+    var session = Session{ .gpa = std.testing.allocator, .store = store };
+    defer session.deinit();
+    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+
+    var payload: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer payload.deinit();
+    var pack = PackWriter{ .writer = &payload.writer };
+    try pack.writeStructHeader(3, Tag.run);
+    try pack.writeString("RETURN $n + 1 AS n");
+    try pack.writeMapHeader(1);
+    try pack.writeString("n");
+    try pack.writeInt(54);
+    try pack.writeMapHeader(0);
+    try handleTestPayload(&session, &output.writer, payload.written());
+    try handleTestPayload(&session, &output.writer, &[_]u8{ 0xb1, Tag.pull, 0xa1, 0x81, 'n', 0xff });
+
+    try expectBoltRecordInt(output.written(), 55);
 }
 
 test "bolt explicit transactions preserve snapshot isolation across sessions" {

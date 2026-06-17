@@ -17,12 +17,15 @@ pub const Error = Allocator.Error || error{
 };
 
 pub const CompiledProgram = struct {
+    parameters: [][]u8 = &.{},
     value: union(enum) {
         statements: []CompiledStatement,
         parse_errors: Ast.ErrorList,
     },
 
     pub fn deinit(self: *CompiledProgram, gpa: Allocator) void {
+        for (self.parameters) |parameter| gpa.free(parameter);
+        gpa.free(self.parameters);
         switch (self.value) {
             .statements => |statement_slice| {
                 for (statement_slice) |*statement| statement.deinit(gpa);
@@ -98,13 +101,16 @@ pub fn compile(gpa: Allocator, source: [:0]const u8) Error!CompiledProgram {
     defer parsed.deinit(gpa);
     if (parsed.errors.len > 0) {
         const errors = parsed.takeErrors();
-        return .{ .value = .{ .parse_errors = errors } };
+        return .{ .parameters = &.{}, .value = .{ .parse_errors = errors } };
     }
 
     return try compileParsed(gpa, parsed);
 }
 
 fn compileParsed(gpa: Allocator, parsed: Ast.Program) Error!CompiledProgram {
+    var parameters = ParameterContext{};
+    defer parameters.deinit(gpa);
+
     var statements = std.ArrayList(CompiledStatement).empty;
     errdefer {
         for (statements.items) |*statement| statement.deinit(gpa);
@@ -112,17 +118,33 @@ fn compileParsed(gpa: Allocator, parsed: Ast.Program) Error!CompiledProgram {
     }
 
     for (parsed.statements) |statement| {
-        var compiled: ?CompiledStatement = try compileStatement(gpa, statement);
+        var compiled: ?CompiledStatement = try compileStatement(gpa, &parameters, statement);
         errdefer if (compiled) |*s| s.deinit(gpa);
         try statements.append(gpa, compiled.?);
         compiled = null;
     }
 
-    return .{ .value = .{ .statements = try statements.toOwnedSlice(gpa) } };
+    const owned_statements = try statements.toOwnedSlice(gpa);
+    statements = .empty;
+    errdefer {
+        for (owned_statements) |*statement| statement.deinit(gpa);
+        gpa.free(owned_statements);
+    }
+
+    const owned_parameters = try parameters.takeNames(gpa);
+    errdefer {
+        for (owned_parameters) |name| gpa.free(name);
+        gpa.free(owned_parameters);
+    }
+
+    return .{
+        .parameters = owned_parameters,
+        .value = .{ .statements = owned_statements },
+    };
 }
 
-fn compileStatement(gpa: Allocator, statement: Ast.Statement) Error!CompiledStatement {
-    var planner = Planner{ .gpa = gpa };
+fn compileStatement(gpa: Allocator, parameters: *ParameterContext, statement: Ast.Statement) Error!CompiledStatement {
+    var planner = Planner{ .gpa = gpa, .parameters = parameters };
     defer planner.deinit();
 
     switch (statement) {
@@ -170,8 +192,40 @@ const PlanBinding = struct {
     kind: PlanBindingKind,
 };
 
+const ParameterContext = struct {
+    names: std.ArrayList([]u8) = .empty,
+    indexes: StringMap(u32) = .empty,
+
+    fn deinit(self: *ParameterContext, gpa: Allocator) void {
+        for (self.names.items) |name| gpa.free(name);
+        self.names.deinit(gpa);
+        self.indexes.deinit(gpa);
+        self.* = undefined;
+    }
+
+    fn index(self: *ParameterContext, gpa: Allocator, name: []const u8) Error!u32 {
+        if (self.indexes.get(name)) |existing| return existing;
+
+        const next = std.math.cast(u32, self.names.items.len) orelse return error.Unsupported;
+        const owned_name = try gpa.dupe(u8, name);
+        errdefer gpa.free(owned_name);
+        try self.indexes.put(gpa, owned_name, next);
+        errdefer _ = self.indexes.swapRemove(owned_name);
+        try self.names.append(gpa, owned_name);
+        return next;
+    }
+
+    fn takeNames(self: *ParameterContext, gpa: Allocator) Allocator.Error![][]u8 {
+        const names = try self.names.toOwnedSlice(gpa);
+        self.names = .empty;
+        self.indexes.clearRetainingCapacity();
+        return names;
+    }
+};
+
 const Planner = struct {
     gpa: Allocator,
+    parameters: *ParameterContext,
     plan: Plan = .{},
     bindings: StringMap(PlanBinding) = .empty,
     next_ident: u16 = 0,
@@ -707,6 +761,7 @@ fn planAggregateExpr(planner: *Planner, expr: Ast.Expr, aggregate: *Plan.Aggrega
     return switch (expr) {
         .aggregate => |call| try appendAggregateCall(planner, call, aggregate),
         .literal => |value| .{ .literal = try value.dupe(planner.gpa) },
+        .parameter => |name| .{ .parameter = try planner.parameters.index(planner.gpa, name) },
         .unary => |unary| blk: {
             const planned = try planner.gpa.create(Plan.UnaryExp);
             errdefer planner.gpa.destroy(planned);
@@ -1203,6 +1258,7 @@ fn planExpr(planner: *Planner, expr: Ast.Expr) Error!Plan.Exp {
     return switch (expr) {
         .literal => |value| .{ .literal = try value.dupe(planner.gpa) },
         .variable => |name| .{ .ident = (planner.bindings.get(name) orelse return error.UnknownIdentifier).ident },
+        .parameter => |name| .{ .parameter = try planner.parameters.index(planner.gpa, name) },
         .property => |p| blk: {
             const binding = planner.bindings.get(p.variable) orelse return error.UnknownIdentifier;
             break :blk .{ .property = .{ .ident = binding.ident, .key = try planner.gpa.dupe(u8, p.property) } };
@@ -1252,6 +1308,7 @@ fn exprName(gpa: Allocator, item: Ast.ReturnItem) Allocator.Error![]u8 {
     if (item.alias) |alias| return gpa.dupe(u8, alias);
     return switch (item.expr) {
         .variable => |name| gpa.dupe(u8, name),
+        .parameter => |name| gpa.dupe(u8, name),
         .property => |p| std.fmt.allocPrint(gpa, "{s}.{s}", .{ p.variable, p.property }),
         .literal => gpa.dupe(u8, "value"),
         .aggregate => |call| gpa.dupe(u8, call.function.string()),
@@ -1296,7 +1353,7 @@ fn exprHasAggregate(expr: Ast.Expr) bool {
         .unary => |unary| exprHasAggregate(unary.operand),
         .binary => |binary| exprHasAggregate(binary.left) or exprHasAggregate(binary.right),
         .index => |index| exprHasAggregate(index.base) or exprHasAggregate(index.index),
-        .literal, .variable, .property => false,
+        .literal, .variable, .parameter, .property => false,
     };
 }
 
@@ -1309,6 +1366,6 @@ fn exprHasRowValueOutsideAggregate(expr: Ast.Expr) bool {
         .index => |index| exprHasRowValueOutsideAggregate(index.base) or
             exprHasRowValueOutsideAggregate(index.index),
         .variable, .property => true,
-        .literal => false,
+        .literal, .parameter => false,
     };
 }

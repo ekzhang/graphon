@@ -18,7 +18,7 @@ pub fn runInsertNode(op: Plan.InsertNode, _: *void, exec: *executor.Executor, op
     for (op.labels.items) |label| {
         try node.labels.put(exec.txn.allocator, try exec.txn.allocator.dupe(u8, label), void{});
     }
-    node.properties = try evaluateProperties(op.properties, exec.assignments, exec.txn);
+    node.properties = try evaluateProperties(op.properties, exec.assignments, exec.txn, exec.parameters);
 
     try exec.txn.putNode(node);
     exec.mutations += 1;
@@ -50,7 +50,7 @@ pub fn runInsertEdge(op: Plan.InsertEdge, _: *void, exec: *executor.Executor, op
     for (op.labels.items) |label| {
         try edge.labels.put(exec.txn.allocator, try exec.txn.allocator.dupe(u8, label), void{});
     }
-    edge.properties = try evaluateProperties(op.properties, exec.assignments, exec.txn);
+    edge.properties = try evaluateProperties(op.properties, exec.assignments, exec.txn, exec.parameters);
 
     try exec.txn.putEdge(edge);
     exec.mutations += 1;
@@ -75,7 +75,7 @@ pub fn runUpdate(op: Plan.Update, _: *void, exec: *executor.Executor, op_index: 
 }
 
 fn updateProperty(exec: *executor.Executor, item: Plan.UpdateProperty) !void {
-    var value = try executor.evaluate(item.value, exec.assignments, exec.txn);
+    var value = try executor.evaluateWithParams(item.value, exec.assignments, exec.txn, exec.parameters);
     errdefer value.deinit(exec.txn.allocator);
     switch (exec.assignments[item.ident]) {
         .node_ref => |node_id| {
@@ -213,6 +213,7 @@ fn evaluateProperties(
     properties: Plan.Properties,
     assignments: []const types.Value,
     txn: @import("../storage.zig").Transaction,
+    parameters: []const types.Value,
 ) executor.Error!StringMap(types.Value) {
     const allocator = txn.allocator;
     var ret: StringMap(types.Value) = .empty;
@@ -220,7 +221,7 @@ fn evaluateProperties(
     for (properties.items(.key), properties.items(.value)) |k, v| {
         const key = try allocator.dupe(u8, k);
         errdefer allocator.free(key);
-        var value = try executor.evaluate(v, assignments, txn);
+        var value = try executor.evaluateWithParams(v, assignments, txn, parameters);
         errdefer value.deinit(allocator);
         try ret.put(allocator, key, value);
     }

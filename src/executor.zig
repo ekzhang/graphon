@@ -115,6 +115,7 @@ pub const Error = storage.Error || error{
 pub const Executor = struct {
     plan: *const Plan,
     txn: storage.Transaction,
+    parameters: []const Value,
 
     /// State for each operator in the plan.
     states: []OperatorState,
@@ -133,7 +134,11 @@ pub const Executor = struct {
 
     /// Create a new executor for the given plan, within a storage transaction.
     pub fn init(plan: *const Plan, txn: storage.Transaction) !Executor {
-        var exec = try init1(plan, txn);
+        return initWithParams(plan, txn, &.{});
+    }
+
+    pub fn initWithParams(plan: *const Plan, txn: storage.Transaction, parameters: []const Value) !Executor {
+        var exec = try init1(plan, txn, parameters);
         errdefer exec.deinit();
         for (plan.ops.items, 0..) |_, i| {
             try exec.resetState(@intCast(i));
@@ -141,7 +146,7 @@ pub const Executor = struct {
         return exec;
     }
 
-    fn init1(plan: *const Plan, txn: storage.Transaction) !Executor {
+    fn init1(plan: *const Plan, txn: storage.Transaction, parameters: []const Value) !Executor {
         const idents = plan.idents();
         const assignments = try txn.allocator.alloc(Value, idents);
         errdefer txn.allocator.free(assignments);
@@ -155,6 +160,7 @@ pub const Executor = struct {
         return .{
             .plan = plan,
             .txn = txn,
+            .parameters = parameters,
             .states = states,
             .assignments = assignments,
             .init_op = false,
@@ -278,13 +284,22 @@ test Executor {
 
 /// Evaluate an expression given assignments and storage-backed entity references.
 pub fn evaluate(exp: Plan.Exp, assignments: []const Value, txn: storage.Transaction) Error!Value {
+    return evaluateWithParams(exp, assignments, txn, &.{});
+}
+
+pub fn evaluateWithParams(
+    exp: Plan.Exp,
+    assignments: []const Value,
+    txn: storage.Transaction,
+    parameters: []const Value,
+) Error!Value {
     return switch (exp) {
         .literal => |v| v.dupe(txn.allocator),
         .ident => |i| assignments[i].dupe(txn.allocator),
         .property => |p| evaluateProperty(p, assignments, txn),
-        .parameter => std.debug.panic("parameters not implemented yet", .{}),
+        .parameter => |i| parameters[i].dupe(txn.allocator),
         .unary => |unary| {
-            var operand = try evaluate(unary.operand, assignments, txn);
+            var operand = try evaluateWithParams(unary.operand, assignments, txn, parameters);
             defer operand.deinit(txn.allocator);
             return switch (unary.op) {
                 .not => .{ .bool = !operand.truthy() },
@@ -293,26 +308,26 @@ pub fn evaluate(exp: Plan.Exp, assignments: []const Value, txn: storage.Transact
         .binop => |binop| {
             switch (binop.op) {
                 .and_ => {
-                    var lhs = try evaluate(binop.left, assignments, txn);
+                    var lhs = try evaluateWithParams(binop.left, assignments, txn, parameters);
                     defer lhs.deinit(txn.allocator);
                     if (!lhs.truthy()) return .{ .bool = false };
-                    var rhs = try evaluate(binop.right, assignments, txn);
+                    var rhs = try evaluateWithParams(binop.right, assignments, txn, parameters);
                     defer rhs.deinit(txn.allocator);
                     return .{ .bool = rhs.truthy() };
                 },
                 .or_ => {
-                    var lhs = try evaluate(binop.left, assignments, txn);
+                    var lhs = try evaluateWithParams(binop.left, assignments, txn, parameters);
                     defer lhs.deinit(txn.allocator);
                     if (lhs.truthy()) return .{ .bool = true };
-                    var rhs = try evaluate(binop.right, assignments, txn);
+                    var rhs = try evaluateWithParams(binop.right, assignments, txn, parameters);
                     defer rhs.deinit(txn.allocator);
                     return .{ .bool = rhs.truthy() };
                 },
                 else => {},
             }
-            var lhs = try evaluate(binop.left, assignments, txn);
+            var lhs = try evaluateWithParams(binop.left, assignments, txn, parameters);
             defer lhs.deinit(txn.allocator);
-            var rhs = try evaluate(binop.right, assignments, txn);
+            var rhs = try evaluateWithParams(binop.right, assignments, txn, parameters);
             defer rhs.deinit(txn.allocator);
             return switch (binop.op) {
                 .add => try lhs.add(rhs, txn.allocator),
@@ -327,14 +342,19 @@ pub fn evaluate(exp: Plan.Exp, assignments: []const Value, txn: storage.Transact
                 .and_, .or_ => unreachable,
             };
         },
-        .index => |index| evaluateIndex(index, assignments, txn),
+        .index => |index| evaluateIndex(index, assignments, txn, parameters),
     };
 }
 
-fn evaluateIndex(index: *Plan.IndexExp, assignments: []const Value, txn: storage.Transaction) Error!Value {
-    var base = try evaluate(index.base, assignments, txn);
+fn evaluateIndex(
+    index: *Plan.IndexExp,
+    assignments: []const Value,
+    txn: storage.Transaction,
+    parameters: []const Value,
+) Error!Value {
+    var base = try evaluateWithParams(index.base, assignments, txn, parameters);
     defer base.deinit(txn.allocator);
-    var index_value = try evaluate(index.index, assignments, txn);
+    var index_value = try evaluateWithParams(index.index, assignments, txn, parameters);
     defer index_value.deinit(txn.allocator);
 
     if (base == .null or index_value == .null) return .null;

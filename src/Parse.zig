@@ -842,6 +842,7 @@ fn parsePrimary(p: *Parse) InternalError!Ast.Expr {
         .keyword_true => return .{ .literal = .{ .bool = true } },
         .keyword_false => return .{ .literal = .{ .bool = false } },
         .keyword_null => return .{ .literal = .null },
+        .dollar => return .{ .parameter = try p.expectName() },
         .l_paren => {
             const expr = try p.parseExpr(0);
             try p.expect(.r_paren);

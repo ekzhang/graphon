@@ -198,7 +198,7 @@ fn applyAggregates(op: Plan.Aggregate, row: *AggregateRow, exec: *executor.Execu
         var value: ?Value = null;
         defer if (value) |*v| v.deinit(exec.txn.allocator);
         if (item.argument) |argument| {
-            value = try executor.evaluate(argument, exec.assignments, exec.txn);
+            value = try executor.evaluateWithParams(argument, exec.assignments, exec.txn, exec.parameters);
             if (value.? == .null) continue;
             if (item.distinct) {
                 if (aggregateSeenContains(state.seen.items, value.?)) continue;
