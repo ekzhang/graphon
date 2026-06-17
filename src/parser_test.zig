@@ -260,11 +260,47 @@ test "parse match where and set clauses" {
     try std.testing.expect(query.action == .set);
     const sets = query.action.set;
     try std.testing.expectEqual(@as(usize, 2), sets.len);
-    try std.testing.expectEqualStrings("p", sets[0].variable);
-    try std.testing.expectEqualStrings("favorite", sets[0].property);
-    try expectPropertyExpr(sets[0].value, "f", "name");
-    try std.testing.expectEqualStrings("active", sets[1].property);
-    try expectBoolLiteral(sets[1].value, true);
+    try std.testing.expect(sets[0] == .property);
+    try std.testing.expectEqualStrings("p", sets[0].property.variable);
+    try std.testing.expectEqualStrings("favorite", sets[0].property.property);
+    try expectPropertyExpr(sets[0].property.value, "f", "name");
+    try std.testing.expect(sets[1] == .property);
+    try std.testing.expectEqualStrings("active", sets[1].property.property);
+    try expectBoolLiteral(sets[1].property.value, true);
+}
+
+test "parse set label clauses" {
+    var program = try Ast.parse(std.testing.allocator, "MATCH (p:Person)-[e:Knows]->() SET p:Employee, e:Recent");
+    defer program.deinit(std.testing.allocator);
+
+    const mutation = try expectMutation(&program.statements[0]);
+    const query = &mutation.match;
+    try std.testing.expect(query.action == .set);
+    const sets = query.action.set;
+    try std.testing.expectEqual(@as(usize, 2), sets.len);
+    try std.testing.expect(sets[0] == .label);
+    try std.testing.expectEqualStrings("p", sets[0].label.variable);
+    try std.testing.expectEqualStrings("Employee", sets[0].label.label);
+    try std.testing.expect(sets[1] == .label);
+    try std.testing.expectEqualStrings("e", sets[1].label.variable);
+    try std.testing.expectEqualStrings("Recent", sets[1].label.label);
+}
+
+test "parse remove label clauses" {
+    var program = try Ast.parse(std.testing.allocator, "MATCH (p:Person)-[e:Recent]->() REMOVE p:Employee, e:Recent");
+    defer program.deinit(std.testing.allocator);
+
+    const mutation = try expectMutation(&program.statements[0]);
+    const query = &mutation.match;
+    try std.testing.expect(query.action == .remove);
+    const removes = query.action.remove;
+    try std.testing.expectEqual(@as(usize, 2), removes.len);
+    try std.testing.expect(removes[0] == .label);
+    try std.testing.expectEqualStrings("p", removes[0].label.variable);
+    try std.testing.expectEqualStrings("Employee", removes[0].label.label);
+    try std.testing.expect(removes[1] == .label);
+    try std.testing.expectEqualStrings("e", removes[1].label.variable);
+    try std.testing.expectEqualStrings("Recent", removes[1].label.label);
 }
 
 test "parse where path predicates" {

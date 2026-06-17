@@ -299,6 +299,7 @@ fn parseMatchAction(p: *Parse) InternalError!Ast.MatchAction {
     if (p.eat(.keyword_insert)) return .{ .insert = try p.parsePatternListUntilAction() };
     if (p.eat(.keyword_finish)) return .finish;
     if (p.eat(.keyword_set)) return .{ .set = try p.parseSetClauses() };
+    if (p.eat(.keyword_remove)) return .{ .remove = try p.parseRemoveClauses() };
 
     var detach = false;
     if (p.eat(.keyword_detach)) detach = true;
@@ -322,13 +323,39 @@ fn parseSetClauses(p: *Parse) InternalError![]Ast.SetClause {
     }
     while (true) {
         const variable = try p.expectName();
-        try p.expect(.period);
-        const property = try p.expectName();
-        try p.expect(.equal);
-        var value: ?Ast.Expr = try p.parseExpr(0);
-        errdefer if (value) |*expr| expr.deinit(p.gpa);
-        try clauses.append(p.gpa, .{ .variable = variable, .property = property, .value = value.? });
-        value = null;
+        if (p.eat(.period)) {
+            const property = try p.expectName();
+            try p.expect(.equal);
+            var value: ?Ast.Expr = try p.parseExpr(0);
+            errdefer if (value) |*expr| expr.deinit(p.gpa);
+            try clauses.append(p.gpa, .{ .property = .{
+                .variable = variable,
+                .property = property,
+                .value = value.?,
+            } });
+            value = null;
+        } else {
+            try p.expect(.colon);
+            try clauses.append(p.gpa, .{ .label = .{
+                .variable = variable,
+                .label = try p.expectName(),
+            } });
+        }
+        if (!p.eat(.comma)) break;
+    }
+    return try clauses.toOwnedSlice(p.gpa);
+}
+
+fn parseRemoveClauses(p: *Parse) InternalError![]Ast.RemoveClause {
+    var clauses = std.ArrayList(Ast.RemoveClause).empty;
+    errdefer clauses.deinit(p.gpa);
+    while (true) {
+        const variable = try p.expectName();
+        try p.expect(.colon);
+        try clauses.append(p.gpa, .{ .label = .{
+            .variable = variable,
+            .label = try p.expectName(),
+        } });
         if (!p.eat(.comma)) break;
     }
     return try clauses.toOwnedSlice(p.gpa);
@@ -897,7 +924,7 @@ fn unquoteString(p: *Parse, s: []const u8) InternalError![]u8 {
 
 fn atActionKeyword(p: *Parse) bool {
     return switch (p.peek()) {
-        .keyword_return, .keyword_insert, .keyword_delete, .keyword_detach, .keyword_set, .keyword_finish, .keyword_where, .keyword_with, .keyword_optional, .keyword_match => true,
+        .keyword_return, .keyword_insert, .keyword_delete, .keyword_detach, .keyword_set, .keyword_remove, .keyword_finish, .keyword_where, .keyword_with, .keyword_optional, .keyword_match => true,
         else => false,
     };
 }

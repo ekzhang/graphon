@@ -64,30 +64,68 @@ pub fn runUpdate(op: Plan.Update, _: *void, exec: *executor.Executor, op_index: 
     if (!try exec.next(op_index)) return false;
 
     for (op.items.items) |item| {
-        var value = try executor.evaluate(item.value, exec.assignments, exec.txn);
-        errdefer value.deinit(exec.txn.allocator);
-        switch (exec.assignments[item.ident]) {
-            .node_ref => |node_id| {
-                var node = try exec.txn.getNode(node_id) orelse continue;
-                defer node.deinit(exec.txn.allocator);
-                try putProperty(exec.txn.allocator, &node.properties, item.key, value);
-                value = .null;
-                try exec.txn.putNode(node);
-                exec.mutations += 1;
-            },
-            .edge_ref => |edge_id| {
-                var edge = try exec.txn.getEdge(edge_id) orelse continue;
-                defer edge.deinit(exec.txn.allocator);
-                try putProperty(exec.txn.allocator, &edge.properties, item.key, value);
-                value = .null;
-                try exec.txn.putEdge(edge);
-                exec.mutations += 1;
-            },
-            else => return executor.Error.WrongType,
+        switch (item) {
+            .property => |property| try updateProperty(exec, property),
+            .add_label => |label| try updateLabel(exec, label, .add),
+            .remove_label => |label| try updateLabel(exec, label, .remove),
         }
     }
 
     return true;
+}
+
+fn updateProperty(exec: *executor.Executor, item: Plan.UpdateProperty) !void {
+    var value = try executor.evaluate(item.value, exec.assignments, exec.txn);
+    errdefer value.deinit(exec.txn.allocator);
+    switch (exec.assignments[item.ident]) {
+        .node_ref => |node_id| {
+            var node = try exec.txn.getNode(node_id) orelse return;
+            defer node.deinit(exec.txn.allocator);
+            try putProperty(exec.txn.allocator, &node.properties, item.key, value);
+            value = .null;
+            try exec.txn.putNode(node);
+            exec.mutations += 1;
+        },
+        .edge_ref => |edge_id| {
+            var edge = try exec.txn.getEdge(edge_id) orelse return;
+            defer edge.deinit(exec.txn.allocator);
+            try putProperty(exec.txn.allocator, &edge.properties, item.key, value);
+            value = .null;
+            try exec.txn.putEdge(edge);
+            exec.mutations += 1;
+        },
+        else => return executor.Error.WrongType,
+    }
+}
+
+const LabelUpdate = enum { add, remove };
+
+fn updateLabel(exec: *executor.Executor, item: Plan.UpdateLabel, update: LabelUpdate) !void {
+    switch (exec.assignments[item.ident]) {
+        .node_ref => |node_id| {
+            var node = try exec.txn.getNode(node_id) orelse return;
+            defer node.deinit(exec.txn.allocator);
+            const changed = switch (update) {
+                .add => try addLabel(exec.txn.allocator, &node.labels, item.label),
+                .remove => removeLabel(exec.txn.allocator, &node.labels, item.label),
+            };
+            if (!changed) return;
+            try exec.txn.putNode(node);
+            exec.mutations += 1;
+        },
+        .edge_ref => |edge_id| {
+            var edge = try exec.txn.getEdge(edge_id) orelse return;
+            defer edge.deinit(exec.txn.allocator);
+            const changed = switch (update) {
+                .add => try addLabel(exec.txn.allocator, &edge.labels, item.label),
+                .remove => removeLabel(exec.txn.allocator, &edge.labels, item.label),
+            };
+            if (!changed) return;
+            try exec.txn.putEdge(edge);
+            exec.mutations += 1;
+        },
+        else => return executor.Error.WrongType,
+    }
 }
 
 pub fn runDelete(op: Plan.Delete, _: *void, exec: *executor.Executor, op_index: u32) !bool {
@@ -121,6 +159,23 @@ fn putProperty(
     } else {
         try properties.put(allocator, try allocator.dupe(u8, key), value);
     }
+}
+
+fn addLabel(allocator: Allocator, labels: *StringMap(void), label: []const u8) Allocator.Error!bool {
+    if (labels.contains(label)) return false;
+    var owned_label: ?[]u8 = try allocator.dupe(u8, label);
+    errdefer if (owned_label) |owned| allocator.free(owned);
+    try labels.put(allocator, owned_label.?, void{});
+    owned_label = null;
+    return true;
+}
+
+fn removeLabel(allocator: Allocator, labels: *StringMap(void), label: []const u8) bool {
+    const index = labels.getIndex(label) orelse return false;
+    const owned_label = labels.keys()[index];
+    labels.swapRemoveAt(index);
+    allocator.free(owned_label);
+    return true;
 }
 
 fn deleteEdgeIfPresent(exec: *executor.Executor, edge_id: types.ElementId) executor.Error!bool {

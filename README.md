@@ -150,7 +150,7 @@ Query plans are constructed out of the following operations. The design here was
 - `UnionAll`: Concatenates results from the left and right subqueries.
 - `InsertNode`: Insert a graph node with labels and properties.
 - `InsertEdge`: Insert an edge with direction, labels, and properties between two nodes.
-- `Update`: Set, add, or remove labels and properties from nodes and edges.
+- `Update`: Set properties and add or remove labels on nodes and edges.
 - `Delete`: Delete a node or edge.
 - `Aggregate`: Compute aggregations, grouping by one or more columns.
 - `OrderedAggregate`: Compute aggregations when input rows are already ordered by group key.

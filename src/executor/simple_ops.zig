@@ -3,7 +3,10 @@ const Allocator = std.mem.Allocator;
 
 const executor = @import("../executor.zig");
 const Plan = @import("../Plan.zig");
-const Value = @import("../types.zig").Value;
+const types = @import("../types.zig");
+const Value = types.Value;
+
+const test_helpers = @import("../test_helpers.zig");
 
 pub fn runNodeById(op: Plan.LookupId, _: *void, exec: *executor.Executor, op_index: u32) !bool {
     if (!try exec.next(op_index)) return false;
@@ -52,6 +55,23 @@ pub fn runProject(op: std.ArrayList(Plan.ProjectClause), _: *void, exec: *execut
         exec.assignments[clause.ident].deinit(exec.txn.allocator);
         exec.assignments[clause.ident] = new_value;
     }
+    return true;
+}
+
+pub fn runProjectEndpoints(op: Plan.ProjectEndpoints, _: *void, exec: *executor.Executor, op_index: u32) !bool {
+    if (!try exec.next(op_index)) return false;
+
+    const edge_id = switch (exec.assignments[op.ident_edge]) {
+        .edge_ref => |id| id,
+        else => return executor.Error.WrongType,
+    };
+    var edge = try exec.txn.getEdge(edge_id) orelse return false;
+    defer edge.deinit(exec.txn.allocator);
+
+    exec.assignments[op.ident_src].deinit(exec.txn.allocator);
+    exec.assignments[op.ident_src] = .{ .node_ref = edge.endpoints[0] };
+    exec.assignments[op.ident_dest].deinit(exec.txn.allocator);
+    exec.assignments[op.ident_dest] = .{ .node_ref = edge.endpoints[1] };
     return true;
 }
 
@@ -117,4 +137,47 @@ pub fn runSkip(op: u64, state: *bool, exec: *executor.Executor, op_index: u32) !
         }
     }
     return try exec.next(op_index);
+}
+
+test "project endpoints assigns edge endpoint node refs" {
+    var tmp = test_helpers.tmp();
+    defer tmp.cleanup();
+
+    const store = try tmp.store("test.db");
+    defer store.db.close();
+
+    const txn = store.txn();
+    defer txn.close();
+
+    const allocator = std.testing.allocator;
+    var plan = Plan{};
+    defer plan.deinit(allocator);
+
+    try plan.results.appendSlice(allocator, &[_]u16{ 1, 2 });
+    try plan.ops.append(allocator, .{ .edge_scan = .{ .ident = 0, .label = null } });
+    try plan.ops.append(allocator, .{ .project_endpoints = .{
+        .ident_edge = 0,
+        .ident_src = 1,
+        .ident_dest = 2,
+    } });
+
+    const n1 = types.Node{ .id = .{ .value = 1 } };
+    const n2 = types.Node{ .id = .{ .value = 2 } };
+    const edge = types.Edge{
+        .id = .{ .value = 10 },
+        .endpoints = .{ n1.id, n2.id },
+        .directed = true,
+    };
+    try txn.putNode(n1);
+    try txn.putNode(n2);
+    try txn.putEdge(edge);
+
+    var exec = try executor.Executor.init(&plan, txn);
+    defer exec.deinit();
+    var result = try exec.run() orelse unreachable;
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(n1.id, result.values[0].node_ref);
+    try std.testing.expectEqual(n2.id, result.values[1].node_ref);
+    try std.testing.expect(try exec.run() == null);
 }

@@ -401,6 +401,22 @@ test "compile match set query plan snapshot" {
     ));
 }
 
+test "compile match set label query plan snapshot" {
+    try checkQueryPlanSnapshot("MATCH (p:Person) SET p:Employee", snap(@src(),
+        \\Plan{}
+        \\  Update add %0:Employee
+        \\  NodeScan (%0:Person)
+    ));
+}
+
+test "compile match remove label query plan snapshot" {
+    try checkQueryPlanSnapshot("MATCH (p:Person) REMOVE p:Employee", snap(@src(),
+        \\Plan{}
+        \\  Update remove %0:Employee
+        \\  NodeScan (%0:Person)
+    ));
+}
+
 test "return arithmetic" {
     var tmp = @import("test_helpers.zig").tmp();
     defer tmp.cleanup();
@@ -1464,5 +1480,85 @@ test "set updates matched properties" {
         var result = try execForTest(store, "MATCH (p:Person {name: 'Eric'}) RETURN p.age");
         defer result.deinit(std.testing.allocator);
         try std.testing.expectEqual(Value{ .int64 = 23 }, result.rows[0].values[0].value);
+    }
+}
+
+test "set and remove update node labels" {
+    var tmp = @import("test_helpers.zig").tmp();
+    defer tmp.cleanup();
+    const store = try tmp.store("test.db");
+    defer store.db.close();
+
+    {
+        var result = try execForTest(store, "INSERT (:Person {name: 'Eric'})");
+        defer result.deinit(std.testing.allocator);
+    }
+    {
+        var result = try execForTest(store, "MATCH (p:Person {name: 'Eric'}) SET p:Employee");
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(?usize, 1), result.rows_affected);
+    }
+    {
+        var result = try execForTest(store, "MATCH (p:Person {name: 'Eric'}) SET p:Employee");
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(?usize, 0), result.rows_affected);
+    }
+    {
+        var result = try execForTest(store, "MATCH (p:Employee) RETURN p.name");
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 1), result.rows.len);
+        try std.testing.expectEqualStrings("Eric", result.rows[0].values[0].value.string);
+    }
+    {
+        var result = try execForTest(store, "MATCH (p:Person {name: 'Eric'}) REMOVE p:Employee");
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(?usize, 1), result.rows_affected);
+    }
+    {
+        var result = try execForTest(store, "MATCH (p:Person {name: 'Eric'}) REMOVE p:Employee");
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(?usize, 0), result.rows_affected);
+    }
+    {
+        var result = try execForTest(store, "MATCH (p:Employee) RETURN p.name");
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 0), result.rows.len);
+    }
+}
+
+test "set and remove update edge labels" {
+    var tmp = @import("test_helpers.zig").tmp();
+    defer tmp.cleanup();
+    const store = try tmp.store("test.db");
+    defer store.db.close();
+
+    {
+        var result = try execForTest(store,
+            \\INSERT (:Person {name: 'A'})-[:Knows]->(:Person {name: 'B'})
+        );
+        defer result.deinit(std.testing.allocator);
+    }
+    {
+        var result = try execForTest(store,
+            \\MATCH (:Person {name: 'A'})-[e:Knows]->(:Person {name: 'B'})
+            \\SET e:Recent
+        );
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(?usize, 1), result.rows_affected);
+    }
+    {
+        var result = try execForTest(store, "MATCH ()-[e:Recent]->() RETURN COUNT(e)");
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(Value{ .int64 = 1 }, result.rows[0].values[0].value);
+    }
+    {
+        var result = try execForTest(store, "MATCH ()-[e:Recent]->() REMOVE e:Recent");
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(?usize, 1), result.rows_affected);
+    }
+    {
+        var result = try execForTest(store, "MATCH ()-[e:Recent]->() RETURN COUNT(e)");
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(Value{ .int64 = 0 }, result.rows[0].values[0].value);
     }
 }

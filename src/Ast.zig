@@ -80,7 +80,7 @@ pub const Error = struct {
             .expected_statement => try writer.print("expected a statement, found {s}", .{self.found.symbol()}),
             .expected_query_statement => try writer.print("expected a row-producing query, found {s}", .{self.found.symbol()}),
             .expected_read_clause => try writer.print("expected WITH, MATCH, OPTIONAL MATCH, or RETURN, found {s}", .{self.found.symbol()}),
-            .expected_match_action => try writer.print("expected RETURN, INSERT, SET, DELETE, or FINISH after MATCH, found {s}", .{self.found.symbol()}),
+            .expected_match_action => try writer.print("expected RETURN, INSERT, SET, REMOVE, DELETE, or FINISH after MATCH, found {s}", .{self.found.symbol()}),
             .expected_name => try writer.print("expected an identifier, found {s}", .{self.found.symbol()}),
             .expected_expression => try writer.print("expected an expression, found {s}", .{self.found.symbol()}),
             .expected_return_item => try writer.print("expected a RETURN item, found {s}", .{self.found.symbol()}),
@@ -301,6 +301,7 @@ pub const MatchAction = union(enum) {
     insert: []PathPattern,
     delete: DeleteAction,
     set: []SetClause,
+    remove: []RemoveClause,
     finish,
 
     pub fn deinit(self: *MatchAction, allocator: Allocator) void {
@@ -312,6 +313,7 @@ pub const MatchAction = union(enum) {
                 for (sets) |*s| s.deinit(allocator);
                 allocator.free(sets);
             },
+            .remove => |removes| allocator.free(removes),
             .finish => {},
         }
         self.* = undefined;
@@ -347,15 +349,37 @@ pub const DeleteAction = struct {
     variables: []const []const u8,
 };
 
-pub const SetClause = struct {
+pub const SetClause = union(enum) {
+    property: SetPropertyClause,
+    label: LabelClause,
+
+    pub fn deinit(self: *SetClause, allocator: Allocator) void {
+        switch (self.*) {
+            .property => |*property| property.deinit(allocator),
+            .label => {},
+        }
+        self.* = undefined;
+    }
+};
+
+pub const SetPropertyClause = struct {
     variable: []const u8,
     property: []const u8,
     value: Expr,
 
-    pub fn deinit(self: *SetClause, allocator: Allocator) void {
+    pub fn deinit(self: *SetPropertyClause, allocator: Allocator) void {
         self.value.deinit(allocator);
         self.* = undefined;
     }
+};
+
+pub const RemoveClause = union(enum) {
+    label: LabelClause,
+};
+
+pub const LabelClause = struct {
+    variable: []const u8,
+    label: []const u8,
 };
 
 pub const ReturnItem = struct {

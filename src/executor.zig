@@ -36,6 +36,7 @@ const operator_impls = blk: {
         .{ Plan.Operator.optional_join, join_ops.OptionalJoinState, join_ops.OptionalJoinState.deinit, join_ops.runOptionalJoin },
         .{ Plan.Operator.anti, bool, null, simple_ops.runAnti },
         .{ Plan.Operator.project, void, null, simple_ops.runProject },
+        .{ Plan.Operator.project_endpoints, void, null, simple_ops.runProjectEndpoints },
         .{ Plan.Operator.empty_result, void, null, simple_ops.runEmptyResult },
         .{ Plan.Operator.filter, void, null, simple_ops.runFilter },
         .{ Plan.Operator.limit, u64, null, simple_ops.runLimit },

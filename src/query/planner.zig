@@ -149,6 +149,10 @@ fn appendMatchStatementResult(gpa: Allocator, planner: *Planner, mq: Ast.MatchQu
             try appendUpdate(planner, sets);
             break :blk appendMutationResult(planner, .mutations);
         },
+        .remove => |removes| blk: {
+            try appendRemove(planner, removes);
+            break :blk appendMutationResult(planner, .mutations);
+        },
         .delete => |del| blk: {
             try appendDelete(planner, del);
             break :blk appendMutationResult(planner, .mutations);
@@ -339,18 +343,64 @@ fn appendUpdate(planner: *Planner, sets: []const Ast.SetClause) Error!void {
     }
 
     for (sets) |set| {
-        const binding = planner.bindings.get(set.variable) orelse return error.UnknownIdentifier;
-        var key: ?[]u8 = try planner.gpa.dupe(u8, set.property);
-        errdefer if (key) |k| planner.gpa.free(k);
-        var value: ?Plan.Exp = try planExpr(planner, set.value);
-        errdefer if (value) |*v| v.deinit(planner.gpa);
-        try items.append(planner.gpa, .{ .ident = binding.ident, .key = key.?, .value = value.? });
-        key = null;
-        value = null;
+        switch (set) {
+            .property => |property| {
+                const binding = planner.bindings.get(property.variable) orelse return error.UnknownIdentifier;
+                var key: ?[]u8 = try planner.gpa.dupe(u8, property.property);
+                errdefer if (key) |k| planner.gpa.free(k);
+                var value: ?Plan.Exp = try planExpr(planner, property.value);
+                errdefer if (value) |*v| v.deinit(planner.gpa);
+                try items.append(planner.gpa, .{ .property = .{
+                    .ident = binding.ident,
+                    .key = key.?,
+                    .value = value.?,
+                } });
+                key = null;
+                value = null;
+            },
+            .label => |label| try appendLabelUpdate(planner, &items, .add, label),
+        }
     }
 
     try planner.plan.ops.append(planner.gpa, .{ .update = .{ .items = items } });
     items = .empty;
+}
+
+fn appendRemove(planner: *Planner, removes: []const Ast.RemoveClause) Error!void {
+    var items = std.ArrayList(Plan.UpdateClause).empty;
+    errdefer {
+        for (items.items) |*item| item.deinit(planner.gpa);
+        items.deinit(planner.gpa);
+    }
+
+    for (removes) |remove| {
+        switch (remove) {
+            .label => |label| try appendLabelUpdate(planner, &items, .remove, label),
+        }
+    }
+
+    try planner.plan.ops.append(planner.gpa, .{ .update = .{ .items = items } });
+    items = .empty;
+}
+
+const LabelUpdateKind = enum { add, remove };
+
+fn appendLabelUpdate(
+    planner: *Planner,
+    items: *std.ArrayList(Plan.UpdateClause),
+    kind: LabelUpdateKind,
+    label: Ast.LabelClause,
+) Error!void {
+    const binding = planner.bindings.get(label.variable) orelse return error.UnknownIdentifier;
+    if (binding.kind == .scalar) return error.WrongType;
+    var label_copy: ?[]u8 = try planner.gpa.dupe(u8, label.label);
+    errdefer if (label_copy) |l| planner.gpa.free(l);
+    const item: Plan.UpdateClause = switch (kind) {
+        .add => .{ .add_label = .{ .ident = binding.ident, .label = label_copy.? } },
+        .remove => .{ .remove_label = .{ .ident = binding.ident, .label = label_copy.? } },
+    };
+    try items.append(planner.gpa, item);
+    label_copy = null;
 }
 
 fn appendDelete(planner: *Planner, del: Ast.DeleteAction) Error!void {

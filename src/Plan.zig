@@ -104,10 +104,11 @@ pub fn idents(self: Plan) u16 {
                 for (n.groups.items) |ident| identsChk(&ret, .{ident});
                 for (n.items.items) |c| identsChk(&ret, .{c.ident});
             },
+            .project_endpoints => |n| identsChk(&ret, .{ n.ident_src, n.ident_dest }),
             .insert_node => |n| identsChk(&ret, .{n.ident}),
             .insert_edge => |n| identsChk(&ret, .{n.ident}),
             .update => |n| {
-                for (n.items.items) |c| identsChk(&ret, .{c.ident});
+                for (n.items.items) |c| identsChk(&ret, .{c.ident()});
             },
             .delete => |n| {
                 for (n.idents.items) |ident| identsChk(&ret, .{ident});
@@ -170,7 +171,7 @@ pub const Operator = union(enum) {
     optional_join,
     anti,
     project: std.ArrayList(ProjectClause),
-    // project_endpoints: ProjectEndpoints,
+    project_endpoints: ProjectEndpoints,
     empty_result,
     filter: std.ArrayList(FilterClause),
     limit: u64,
@@ -205,6 +206,7 @@ pub const Operator = union(enum) {
                 for (n.items) |*c| c.deinit(allocator);
                 n.deinit(allocator);
             },
+            .project_endpoints => {},
             .empty_result => {},
             .filter => |*n| {
                 for (n.items) |*c| c.deinit(allocator);
@@ -242,6 +244,7 @@ pub const Operator = union(enum) {
             .optional_join => "OptionalJoin",
             .anti => "Anti",
             .project => "Project",
+            .project_endpoints => "ProjectEndpoints",
             .empty_result => "EmptyResult",
             .filter => "Filter",
             .limit => "Limit",
@@ -319,6 +322,9 @@ pub const Operator = union(enum) {
                     try c.exp.print(writer);
                     first = false;
                 }
+            },
+            .project_endpoints => |n| {
+                try writer.print(" %{} -> (%{}, %{})", .{ n.ident_edge, n.ident_src, n.ident_dest });
             },
             .empty_result => {},
             .filter => |n| {
@@ -405,8 +411,18 @@ pub const Operator = union(enum) {
                     } else {
                         try writer.writeAll(", ");
                     }
-                    try writer.print("%{}.{s} = ", .{ c.ident, c.key });
-                    try c.value.print(writer);
+                    switch (c) {
+                        .property => |property| {
+                            try writer.print("%{}.{s} = ", .{ property.ident, property.key });
+                            try property.value.print(writer);
+                        },
+                        .add_label => |label| {
+                            try writer.print("add %{}:{s}", .{ label.ident, label.label });
+                        },
+                        .remove_label => |label| {
+                            try writer.print("remove %{}:{s}", .{ label.ident, label.label });
+                        },
+                    }
                     first = false;
                 }
             },
@@ -471,6 +487,7 @@ pub const Operator = union(enum) {
             .project => |n| {
                 for (n.items) |c| try defined.append(allocator, c.ident);
             },
+            .project_endpoints => |n| try defined.appendSlice(allocator, &.{ n.ident_src, n.ident_dest }),
             .aggregate => |n| {
                 for (n.items.items) |c| try defined.append(allocator, c.ident);
             },
@@ -545,6 +562,12 @@ pub const Scan = struct {
 pub const LookupId = struct {
     ident_ref: u16, // Name of the bound entity reference (output).
     ident_id: u16, // Name of the ID to look up (input).
+};
+
+pub const ProjectEndpoints = struct {
+    ident_edge: u16,
+    ident_src: u16,
+    ident_dest: u16,
 };
 
 pub const Step = struct {
@@ -740,16 +763,42 @@ pub const Update = struct {
     }
 };
 
-pub const UpdateClause = struct {
+pub const UpdateClause = union(enum) {
+    property: UpdateProperty,
+    add_label: UpdateLabel,
+    remove_label: UpdateLabel,
+
+    pub fn ident(self: UpdateClause) u16 {
+        return switch (self) {
+            .property => |property| property.ident,
+            .add_label, .remove_label => |label| label.ident,
+        };
+    }
+
+    pub fn deinit(self: *UpdateClause, allocator: Allocator) void {
+        switch (self.*) {
+            .property => |*property| property.deinit(allocator),
+            .add_label, .remove_label => |label| allocator.free(label.label),
+        }
+        self.* = undefined;
+    }
+};
+
+pub const UpdateProperty = struct {
     ident: u16,
     key: []u8,
     value: Exp,
 
-    pub fn deinit(self: *UpdateClause, allocator: Allocator) void {
+    pub fn deinit(self: *UpdateProperty, allocator: Allocator) void {
         allocator.free(self.key);
         self.value.deinit(allocator);
         self.* = undefined;
     }
+};
+
+pub const UpdateLabel = struct {
+    ident: u16,
+    label: []u8,
 };
 
 pub const Delete = struct {
@@ -979,6 +1028,28 @@ test "can print step between plan" {
         \\  StepBetween (%0)-[%2:Knows]->(%1)
         \\  NodeScan (%1)
         \\  NodeScan (%0)
+    ));
+
+    try std.testing.expectEqual(3, plan.idents());
+}
+
+test "can print project endpoints plan" {
+    const allocator = std.testing.allocator;
+    var plan = Plan{};
+    defer plan.deinit(allocator);
+
+    try plan.results.appendSlice(allocator, &[_]u16{ 1, 2 });
+    try plan.ops.append(allocator, .{ .edge_scan = .{ .ident = 0, .label = null } });
+    try plan.ops.append(allocator, .{ .project_endpoints = .{
+        .ident_edge = 0,
+        .ident_src = 1,
+        .ident_dest = 2,
+    } });
+
+    try checkPlanSnapshot(plan, snap(@src(),
+        \\Plan{%1, %2}
+        \\  ProjectEndpoints %0 -> (%1, %2)
+        \\  EdgeScan -[%0]-
     ));
 
     try std.testing.expectEqual(3, plan.idents());
