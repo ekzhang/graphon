@@ -98,6 +98,7 @@ These features are explicitly _not_ supported right now:
 - Having multiple directories and schemas in one database
 - Having multiple graphs in one database
 - Typed graphs, nodes, and edges (i.e., closed type schemas)
+- Indices for making queries faster
 - Named procedures
 - The datetime data type and storing time zones
 - Identifiers (variable names) using non-ASCII characters
