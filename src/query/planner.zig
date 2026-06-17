@@ -453,9 +453,13 @@ fn appendPatternPredicate(planner: *Planner, pattern: Ast.PathPattern, negate: b
 
 fn appendMatchPatterns(planner: *Planner, patterns: []Ast.PathPattern) Error!void {
     for (patterns, 0..) |pattern, i| {
-        if (i > 0) try planner.plan.ops.append(planner.gpa, .begin);
+        if (i > 0 and try pathPatternAnchor(planner, pattern) == null) {
+            try planner.plan.ops.append(planner.gpa, .begin);
+            try appendPathPattern(planner, pattern);
+            try planner.plan.ops.append(planner.gpa, .join);
+            continue;
+        }
         try appendPathPattern(planner, pattern);
-        if (i > 0) try planner.plan.ops.append(planner.gpa, .join);
     }
 }
 

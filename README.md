@@ -1,6 +1,6 @@
 # Graphon
 
-A very small graph database.
+A very small graph database in Zig.
 
 ```gql
 MATCH (db:Database {name: 'graphon'})<-[:Wrote]-(p:Person)
@@ -133,7 +133,7 @@ Query plans are constructed out of the following operations. The design here was
 - `Begin`: Marker node for the start of the right subtree of a repeat or join operator.
 - `Argument`: Marks a variable for the node or edge being repeated in a path.
 - `Repeat`: Repeat the sub-pattern, used for trail and path queries.
-- `ShortestPath`: Finds the shortest path(s) between two nodes.
+- `ShortestPath`: Finds the shortest path(s) between two nodes. **(TODO)**
 - `Join`: Take rows from the left subquery, execute the tree on the right subquery, and return both.
 - `SemiJoin`: Return rows from the left subquery where the right subquery is not null.
 - `OptionalJoin`: Left outer join, returns null when the right subquery does not match.
@@ -155,4 +155,86 @@ Query plans are constructed out of the following operations. The design here was
 - `Aggregate`: Compute aggregations, grouping by one or more columns.
 - `OrderedAggregate`: Compute aggregations when input rows are already ordered by group key.
 
-There needs to be particular attention paid to graph algorithms to implement certain kinds of path queries efficiently, especially those that traverse paths or trails. We'll add new types of backend operations as Graphon's query language increases in expressivity.
+You need to pay attention to specific graph algorithms to implement certain kinds of path queries efficiently, especially those that traverse paths or trails. We'll add new types of backend operations as Graphon's query language gets more expressive.
+
+### Query plan examples
+
+Query plans are printed from the final operator back toward the source operators. `Plan{...}` lists the identifiers returned to the client; mutation plans use `Plan{}` because they return a mutation count instead of row values.
+
+Filtered reads lower into scans, filters, projections, and `Top` when `ORDER BY` and `LIMIT` can be combined.
+
+```gql
+MATCH (p:Person)
+WHERE p.age > 30
+RETURN p.name
+ORDER BY p.age DESC
+LIMIT 2
+```
+
+```text
+Plan{%1}
+  Top 2 %2 desc
+  Project %2: %0.age
+  Project %1: %0.name
+  Filter (%0.age > 30)
+  NodeScan (%0:Person)
+```
+
+When both endpoints are bound, edge patterns lower to `StepBetween`.
+
+```gql
+MATCH (a:Person), (b:Person), (a)-[e:Knows]->(b)
+RETURN a, b, e
+```
+
+```text
+Plan{%0, %1, %2}
+  StepBetween (%0)-[%2:Knows]->(%1)
+  Join
+    NodeScan (%1:Person)
+  Begin
+  NodeScan (%0:Person)
+```
+
+Aggregation uses `Aggregate` generally, and `OrderedAggregate` when the input is already ordered by the group key.
+
+```gql
+MATCH (p:Person)
+WITH p.team AS team ORDER BY team
+RETURN team, COUNT(*) AS people
+```
+
+```text
+Plan{%1, %2}
+  OrderedAggregate %2: count(*) BY %1
+  Sort %1 asc
+  Project %1: %0.team
+  NodeScan (%0:Person)
+```
+
+Updates reuse the read side of the plan and then apply an `Update` operator.
+
+```gql
+MATCH (p:Person {name: 'Eric'})
+SET p.age = 23
+```
+
+```text
+Plan{}
+  Update %0.age = 23
+  Filter (%0.name = 'Eric')
+  NodeScan (%0:Person)
+```
+
+Label updates use the same operator with label-specific update clauses.
+
+```gql
+MATCH (p:Person)
+SET p:Employee
+```
+
+```text
+Plan{}
+  Update add %0:Employee
+  NodeScan (%0:Person)
+```

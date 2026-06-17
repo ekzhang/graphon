@@ -134,9 +134,7 @@ test "compile repeated node path with edge filters query plan snapshot" {
 test "compile bound endpoint path query plan snapshot" {
     try checkQueryPlanSnapshot("MATCH (a:Person), (b:Person), (a)-[e:Knows]->(b) RETURN a, b, e", snap(@src(),
         \\Plan{%0, %1, %2}
-        \\  Join
-        \\    StepBetween (%0)-[%2:Knows]->(%1)
-        \\  Begin
+        \\  StepBetween (%0)-[%2:Knows]->(%1)
         \\  Join
         \\    NodeScan (%1:Person)
         \\  Begin
@@ -191,10 +189,8 @@ test "compile quantified edge chain query plan snapshot" {
 test "compile right-bound path query plan snapshot" {
     try checkQueryPlanSnapshot("MATCH (b:Person), (a:Person)-[:Knows]->(b) RETURN a, b", snap(@src(),
         \\Plan{%1, %0}
-        \\  Join
-        \\    Filter %1: Person
-        \\    Step (%0)<-[:Knows]-(%1)
-        \\  Begin
+        \\  Filter %1: Person
+        \\  Step (%0)<-[:Knows]-(%1)
         \\  NodeScan (%0:Person)
     ));
 }
@@ -226,10 +222,8 @@ test "compile negative path predicate query plan snapshot" {
         \\    Anti
         \\    StepBetween (%0)-[:FRIENDS_WITH]->(%2)
         \\  Begin
-        \\  Join
-        \\    Filter %2: Person
-        \\    Step (%1)<-[:WORKS_IN]-(%2)
-        \\  Begin
+        \\  Filter %2: Person
+        \\  Step (%1)<-[:WORKS_IN]-(%2)
         \\  Step (%0)-[:WORKS_IN]->(%1)
         \\  Filter (%0.name = 'me')
         \\  NodeScan (%0:Person)
@@ -240,12 +234,10 @@ test "compile middle-bound path query plan snapshot" {
     try checkQueryPlanSnapshot("MATCH (location:Place), (left:Person)-[:LIVES_IN]->(location)<-[:WORKS_IN]-(right:Person) RETURN left.name, right.name", snap(@src(),
         \\Plan{%3, %4}
         \\  Project %3: %1.name, %4: %2.name
-        \\  Join
-        \\    Filter %2: Person
-        \\    Step (%0)<-[:WORKS_IN]-(%2)
-        \\    Filter %1: Person
-        \\    Step (%0)<-[:LIVES_IN]-(%1)
-        \\  Begin
+        \\  Filter %2: Person
+        \\  Step (%0)<-[:WORKS_IN]-(%2)
+        \\  Filter %1: Person
+        \\  Step (%0)<-[:LIVES_IN]-(%1)
         \\  NodeScan (%0:Place)
     ));
 }
