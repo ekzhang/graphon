@@ -51,13 +51,24 @@ pub const AggregateState = struct {
     }
 };
 
+pub const OrderedAggregateState = struct {
+    current: ?AggregateRow = null,
+    pending: ?[]Value = null,
+    done: bool = false,
+
+    pub fn deinit(self: *OrderedAggregateState, allocator: Allocator) void {
+        if (self.current) |*row| row.deinit(allocator);
+        if (self.pending) |pending| freeAssignments(allocator, pending);
+        self.* = undefined;
+    }
+};
+
 const AggregateRow = struct {
     assignments: []Value,
     states: []AggregateItemState,
 
     fn deinit(self: *AggregateRow, allocator: Allocator) void {
-        for (self.assignments) |*value| value.deinit(allocator);
-        allocator.free(self.assignments);
+        freeAssignments(allocator, self.assignments);
         for (self.states) |*state| state.deinit(allocator);
         allocator.free(self.states);
         self.* = undefined;
@@ -103,6 +114,38 @@ pub fn runAggregate(op: Plan.Aggregate, state: *AggregateState, exec: *executor.
     return true;
 }
 
+pub fn runOrderedAggregate(op: Plan.Aggregate, state: *OrderedAggregateState, exec: *executor.Executor, op_index: u32) !bool {
+    if (state.done) return false;
+
+    if (state.pending) |pending| {
+        state.pending = null;
+        moveAssignments(exec.txn.allocator, exec.assignments, pending);
+        try startOrderedAggregateGroup(op, state, exec);
+    } else if (state.current == null) {
+        if (!try exec.next(op_index)) {
+            state.done = true;
+            if (op.groups.items.len > 0) return false;
+            state.current = try initAggregateRow(op, exec.txn.allocator, exec.assignments);
+            return emitOrderedAggregateRow(op, state, exec);
+        }
+        try startOrderedAggregateGroup(op, state, exec);
+    }
+
+    while (try exec.next(op_index)) {
+        if (state.current) |*row| {
+            if (distinctRowEqual(op.groups.items, row.assignments, exec.assignments)) {
+                try applyAggregates(op, row, exec);
+                continue;
+            }
+        }
+        state.pending = try cloneAssignments(exec.txn.allocator, exec.assignments);
+        return emitOrderedAggregateRow(op, state, exec);
+    }
+
+    state.done = true;
+    return emitOrderedAggregateRow(op, state, exec);
+}
+
 fn aggregateRow(op: Plan.Aggregate, state: *AggregateState, exec: *executor.Executor) !*AggregateRow {
     for (state.rows.items) |*row| {
         if (distinctRowEqual(op.groups.items, row.assignments, exec.assignments)) return row;
@@ -111,19 +154,43 @@ fn aggregateRow(op: Plan.Aggregate, state: *AggregateState, exec: *executor.Exec
 }
 
 fn appendAggregateRow(op: Plan.Aggregate, state: *AggregateState, exec: *executor.Executor) !*AggregateRow {
-    const assignments = try cloneAssignments(exec.txn.allocator, exec.assignments);
-    errdefer {
-        for (assignments) |*value| value.deinit(exec.txn.allocator);
-        exec.txn.allocator.free(assignments);
-    }
-
-    const states = try exec.txn.allocator.alloc(AggregateItemState, op.items.items.len);
-    errdefer exec.txn.allocator.free(states);
-    for (states) |*item_state| item_state.* = .{};
-    errdefer for (states) |*item_state| item_state.deinit(exec.txn.allocator);
-
-    try state.rows.append(exec.txn.allocator, .{ .assignments = assignments, .states = states });
+    var row = try initAggregateRow(op, exec.txn.allocator, exec.assignments);
+    errdefer row.deinit(exec.txn.allocator);
+    try state.rows.append(exec.txn.allocator, row);
     return &state.rows.items[state.rows.items.len - 1];
+}
+
+fn initAggregateRow(op: Plan.Aggregate, allocator: Allocator, assignments: []const Value) !AggregateRow {
+    const cloned_assignments = try cloneAssignments(allocator, assignments);
+    errdefer freeAssignments(allocator, cloned_assignments);
+
+    const states = try allocator.alloc(AggregateItemState, op.items.items.len);
+    errdefer allocator.free(states);
+    for (states) |*item_state| item_state.* = .{};
+    errdefer for (states) |*item_state| item_state.deinit(allocator);
+
+    return .{ .assignments = cloned_assignments, .states = states };
+}
+
+fn startOrderedAggregateGroup(op: Plan.Aggregate, state: *OrderedAggregateState, exec: *executor.Executor) !void {
+    std.debug.assert(state.current == null);
+    state.current = try initAggregateRow(op, exec.txn.allocator, exec.assignments);
+    if (state.current) |*row| try applyAggregates(op, row, exec);
+}
+
+fn emitOrderedAggregateRow(op: Plan.Aggregate, state: *OrderedAggregateState, exec: *executor.Executor) !bool {
+    var row = state.current orelse return false;
+    state.current = null;
+    errdefer row.deinit(exec.txn.allocator);
+
+    try finalizeAggregates(op, &row, exec.txn.allocator);
+    for (exec.assignments, row.assignments) |*dest, source| {
+        dest.deinit(exec.txn.allocator);
+        dest.* = .null;
+        dest.* = try source.dupe(exec.txn.allocator);
+    }
+    row.deinit(exec.txn.allocator);
+    return true;
 }
 
 fn applyAggregates(op: Plan.Aggregate, row: *AggregateRow, exec: *executor.Executor) !void {
@@ -321,6 +388,21 @@ fn cloneAssignments(allocator: Allocator, assignments: []const Value) Allocator.
         out[i] = try value.dupe(allocator);
     }
     return out;
+}
+
+fn freeAssignments(allocator: Allocator, assignments: []Value) void {
+    for (assignments) |*value| value.deinit(allocator);
+    allocator.free(assignments);
+}
+
+fn moveAssignments(allocator: Allocator, dest: []Value, source: []Value) void {
+    std.debug.assert(dest.len == source.len);
+    for (dest, source) |*dest_value, *source_value| {
+        dest_value.deinit(allocator);
+        dest_value.* = source_value.*;
+        source_value.* = .null;
+    }
+    allocator.free(source);
 }
 
 fn distinctRowEqual(idents: []const u16, left: []const Value, right: []const Value) bool {

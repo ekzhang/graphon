@@ -264,7 +264,7 @@ test "compile edge path predicate query plan snapshot" {
 test "compile edge-only match query plan snapshot" {
     try checkQueryPlanSnapshot("MATCH -[]- RETURN COUNT(*)", snap(@src(),
         \\Plan{%2}
-        \\  Aggregate %2: count(*)
+        \\  OrderedAggregate %2: count(*)
         \\  Step (%0)-[]-(%1)
         \\  NodeScan (%0)
     ));
@@ -360,7 +360,17 @@ test "compile aggregate expression query plan snapshot" {
     try checkQueryPlanSnapshot("MATCH (p:Person) RETURN COUNT(p) + 1 AS adjusted", snap(@src(),
         \\Plan{%2}
         \\  Project %2: (%1 + 1)
-        \\  Aggregate %1: count(%0)
+        \\  OrderedAggregate %1: count(%0)
+        \\  NodeScan (%0:Person)
+    ));
+}
+
+test "compile ordered aggregate after sorted with query plan snapshot" {
+    try checkQueryPlanSnapshot("MATCH (p:Person) WITH p.team AS team ORDER BY team RETURN team, COUNT(*) AS people", snap(@src(),
+        \\Plan{%1, %2}
+        \\  OrderedAggregate %2: count(*) BY %1
+        \\  Sort %1 asc
+        \\  Project %1: %0.team
         \\  NodeScan (%0:Person)
     ));
 }
@@ -1235,6 +1245,35 @@ test "return numeric aggregates by group" {
         try std.testing.expectEqual(Value{ .float64 = 7.0 }, result.rows[1].values[4].value);
         try std.testing.expectEqualStrings("Bert", result.rows[1].values[5].value.string);
         try std.testing.expectEqual(Value{ .int64 = 7 }, result.rows[1].values[6].value);
+    }
+}
+
+test "ordered aggregate groups sorted with input" {
+    var tmp = @import("test_helpers.zig").tmp();
+    defer tmp.cleanup();
+    const store = try tmp.store("test.db");
+    defer store.db.close();
+
+    {
+        var result = try execForTest(store,
+            \\INSERT (:Person {team: 'B'}),
+            \\       (:Person {team: 'A'}),
+            \\       (:Person {team: 'A'})
+        );
+        defer result.deinit(std.testing.allocator);
+    }
+    {
+        var result = try execForTest(store,
+            \\MATCH (p:Person)
+            \\WITH p.team AS team ORDER BY team
+            \\RETURN team, COUNT(*) AS people
+        );
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 2), result.rows.len);
+        try std.testing.expectEqualStrings("A", result.rows[0].values[0].value.string);
+        try std.testing.expectEqual(Value{ .int64 = 2 }, result.rows[0].values[1].value);
+        try std.testing.expectEqualStrings("B", result.rows[1].values[0].value.string);
+        try std.testing.expectEqual(Value{ .int64 = 1 }, result.rows[1].values[1].value);
     }
 }
 

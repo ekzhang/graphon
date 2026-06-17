@@ -646,7 +646,10 @@ fn appendAggregateProjection(planner: *Planner, ret: Ast.ReturnClause) Error!voi
     } else {
         before_project.deinit(planner.gpa);
     }
-    try planner.plan.ops.append(planner.gpa, .{ .aggregate = aggregate });
+    try planner.plan.ops.append(planner.gpa, if (canUseOrderedAggregate(planner, aggregate))
+        .{ .ordered_aggregate = aggregate }
+    else
+        .{ .aggregate = aggregate });
     aggregate = .{};
     if (after_project.items.len > 0) {
         try planner.plan.ops.append(planner.gpa, .{ .project = after_project });
@@ -667,6 +670,33 @@ fn appendGroupKey(planner: *Planner, project: *std.ArrayList(Plan.ProjectClause)
     try project.append(planner.gpa, .{ .ident = ident, .exp = exp });
     exp = .{ .ident = 0 };
     return ident;
+}
+
+const SortClauses = std.MultiArrayList(Plan.SortClause).Slice;
+
+fn canUseOrderedAggregate(planner: *Planner, aggregate: Plan.Aggregate) bool {
+    if (aggregate.groups.items.len == 0) return true;
+    if (planner.plan.ops.items.len == 0) return false;
+    return switch (planner.plan.ops.getLast()) {
+        .sort => |sort| sortPrefixContainsGroups(sort.slice(), aggregate.groups.items),
+        .top => |top| sortPrefixContainsGroups(top.clauses.slice(), aggregate.groups.items),
+        else => false,
+    };
+}
+
+fn sortPrefixContainsGroups(clauses: SortClauses, groups: []const u16) bool {
+    if (clauses.len < groups.len) return false;
+    for (groups) |group| {
+        var found = false;
+        for (0..groups.len) |i| {
+            if (clauses.get(i).ident == group) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) return false;
+    }
+    return true;
 }
 
 fn planAggregateExpr(planner: *Planner, expr: Ast.Expr, aggregate: *Plan.Aggregate) Error!Plan.Exp {

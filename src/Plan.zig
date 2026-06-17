@@ -100,7 +100,7 @@ pub fn idents(self: Plan) u16 {
             .project => |n| {
                 for (n.items) |c| identsChk(&ret, .{c.ident});
             },
-            .aggregate => |n| {
+            .aggregate, .ordered_aggregate => |n| {
                 for (n.groups.items) |ident| identsChk(&ret, .{ident});
                 for (n.items.items) |c| identsChk(&ret, .{c.ident});
             },
@@ -185,7 +185,7 @@ pub const Operator = union(enum) {
     insert_edge: InsertEdge,
     delete: Delete,
     aggregate: Aggregate,
-    // ordered_aggregate,
+    ordered_aggregate: Aggregate,
 
     pub fn deinit(self: *Operator, allocator: Allocator) void {
         switch (self.*) {
@@ -218,6 +218,7 @@ pub const Operator = union(enum) {
             .sort => |*n| n.deinit(allocator),
             .top => |*n| n.deinit(allocator),
             .aggregate => |*n| n.deinit(allocator),
+            .ordered_aggregate => |*n| n.deinit(allocator),
             .union_all => {},
             .update => |*n| n.deinit(allocator),
             .insert_node => |*n| n.deinit(allocator),
@@ -253,6 +254,7 @@ pub const Operator = union(enum) {
             .sort => "Sort",
             .top => "Top",
             .aggregate => "Aggregate",
+            .ordered_aggregate => "OrderedAggregate",
             .union_all => "UnionAll",
             .update => "Update",
             .insert_node => "InsertNode",
@@ -381,26 +383,10 @@ pub const Operator = union(enum) {
                 }
             },
             .aggregate => |n| {
-                var first = true;
-                for (n.items.items) |c| {
-                    if (first) {
-                        try writer.writeByte(' ');
-                    } else {
-                        try writer.writeAll(", ");
-                    }
-                    try writer.print("%{}: {s}(", .{ c.ident, c.function.string() });
-                    if (c.distinct) try writer.writeAll("distinct ");
-                    if (c.argument) |argument| try argument.print(writer) else try writer.writeByte('*');
-                    try writer.writeByte(')');
-                    first = false;
-                }
-                if (n.groups.items.len > 0) {
-                    try writer.writeAll(" BY ");
-                    for (n.groups.items, 0..) |ident, i| {
-                        if (i > 0) try writer.writeAll(", ");
-                        try writer.print("%{}", .{ident});
-                    }
-                }
+                try printAggregate(writer, n);
+            },
+            .ordered_aggregate => |n| {
+                try printAggregate(writer, n);
             },
             .union_all => {},
             .update => |n| {
@@ -491,6 +477,9 @@ pub const Operator = union(enum) {
             .aggregate => |n| {
                 for (n.items.items) |c| try defined.append(allocator, c.ident);
             },
+            .ordered_aggregate => |n| {
+                for (n.items.items) |c| try defined.append(allocator, c.ident);
+            },
             .insert_node => |n| if (n.ident) |ident| try defined.append(allocator, ident),
             .insert_edge => |n| if (n.ident) |ident| try defined.append(allocator, ident),
             else => {},
@@ -530,6 +519,29 @@ fn printLabels(writer: anytype, labels: [][]u8) !void {
         }
         try writer.writeAll(l);
         first = false;
+    }
+}
+
+fn printAggregate(writer: anytype, aggregate: Aggregate) !void {
+    var first = true;
+    for (aggregate.items.items) |c| {
+        if (first) {
+            try writer.writeByte(' ');
+        } else {
+            try writer.writeAll(", ");
+        }
+        try writer.print("%{}: {s}(", .{ c.ident, c.function.string() });
+        if (c.distinct) try writer.writeAll("distinct ");
+        if (c.argument) |argument| try argument.print(writer) else try writer.writeByte('*');
+        try writer.writeByte(')');
+        first = false;
+    }
+    if (aggregate.groups.items.len > 0) {
+        try writer.writeAll(" BY ");
+        for (aggregate.groups.items, 0..) |ident, i| {
+            if (i > 0) try writer.writeAll(", ");
+            try writer.print("%{}", .{ident});
+        }
     }
 }
 
@@ -1053,6 +1065,34 @@ test "can print project endpoints plan" {
     ));
 
     try std.testing.expectEqual(3, plan.idents());
+}
+
+test "can print ordered aggregate plan" {
+    const allocator = std.testing.allocator;
+    var plan = Plan{};
+    defer plan.deinit(allocator);
+
+    var aggregate = Aggregate{};
+    errdefer aggregate.deinit(allocator);
+    try aggregate.groups.append(allocator, 0);
+    try aggregate.items.append(allocator, .{
+        .ident = 1,
+        .function = .count,
+        .argument = null,
+    });
+
+    try plan.results.appendSlice(allocator, &[_]u16{ 0, 1 });
+    try plan.ops.append(allocator, .{ .node_scan = .{ .ident = 0, .label = null } });
+    try plan.ops.append(allocator, .{ .ordered_aggregate = aggregate });
+    aggregate = .{};
+
+    try checkPlanSnapshot(plan, snap(@src(),
+        \\Plan{%0, %1}
+        \\  OrderedAggregate %1: count(*) BY %0
+        \\  NodeScan (%0)
+    ));
+
+    try std.testing.expectEqual(2, plan.idents());
 }
 
 test "subquery begin searches backward from join" {

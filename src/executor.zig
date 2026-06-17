@@ -45,6 +45,7 @@ const operator_impls = blk: {
         .{ Plan.Operator.sort, agg_ops.SortState, agg_ops.SortState.deinit, agg_ops.runSort },
         .{ Plan.Operator.top, agg_ops.TopState, agg_ops.TopState.deinit, agg_ops.runTop },
         .{ Plan.Operator.aggregate, agg_ops.AggregateState, agg_ops.AggregateState.deinit, agg_ops.runAggregate },
+        .{ Plan.Operator.ordered_aggregate, agg_ops.OrderedAggregateState, agg_ops.OrderedAggregateState.deinit, agg_ops.runOrderedAggregate },
         .{ Plan.Operator.union_all, bool, null, join_ops.runUnionAll },
         .{ Plan.Operator.update, void, null, modify_ops.runUpdate },
         .{ Plan.Operator.insert_node, void, null, modify_ops.runInsertNode },
