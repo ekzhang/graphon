@@ -103,13 +103,11 @@ These features are explicitly _not_ supported right now:
 - The datetime data type and storing time zones
 - Identifiers (variable names) using non-ASCII characters
 
-You could consider using Graphon when you want something small and low-overhead, yet still powerful.
-
 ## Limitations
 
-Graphon is a very small project. It tries to be fast where possible, but the query planner is not going to be very advanced. It won't perfectly optimize every query out there.
+Graphon is a very small project. It tries to be fast where possible, but the query planner is not going to be very advanced. There's basically no optimizations right now.
 
-I made this database primarily out of personal interest, to experiment with algorithms, and to learn what goes into a modern database. There will be bugs. Also, the on-disk format is unstable. **Do not use Graphon as a store for production data.**
+I made this database primarily out of personal interest (toy project!), to experiment with algorithms, and to learn what goes into a modern database. There will be bugs. Also, the on-disk format is unstable. **Do not use Graphon as a store for production data.**
 
 ## Architecture
 
